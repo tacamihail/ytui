@@ -2,3 +2,8 @@
 /bin
 *.zip
 .DS_Store
+
+# local credentials / config, never commit these
+cookies.txt
+account.json
+config.json

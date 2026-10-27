@@ -397,6 +397,8 @@ impl App {
                         if dbl {
                             self.last_click = None;
                             self.activate();
+                        } else {
+                            self.set_toast("double-click (or enter) to play", false);
                         }
                     }
                 }

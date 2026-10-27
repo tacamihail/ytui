@@ -406,10 +406,11 @@ fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
     let inner = b.inner(r);
     f.render_widget(b, r);
 
-    let rows: [(&str, &str); 23] = [
+    let rows: [(&str, &str); 24] = [
         ("— navigation —", ""),
         ("1-6 / Tab / Shift+Tab", "switch tabs"),
         ("↑↓ / j k / wheel", "move selection"),
+        ("click tab", "switch to that tab"),
         ("click / double-click", "select / play item"),
         ("enter", "play the whole list from here"),
         ("a", "append selection to queue"),

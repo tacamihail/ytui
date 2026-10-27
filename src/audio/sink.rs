@@ -24,6 +24,18 @@ pub struct Sink {
     _stream: cpal::Stream,
 }
 
+/// Size of the ring buffer in interleaved f32 samples.
+///
+/// The engine only refills the sink while it holds less than `buffer_ms` of
+/// audio, then pushes whole decoded packets (up to ~2.3k frames each). The
+/// capacity therefore has to be strictly larger than the refill threshold,
+/// otherwise every top-up would overflow and silently throw the tail of the
+/// packet away — which makes the music skip and run faster than real time.
+/// Give it a full extra second of headroom.
+fn ring_capacity(buffer_ms: u32) -> usize {
+    ((OUT_RATE as usize * 2 * (buffer_ms.max(200) as usize + 1000)) / 1000).max(8192)
+}
+
 impl Sink {
     pub fn new(buffer_ms: u32) -> Result<Self, String> {
         let host = cpal::default_host();
@@ -37,7 +49,7 @@ impl Sink {
             buffer_size: cpal::BufferSize::Default,
         };
 
-        let capacity = ((OUT_RATE as usize * 2 * buffer_ms.max(200) as usize) / 1000).max(4096);
+        let capacity = ring_capacity(buffer_ms);
         let buf = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(capacity)));
         let played = Arc::new(AtomicU64::new(0));
         let paused = Arc::new(AtomicBool::new(false));
@@ -153,5 +165,24 @@ impl Sink {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the "plays fast and skips" bug: the ring must be
+    /// able to hold the refill threshold plus a whole decoded packet.
+    #[test]
+    fn ring_has_headroom_over_refill_threshold() {
+        for buffer_ms in [200u32, 500, 1000, 2000, 5000] {
+            let target = (OUT_RATE as usize * buffer_ms as usize / 1000).max(4096);
+            let capacity = ring_capacity(buffer_ms) / 2;
+            assert!(
+                capacity > target + OUT_RATE as usize / 10,
+                "buffer_ms={buffer_ms}: capacity {capacity} too close to target {target}"
+            );
+        }
     }
 }

@@ -44,7 +44,9 @@ decoder, and pulling in a second codec would cost more RAM than it is worth.
 
 Requirements: a Rust toolchain, `yt-dlp`, **deno** (yt-dlp uses it to solve
 YouTube's JS challenges) and ALSA development headers to build
-(`libasound2-dev` on Debian/Ubuntu, `alsa-lib` on Arch).
+(`libasound2-dev` on Debian/Ubuntu, `alsa-lib` on Arch). At runtime it needs
+`libasound2`; on WSL it also needs `libasound2-plugins` (the ALSA→PulseAudio
+bridge).
 
 ```bash
 git clone git@github.com:<you>/ytui.git && cd ytui
@@ -52,9 +54,10 @@ git clone git@github.com:<you>/ytui.git && cd ytui
 ```
 
 `install.sh` detects your package manager, installs a current `yt-dlp` and
-`deno` into `~/.local/bin` / `~/.deno/bin`, installs the ALSA headers, builds
-with `cargo build --release`, installs `~/.local/bin/ytui` (a small launcher
-over `ytui.bin`) and seeds `~/.config/ytui/config.json`.
+`deno` into `~/.local/bin` / `~/.deno/bin`, installs the ALSA headers (and
+`libasound2` / `libasound2-plugins` when they are missing), builds with
+`cargo build --release`, installs `~/.local/bin/ytui` (a small launcher over
+`ytui.bin`) and seeds `~/.config/ytui/config.json`.
 
 Manual build:
 
@@ -65,8 +68,9 @@ install -Dm755 target/release/ytui ~/.local/bin/ytui
 
 ### WSL
 
-WSL2 has no sound card, only a PulseAudio socket (`$PULSE_SERVER`). Install the
-ALSA→PulseAudio plugin so `cpal` can open the default device:
+WSL2 has no sound card, only a PulseAudio socket (`$PULSE_SERVER`). `install.sh`
+installs the ALSA→PulseAudio plugin automatically on Debian/Ubuntu; if you set
+things up by hand, run:
 
 ```bash
 sudo apt-get install -y libasound2-plugins
@@ -134,7 +138,8 @@ Without cookies the player still works: search and playback are public.
 | `1`–`6`, `Tab` / `Shift+Tab` | switch tabs |
 | `↑↓` / `j k` / wheel | move selection |
 | `PageUp` `PageDown` `g` `G` | jump |
-| click / double-click | select / play |
+| click a tab | switch to that tab |
+| click / double-click a row | select / play |
 | `/` | search box — accepts a query, a video URL or a playlist URL |
 | `Enter` | play the whole list from the selected row |
 | `a` | append selection to the queue |
@@ -198,6 +203,14 @@ Without cookies the player still works: search and playback are public.
   `ytui doctor` checks both.
 - **Subscriptions empty** — the feed is HTML-parsed, so it needs fresh cookies
   and a `youtube.com` (not just `music.youtube.com`) sign-in.
+- **Mouse clicks do nothing** — ytui enables mouse reporting itself, but the
+  terminal has to forward the events. Windows Terminal and most Linux terminals
+  do; inside **tmux** add `set -g mouse on` and restart ytui. Clicking a row
+  selects it; double-click (or `Enter`) plays.
+- **A track sounds muffled** — it only had 48 kbps HE-AAC (`itag 139`).
+  `symphonia` decodes its AAC core but not the SBR high band, so it plays at the
+  right speed with duller highs. ytui prefers AAC-LC 256/128 kbps when YouTube
+  offers it.
 
 ## Uninstall
 

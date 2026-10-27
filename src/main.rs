@@ -143,7 +143,7 @@ fn doctor() -> i32 {
         "· buffer {} ms · range cache {} KiB · ~{} KiB audio RAM",
         cfg.buffer_ms,
         cfg.cache_kib,
-        cfg.buffer_ms as u64 * 48 * 2 * 4 / 1000 + cfg.cache_kib
+        (cfg.buffer_ms as u64 + 1000) * 48 * 2 * 4 / 1000 + cfg.cache_kib
     );
 
     if healthy {

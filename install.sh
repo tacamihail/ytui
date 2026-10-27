@@ -104,6 +104,31 @@ else
   rm -rf "$tmp"
 fi
 
+# --- runtime audio deps ------------------------------------------------------
+# cpal needs the ALSA runtime; on WSL the PulseAudio plugin is what actually
+# makes sound (there is no sound card, only $PULSE_SERVER).
+if [[ "$PM" == apt ]]; then
+  rt=()
+  for p in "${RUNTIME_DEPS[@]}"; do
+    dpkg -s "$p" >/dev/null 2>&1 || rt+=("$p")
+  done
+  if grep -qi microsoft /proc/version 2>/dev/null; then
+    dpkg -s libasound2-plugins >/dev/null 2>&1 || rt+=(libasound2-plugins)
+  fi
+  if ((${#rt[@]})); then
+    info "installing audio runtime: ${rt[*]}"
+    if pm_install "${rt[@]}"; then
+      ok "audio runtime installed"
+    else
+      warn "could not install ${rt[*]}"
+      warn "on WSL run: sudo apt-get install -y libasound2-plugins"
+      warn "or extract it under ~/.local/alsa (the launcher finds it there)"
+    fi
+  else
+    ok "audio runtime present"
+  fi
+fi
+
 # --- build dependencies ------------------------------------------------------
 if [[ "$PM" != unknown ]]; then
   missing=()
@@ -196,10 +221,10 @@ add_path_line() {
 add_path_line "$HOME/.local/bin" || ok "~/.local/bin already in PATH"
 add_path_line "$HOME/.deno/bin" || ok "~/.deno/bin already in PATH"
 
-# --- WSL audio hint ----------------------------------------------------------
+# --- WSL audio note ----------------------------------------------------------
 if grep -qi microsoft /proc/version 2>/dev/null; then
   if [[ "$PM" == apt ]] && ! dpkg -s libasound2-plugins >/dev/null 2>&1; then
-    warn "WSL detected — install the ALSA→PulseAudio bridge for sound:"
+    warn "WSL without libasound2-plugins — if audio fails, run:"
     warn "  sudo apt-get install -y libasound2-plugins"
   fi
 fi
