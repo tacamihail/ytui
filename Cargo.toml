@@ -1,6 +1,6 @@
 [package]
 name = "ytui"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 description = "A YouTube Music player for the terminal"
 license = "MIT"

@@ -90,6 +90,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
     app.player_buttons.clear();
+    app.vol_area = Rect::default();
     let (status, title, channel, pos, dur, vol, muted, shuffle, repeat) = {
         let st = app.player.lock().unwrap_or_else(|e| e.into_inner());
         (
@@ -170,12 +171,13 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         Repeat::One => flags.push_str("↻1 "),
         Repeat::Off => {}
     }
-    let vol_txt = if muted {
+    let pct = if muted {
         "muted".to_string()
     } else {
         format!("{vol}%")
     };
-    let right = format!("{flags}{vol_txt}");
+    // Fixed width so the slider does not move while the number changes.
+    let pct = format!("{pct:<5}");
 
     let shown = if title.is_empty() {
         "…".to_string()
@@ -204,7 +206,30 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let btn_style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
 
-    let right_w = right.chars().count();
+    // Volume slider on the right: "vol " + 10 cells + " 35%".
+    const VOL_W: usize = 10;
+    let flags_w = flags.chars().count();
+    let right_w = flags_w + 4 + VOL_W + 1 + pct.chars().count();
+    let right_start = inner.x + (w.saturating_sub(right_w)) as u16;
+    app.vol_area = Rect {
+        x: right_start + (flags_w + 4) as u16,
+        y: inner.y,
+        width: VOL_W as u16,
+        height: 1,
+    };
+    let filled = ((vol.clamp(0, 130) as f64 / 130.0) * VOL_W as f64).round() as usize;
+    let filled = filled.min(VOL_W);
+    let (bar_fg, head_fg) = if muted { (DIM, DIM) } else { (ACCENT, GREEN) };
+    let (bar_filled, bar_head, bar_rest) = if filled >= VOL_W {
+        ("━".repeat(VOL_W), String::new(), String::new())
+    } else {
+        (
+            "━".repeat(filled),
+            "●".to_string(),
+            "─".repeat(VOL_W - filled - 1),
+        )
+    };
+
     let title_w = w.saturating_sub(right_w + PREFIX).max(4);
     let t = truncate(&shown, title_w);
     let pad = " ".repeat(w.saturating_sub(PREFIX + t.chars().count() + right_w));
@@ -218,7 +243,13 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         Span::raw("  "),
         Span::styled(t, Style::new().fg(FG).add_modifier(Modifier::BOLD)),
         Span::raw(pad),
-        Span::styled(right, Style::new().fg(DIM)),
+        Span::styled(flags, Style::new().fg(DIM)),
+        Span::styled("vol ", Style::new().fg(DIM)),
+        Span::styled(bar_filled, Style::new().fg(bar_fg)),
+        Span::styled(bar_head, Style::new().fg(head_fg)),
+        Span::styled(bar_rest, Style::new().fg(DIM)),
+        Span::raw(" "),
+        Span::styled(pct, Style::new().fg(DIM)),
     ]);
 
     let time_str = format!("{} / {}", fmt_f64(pos), fmt_f64(dur));
@@ -438,7 +469,7 @@ fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
     let inner = b.inner(r);
     f.render_widget(b, r);
 
-    let rows: [(&str, &str); 25] = [
+    let rows: [(&str, &str); 26] = [
         ("navigation", ""),
         ("1-6 / Tab / Shift+Tab", "switch tabs"),
         ("↑↓ / j k / wheel", "move selection"),
@@ -453,6 +484,7 @@ fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
         (", .", "seek 30s back/forward"),
         ("click progress bar", "seek to that position"),
         ("click ⏮ ⏸ ⏭", "previous, pause/resume, next"),
+        ("drag volume slider", "set the volume"),
         ("[ ]", "volume down/up by 5"),
         ("m", "mute / unmute"),
         ("s", "shuffle"),

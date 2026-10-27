@@ -72,6 +72,8 @@ pub struct App {
     // Geometry captured while drawing, used for mouse hit-testing.
     pub tab_hits: Vec<(u16, u16)>,
     pub player_buttons: Vec<(Rect, PlayerBtn)>,
+    pub vol_area: Rect,
+    dragging_volume: bool,
     pub gauge_area: Rect,
     pub list_items_area: Rect,
     // Queue rows are rebuilt only when the queue actually changes.
@@ -113,6 +115,8 @@ impl App {
             last_click: None,
             tab_hits: Vec::new(),
             player_buttons: Vec::new(),
+            vol_area: Rect::default(),
+            dragging_volume: false,
             gauge_area: Rect::default(),
             list_items_area: Rect::default(),
             queue_rows: Vec::new(),
@@ -396,6 +400,12 @@ impl App {
                     }
                     return;
                 }
+                let v = self.vol_area;
+                if v.width > 0 && m.row == v.y && m.column >= v.x && m.column < v.x + v.width {
+                    self.dragging_volume = true;
+                    self.set_volume_at(m.column);
+                    return;
+                }
                 let g = self.gauge_area;
                 if g.width > 0 && m.row == g.y && m.column >= g.x && m.column < g.x + g.width {
                     let dur = lock(&self.player).dur;
@@ -431,7 +441,28 @@ impl App {
             }
             MouseEventKind::ScrollUp => self.move_sel(-1),
             MouseEventKind::ScrollDown => self.move_sel(1),
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.dragging_volume {
+                    self.set_volume_at(m.column);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.dragging_volume = false,
             _ => {}
+        }
+    }
+
+    fn set_volume_at(&mut self, col: u16) {
+        let a = self.vol_area;
+        if a.width < 2 {
+            return;
+        }
+        let rel = col.saturating_sub(a.x).min(a.width - 1);
+        let frac = f64::from(rel) / f64::from(a.width - 1);
+        let vol = (frac * 130.0).round() as i64;
+        self.cmd(Cmd::Volume(vol));
+        // Touching the slider is an explicit "make it audible" gesture.
+        if lock(&self.player).muted {
+            self.cmd(Cmd::Mute(false));
         }
     }
 
