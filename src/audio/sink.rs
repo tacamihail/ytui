@@ -1,9 +1,8 @@
 //! cpal output: one long-lived stereo f32 stream at 48 kHz.
 //!
-//! The decoder thread pushes into a bounded ring buffer; the audio callback
-//! drains it. A mutex is used because the critical section is a pair of
-//! `copy_from_slice` calls — no allocation, no I/O, so priority inversion is
-//! not a practical concern at this buffer size.
+//! The decoder thread fills a bounded ring buffer and the audio callback drains
+//! it. The callback holds the mutex for two `copy_from_slice` calls and never
+//! allocates.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -30,8 +29,8 @@ pub struct Sink {
 /// audio, then pushes whole decoded packets (up to ~2.3k frames each). The
 /// capacity therefore has to be strictly larger than the refill threshold,
 /// otherwise every top-up would overflow and silently throw the tail of the
-/// packet away — which makes the music skip and run faster than real time.
-/// Give it a full extra second of headroom.
+/// packet away, which makes the music skip and run faster than real time. Give
+/// it a full extra second of headroom.
 fn ring_capacity(buffer_ms: u32) -> usize {
     ((OUT_RATE as usize * 2 * (buffer_ms.max(200) as usize + 1000)) / 1000).max(8192)
 }

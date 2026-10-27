@@ -17,7 +17,7 @@ use crate::ytdl::UA;
 pub fn subscription_feed(cfg: &Config) -> Result<Vec<Entry>, String> {
     let path = cfg
         .cookie_path()
-        .ok_or_else(|| "subscriptions need cookies.txt — run: ytui auth <file>".to_string())?;
+        .ok_or_else(|| "subscriptions need cookies.txt, run: ytui auth <file>".to_string())?;
     let cookie = cookie_header(&path)
         .ok_or_else(|| "cookies.txt contains no youtube.com cookies".to_string())?;
 
@@ -39,7 +39,7 @@ pub fn subscription_feed(cfg: &Config) -> Result<Vec<Entry>, String> {
     dedup(&mut out);
 
     if out.is_empty() {
-        return Err("subscriptions feed came back empty — are you signed in?".into());
+        return Err("subscriptions feed came back empty, are you signed in?".into());
     }
     out.truncate(cfg.fetch_limit.max(1) as usize);
     Ok(out)

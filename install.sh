@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ytui installer — music-only YouTube TUI player.
+# ytui installer
 #
 # Installs what is missing, builds from source and drops the binary in
 # ~/.local/bin. Nothing is downloaded at runtime except audio itself.
@@ -35,7 +35,7 @@ else
   PM=unknown
   BUILD_DEPS=()
   RUNTIME_DEPS=()
-  warn "unknown distribution — install ALSA headers and yt-dlp manually if the build fails"
+  warn "unknown distribution, install the ALSA headers and yt-dlp manually if the build fails"
 fi
 
 pm_install() {
@@ -99,7 +99,7 @@ else
     export PATH="$HOME/.deno/bin:$PATH"
     ok "deno $(deno --version 2>/dev/null | head -1)"
   else
-    warn "could not download Deno — install it from https://deno.com or YouTube playback will fail"
+    warn "could not download Deno. Install it from https://deno.com or YouTube playback will fail"
   fi
   rm -rf "$tmp"
 fi
@@ -157,11 +157,11 @@ if ! command -v cargo >/dev/null 2>&1; then
   # shellcheck disable=SC1091
   source "$HOME/.cargo/env"
 fi
-command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust: https://rustup.rs"
+command -v cargo >/dev/null 2>&1 || die "cargo not found, install Rust: https://rustup.rs"
 ok "cargo $(cargo --version | cut -d' ' -f2)"
 
 # --- build -------------------------------------------------------------------
-info "building ytui (first build downloads crates, 1–3 min)"
+info "building ytui (the first build downloads crates, 1-3 min)"
 (cd "$DIR" && cargo build --release)
 install -Dm755 "$DIR/target/release/ytui" "$BIN_REAL"
 
@@ -224,7 +224,7 @@ add_path_line "$HOME/.deno/bin" || ok "~/.deno/bin already in PATH"
 # --- WSL audio note ----------------------------------------------------------
 if grep -qi microsoft /proc/version 2>/dev/null; then
   if [[ "$PM" == apt ]] && ! dpkg -s libasound2-plugins >/dev/null 2>&1; then
-    warn "WSL without libasound2-plugins — if audio fails, run:"
+    warn "WSL without libasound2-plugins. If audio fails, run:"
     warn "  sudo apt-get install -y libasound2-plugins"
   fi
 fi

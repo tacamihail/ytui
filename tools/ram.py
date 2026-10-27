@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Measure ytui's resident memory while idle and while playing.
 
-Runs the real TUI in a pseudo-terminal (so it renders as usual), reads
-VmRSS/VmHWM from /proc, and prints a table. Linux only.
+Starts the real TUI in a pty and reads VmRSS/VmHWM from /proc. Linux only.
 
     python3 tools/ram.py                          # idle only
     python3 tools/ram.py <youtube-url> [...]      # idle + one row per URL
 
-Each URL is pasted into the search box, so it starts playing after yt-dlp
-resolves it. Takes ~25 s per URL.
+Each URL is pasted into the search box and starts playing once yt-dlp
+resolves it, which takes about 20 seconds.
 """
 
 import fcntl

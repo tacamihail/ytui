@@ -1,9 +1,6 @@
-//! Playback engine: one worker thread owns the decoder, the queue and the
-//! audio sink. The UI talks to it through `Cmd` messages and reads `State`
-//! through a mutex, so drawing never blocks on I/O.
-//!
-//! Why a custom engine instead of mpv: no second process, no IPC socket, no
-//! video pipeline. Idle cost is the ratatui buffer plus a ~1 MB audio ring.
+//! Playback engine. One worker thread owns the decoder, queue and sink; the UI
+//! sends `Cmd` messages and reads `State` behind a mutex, so drawing never
+//! waits on the network or the audio device.
 
 mod decode;
 mod http;

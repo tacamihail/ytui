@@ -133,7 +133,7 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
             ))
         } else {
             Line::from(Span::styled(
-                " stopped — / to search · enter plays the whole list · ? for help",
+                " stopped. / to search, enter plays the whole list, ? for help",
                 Style::new().fg(DIM),
             ))
         };
@@ -144,7 +144,7 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
             ))
         } else {
             Line::from(Span::styled(
-                " not connected — run: ytui auth <cookies.txt> for liked music, playlists, subscriptions",
+                " not connected. Run ytui auth <cookies.txt> for liked music, playlists and subscriptions",
                 Style::new().fg(YELLOW),
             ))
         };
@@ -278,7 +278,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 f,
                 app,
                 inner,
-                "queue is empty — press enter on a list to play it, a to append",
+                "queue is empty. Press enter on a list to play it, a to append",
             );
             return;
         }
@@ -305,15 +305,15 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     if list.is_empty() {
         let hint = match app.tab {
             TAB_SEARCH => "press / and search YouTube Music (or paste a URL)",
-            TAB_LIKED => "no liked music yet — press r (needs ytui auth)",
+            TAB_LIKED => "no liked music yet, press r (needs ytui auth)",
             TAB_PLAYLISTS => {
                 if app.in_playlist {
                     "empty playlist"
                 } else {
-                    "no playlists yet — press r (needs ytui auth)"
+                    "no playlists yet, press r (needs ytui auth)"
                 }
             }
-            TAB_SUBS => "no subscriptions loaded — press r (needs ytui auth)",
+            TAB_SUBS => "no subscriptions loaded, press r (needs ytui auth)",
             _ => "nothing played yet",
         };
         empty_hint(f, app, inner, hint);
@@ -398,7 +398,7 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_hints(f: &mut Frame, _app: &App, area: Rect) {
-    let hints = " 1-6 tabs · / search · enter play list · a queue · space pause · ←→/h l seek · , . ±30s · [ ] vol · <> track · s shuffle · R repeat · m mute · x stop · r refresh · ? help · q quit";
+    let hints = " 1-6 tabs · / search · enter play list · a queue · space pause · ←→/h l seek · , . 30s · [ ] vol · <> track · s shuffle · R repeat · m mute · x stop · r refresh · ? help · q quit";
     let s: String = hints.chars().take(area.width as usize).collect();
     f.render_widget(Paragraph::new(Span::styled(s, Style::new().fg(DIM))), area);
 }
@@ -432,14 +432,14 @@ fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
     let b = Block::bordered()
         .border_style(Style::new().fg(ACCENT))
         .title(Span::styled(
-            " ytui help — press any key to close ",
+            " ytui help, press any key to close ",
             Style::new().fg(ACCENT),
         ));
     let inner = b.inner(r);
     f.render_widget(b, r);
 
     let rows: [(&str, &str); 25] = [
-        ("— navigation —", ""),
+        ("navigation", ""),
         ("1-6 / Tab / Shift+Tab", "switch tabs"),
         ("↑↓ / j k / wheel", "move selection"),
         ("click tab", "switch to that tab"),
@@ -447,22 +447,22 @@ fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
         ("enter", "play the whole list from here"),
         ("a", "append selection to queue"),
         ("esc", "leave a playlist drill-down"),
-        ("— playback —", ""),
+        ("playback", ""),
         ("space or p", "pause / resume"),
-        ("← → or h l", "seek ∓/±5s"),
-        (", .", "seek ∓/±30s"),
+        ("← → or h l", "seek 5s back/forward"),
+        (", .", "seek 30s back/forward"),
         ("click progress bar", "seek to that position"),
-        ("click ⏮ ⏸ ⏭", "previous · pause/resume · next"),
-        ("[ ]", "volume ∓/±5"),
+        ("click ⏮ ⏸ ⏭", "previous, pause/resume, next"),
+        ("[ ]", "volume down/up by 5"),
         ("m", "mute / unmute"),
         ("s", "shuffle"),
-        ("R", "repeat off → all → one"),
+        ("R", "repeat off / all / one"),
         ("< >", "previous / next track"),
         ("x", "stop playback"),
-        ("— library —", ""),
+        ("library", ""),
         ("d", "delete from history / queue"),
         ("c", "copy link to clipboard"),
-        ("r", "refresh list · / search"),
+        ("r", "refresh list, / search"),
         ("q", "quit"),
     ];
     let lines: Vec<Line> = rows

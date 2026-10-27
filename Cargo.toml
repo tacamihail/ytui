@@ -2,7 +2,7 @@
 name = "ytui"
 version = "0.3.6"
 edition = "2021"
-description = "Low-RAM YouTube Music TUI player — pure Rust audio engine, no browser, no daemon"
+description = "A YouTube Music player for the terminal"
 license = "MIT"
 
 [dependencies]

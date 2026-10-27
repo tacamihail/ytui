@@ -1,11 +1,9 @@
 //! yt-dlp integration.
 //!
-//! Two very different jobs:
-//!   * listing — `--flat-playlist --print`, cheapest possible mode, no per-video
-//!     metadata resolution, entries stream to the UI line by line.
-//!   * resolving — `-j` returns the format list; we pick the best AAC stream
-//!     that actually answers, then our decoder streams it with HTTP Range
-//!     requests.
+//! Listing runs `--flat-playlist --print`, which avoids resolving metadata for
+//! every entry, and streams results to the UI line by line. Resolving asks for
+//! the full JSON, picks the best AAC format that actually answers and hands the
+//! URL to the decoder.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -101,7 +99,7 @@ pub fn spawn(kind: Kind, target: String, cfg: Config, tx: Sender<Msg>) {
         };
         match res {
             Ok(n) => {
-                let _ = tx.send(Msg::Done(kind, format!("{} — {} items", label(kind), n)));
+                let _ = tx.send(Msg::Done(kind, format!("{}: {} items", label(kind), n)));
             }
             Err(e) => {
                 let _ = tx.send(Msg::Error(kind, e));
@@ -129,7 +127,7 @@ fn run(kind: Kind, target: &str, cfg: &Config, tx: &Sender<Msg>) -> Result<usize
 
     let mut child = c
         .spawn()
-        .map_err(|_| "yt-dlp not found — install it, then run: ytui doctor".to_string())?;
+        .map_err(|_| "yt-dlp not found, install it and run: ytui doctor".to_string())?;
 
     let out = child.stdout.take().unwrap();
     let err = child.stderr.take().unwrap();
@@ -221,7 +219,7 @@ pub fn stream_url(url: &str, cfg: &Config) -> Result<Stream, String> {
     let out = c
         .stdin(Stdio::null())
         .output()
-        .map_err(|_| "yt-dlp not found — install it, then run: ytui doctor".to_string())?;
+        .map_err(|_| "yt-dlp not found, install it and run: ytui doctor".to_string())?;
     if !out.status.success() {
         return Err(friendly(&String::from_utf8_lossy(&out.stderr)));
     }
@@ -276,7 +274,7 @@ pub fn stream_url(url: &str, cfg: &Config) -> Result<Stream, String> {
         candidates.push((rank, u64::MAX - abr.min(1_000_000) as u64, u.to_string()));
     }
     if candidates.is_empty() {
-        return Err("no AAC stream for this track (opus only) — skipped".into());
+        return Err("no AAC stream for this track (opus only)".into());
     }
     candidates.sort_by_key(|(rank, abr, _)| (*rank, *abr));
 
@@ -377,14 +375,14 @@ pub fn account(cfg: &Config) -> Result<(String, String), String> {
 fn friendly(stderr: &str) -> String {
     let low = stderr.to_lowercase();
     if low.contains("private") || low.contains("sign in") || low.contains("login") {
-        "private — sign-in required: run `ytui auth <cookies.txt>`".into()
+        "private: sign-in required, run `ytui auth <cookies.txt>`".into()
     } else if low.contains("cookie") {
         format!(
-            "cookies error — re-export cookies.txt ({})",
+            "cookies error, re-export cookies.txt ({})",
             first_lines(stderr)
         )
     } else if low.contains("no such option") || low.contains("unknown option") {
-        format!("yt-dlp is too old — update it ({})", first_lines(stderr))
+        format!("yt-dlp is too old, update it ({})", first_lines(stderr))
     } else {
         first_lines(stderr)
     }

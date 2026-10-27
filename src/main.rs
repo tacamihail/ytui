@@ -1,7 +1,7 @@
-//! ytui — a low-RAM YouTube Music player that lives in the terminal.
+//! A YouTube Music player for the terminal.
 //!
-//! ratatui frontend, pure-Rust audio engine (symphonia + cpal) streaming AAC
-//! straight from googlevideo, yt-dlp only for listing and URL resolution.
+//! ratatui frontend. yt-dlp is only used to list and resolve URLs; symphonia
+//! decodes the AAC stream and cpal sends it to the sound card.
 
 mod app;
 mod audio;
@@ -81,7 +81,7 @@ fn run_tui() -> io::Result<()> {
 
 fn doctor() -> i32 {
     let mut healthy = true;
-    println!("ytui {} — environment check\n", env!("CARGO_PKG_VERSION"));
+    println!("ytui {} environment check\n", env!("CARGO_PKG_VERSION"));
 
     match ytdl::command().arg("--version").output() {
         Ok(o) if o.status.success() => {
@@ -94,7 +94,7 @@ fn doctor() -> i32 {
             if year >= 2025 {
                 println!("✔ yt-dlp {v}");
             } else {
-                println!("✗ yt-dlp {v} is too old — run install.sh to update it");
+                println!("✗ yt-dlp {v} is too old, run install.sh to update it");
                 healthy = false;
             }
         }
@@ -114,7 +114,7 @@ fn doctor() -> i32 {
             println!("✔ {}", v.lines().next().unwrap_or("deno").trim());
         }
         _ => {
-            println!("✗ deno not found — yt-dlp needs it to solve YouTube JS challenges");
+            println!("✗ deno not found, yt-dlp needs it to solve YouTube JS challenges");
             healthy = false;
         }
     }
@@ -133,7 +133,7 @@ fn doctor() -> i32 {
             println!("✔ cookies: {value} ({flag})");
             match auth::account() {
                 Some(a) => println!("✔ account: {}", a.name),
-                None => println!("· account not verified yet — run `ytui auth --status`"),
+                None => println!("· account not verified yet, run `ytui auth --status`"),
             }
         }
         None => println!("· cookies: none (search and playback work without them)"),
@@ -147,7 +147,7 @@ fn doctor() -> i32 {
     );
 
     if healthy {
-        println!("\nall good — run `ytui`");
+        println!("\nall good, run `ytui`");
         0
     } else {
         println!("\nsomething is missing, see the ✗ lines above");
@@ -158,7 +158,7 @@ fn doctor() -> i32 {
 fn help() {
     println!(
         "\
-ytui {} — low-RAM YouTube Music player for the terminal
+ytui {}\nA YouTube Music player for the terminal
 
 usage:
   ytui                    open the player

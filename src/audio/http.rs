@@ -1,17 +1,14 @@
 //! HTTP Range reader used as a symphonia `MediaSource`.
 //!
-//! YouTube serves audio as a plain file on `*.googlevideo.com`; the URL already
-//! carries a signature and expiry, so no cookies are needed for playback. We
-//! never download the whole file: one chunk is kept in RAM and re-fetched with
-//! a `Range` request whenever the decoder seeks outside it. That keeps the
-//! player's memory flat regardless of track length (a 2 h mix costs the same
-//! as a 3 min song).
+//! YouTube serves audio as a plain file on `*.googlevideo.com`; the URL carries
+//! its own signature and expiry, so playback needs no cookies. Only one chunk
+//! is kept in memory and re-fetched with a `Range` request when the decoder
+//! moves outside it, which keeps memory flat for any track length.
 //!
-//! Very long uploads are fragmented MP4 (`moov` + `sidx` + one `moof`/`mdat`
-//! pair per ~10 s). symphonia scans every top-level atom when a source is
-//! seekable, which is unusable there, so we parse the `sidx` ourselves and
-//! expose a small `WindowFile` that starts at any chosen fragment: seeking is
-//! one HTTP request instead of walking thousands of fragments.
+//! Long uploads are fragmented MP4: a `moov` header, a `sidx` index and one
+//! `moof`/`mdat` pair every 10 seconds or so. Symphonia walks every atom when
+//! a source reports itself seekable, which takes forever on a multi-hour file,
+//! so we read the index ourselves and reopen the stream at the right fragment.
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::time::Duration;
@@ -226,7 +223,7 @@ impl MediaSource for HttpFile {
 ///
 /// The fragment's `moof` therefore sits at virtual offset `prefix.len()`, and
 /// because these streams use `default-base-is-moof` every sample offset inside
-/// it is relative to that position — the demuxer's absolute seeks stay inside
+/// it is relative to that position, so the demuxer's absolute seeks stay inside
 /// our virtual address space and map back to the real file here.
 pub struct WindowFile {
     prefix: Vec<u8>,
@@ -310,7 +307,7 @@ impl MediaSource for WindowFile {
     }
 }
 
-/// Time → byte-offset index built from an MP4 `sidx` box.
+/// Time to byte-offset index built from an MP4 `sidx` box.
 #[derive(Debug, Clone)]
 pub struct FragIndex {
     timescale: u32,

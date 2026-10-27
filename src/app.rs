@@ -402,7 +402,7 @@ impl App {
                     if dur > 0.0 {
                         let frac = (m.column - g.x) as f64 / g.width as f64;
                         self.cmd(Cmd::SeekAbs(frac * dur));
-                        self.set_toast(format!("seek → {}", fmt_f64(frac * dur)), false);
+                        self.set_toast(format!("seek to {}", fmt_f64(frac * dur)), false);
                     }
                     return;
                 }
@@ -498,13 +498,13 @@ impl App {
         }
         let Some(account) = auth::account() else {
             if notify {
-                self.set_toast("account unknown — run: ytui auth <cookies.txt>", true);
+                self.set_toast("account unknown, run: ytui auth <cookies.txt>", true);
             }
             return;
         };
         if account.channel_id.is_empty() {
             if notify {
-                self.set_toast("account has no channel id — re-run: ytui auth", true);
+                self.set_toast("account has no channel id, re-run: ytui auth", true);
             }
             return;
         }
@@ -536,7 +536,7 @@ impl App {
             return true;
         }
         if notify {
-            self.set_toast("not connected — run: ytui auth <cookies.txt>", true);
+            self.set_toast("not connected, run: ytui auth <cookies.txt>", true);
         }
         false
     }
@@ -573,7 +573,7 @@ impl App {
                 let tracks = vec![entry_to_track(&e)];
                 self.cmd(Cmd::Play(tracks, 0));
                 self.push_history(e);
-                self.set_toast("▶ pasted link — resolving…", false);
+                self.set_toast("▶ pasted link, resolving…", false);
             }
         } else {
             self.last_query = q.clone();
@@ -618,7 +618,7 @@ impl App {
 
     fn queue_append(&mut self) {
         if self.tab == TAB_QUEUE {
-            self.set_toast("already in the queue — enter plays it", false);
+            self.set_toast("already in the queue, press enter to play it", false);
             return;
         }
         if let Some(e) = self.current_entry() {
@@ -661,7 +661,7 @@ impl App {
                 let i = self.sel[TAB_QUEUE];
                 if i < len {
                     if i == cur {
-                        self.set_toast("cannot remove the playing track — press x to stop", true);
+                        self.set_toast("cannot remove the playing track, press x to stop", true);
                     } else {
                         self.cmd(Cmd::RemoveIndex(i));
                     }

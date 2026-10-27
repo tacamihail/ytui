@@ -1,4 +1,4 @@
-//! `ytui auth` — connect the player to a YouTube account with cookies.
+//! Connect the player to a YouTube account with cookies.
 
 use std::fs;
 use std::path::Path;
@@ -9,7 +9,7 @@ use crate::config::{self, Config};
 use crate::ytdl;
 
 const USAGE: &str = "\
-ytui auth — connect your YouTube account
+ytui auth - connect your YouTube account
 
 usage:
   ytui auth <cookies.txt>       import a Netscape cookies.txt export
@@ -79,7 +79,7 @@ fn import(path: &str) -> i32 {
     cfg.cookies_browser.clear();
     config::save(&cfg);
 
-    println!("cookies imported → {}", dst.display());
+    println!("cookies imported to {}", dst.display());
     verify(&cfg)
 }
 
@@ -112,7 +112,7 @@ fn verify(cfg: &Config) -> i32 {
             eprintln!("✗ could not verify the account: {e}");
             if cfg.cookies_file.is_empty() {
                 eprintln!("  the cookies are read from the browser on every run, so nothing is");
-                eprintln!("  stored yet — check that the browser is signed in to youtube.com");
+                eprintln!("  stored yet. Check that the browser is signed in to youtube.com");
                 eprintln!("  and then run `ytui auth <cookies.txt>` with a file export instead");
             } else {
                 eprintln!("  cookies were saved to {}", cfg.cookies_file);
@@ -120,9 +120,7 @@ fn verify(cfg: &Config) -> i32 {
                 eprintln!("  Subscriptions need a fresh export from a signed-in session");
                 eprintln!("  (open https://music.youtube.com, export youtube.com cookies, retry)");
             }
-            eprintln!(
-                "  note: ytui only needs cookies for private lists — it never asks for a password"
-            );
+            eprintln!("  ytui only needs cookies for private lists; it never asks for a password");
             1
         }
     }
@@ -139,7 +137,7 @@ pub fn status() -> i32 {
             }
         }
         None => {
-            println!("cookies: none — run `ytui auth <cookies.txt>`");
+            println!("cookies: none (run `ytui auth <cookies.txt>`)");
             return 1;
         }
     }
@@ -149,7 +147,7 @@ pub fn status() -> i32 {
             0
         }
         None => {
-            println!("account: not verified — run `ytui auth --status` after importing");
+            println!("account: not verified (run `ytui auth --status` after importing)");
             0
         }
     }
