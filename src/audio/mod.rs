@@ -148,6 +148,12 @@ impl Engine {
         };
         match Sink::new(engine.cfg.buffer_ms) {
             Ok(s) => {
+                {
+                    // Start quiet: a TUI player has no reason to blast the
+                    // first track at full scale.
+                    let mut st = engine.lock();
+                    st.volume = engine.cfg.volume.clamp(0, 130);
+                }
                 s.set_volume(engine.lock().volume);
                 engine.sink = Some(s);
             }
@@ -330,9 +336,35 @@ impl Engine {
             st.err = None;
         }
 
-        let resolved = ytdl::stream_url(&track.url, &self.cfg);
-        let loaded =
-            resolved.and_then(|url| Loaded::open(&url, self.cfg.cache_kib as usize * 1024));
+        let loaded = ytdl::stream_url(&track.url, &self.cfg).and_then(|stream| {
+            // Entries created from a bare URL start out with no title or
+            // duration; yt-dlp just told us both, so adopt them.
+            if track.title.is_empty() || track.duration == 0 {
+                let mut st = self.lock();
+                if st.title.is_empty() {
+                    st.title = stream.title.clone();
+                }
+                if st.channel.is_empty() {
+                    st.channel = stream.channel.clone();
+                }
+                if st.dur <= 0.0 && stream.duration > 0.0 {
+                    st.dur = stream.duration;
+                }
+                if let Some(t) = st.queue.get_mut(index) {
+                    if t.title.is_empty() {
+                        t.title = stream.title.clone();
+                    }
+                    if t.channel.is_empty() {
+                        t.channel = stream.channel.clone();
+                    }
+                    if t.duration == 0 {
+                        t.duration = stream.duration.max(0.0) as u64;
+                    }
+                }
+                st.version = st.version.wrapping_add(1);
+            }
+            Loaded::open(&stream.url, self.cfg.cache_kib as usize * 1024)
+        });
 
         match loaded {
             Ok(l) => {

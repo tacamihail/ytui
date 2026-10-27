@@ -350,15 +350,15 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
             Style::new().fg(if err { RED } else { GREEN }),
         ))
     } else {
-        let st = app.player.lock().unwrap_or_else(|e| e.into_inner());
-        let dur = fmt_duration(st.dur.max(0.0) as u64);
+        // Read everything out of the state lock before calling anything that
+        // might take it again (tab_count locks for the queue tab).
+        let dur = {
+            let st = app.player.lock().unwrap_or_else(|e| e.into_inner());
+            fmt_duration(st.dur.max(0.0) as u64)
+        };
+        let count = app.tab_count(app.tab);
         Line::from(Span::styled(
-            format!(
-                " ytui · {} · {} tracks · {}",
-                TABS[app.tab],
-                app.tab_count(app.tab),
-                dur
-            ),
+            format!(" ytui · {} · {} tracks · {}", TABS[app.tab], count, dur),
             Style::new().fg(DIM),
         ))
     };

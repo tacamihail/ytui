@@ -144,7 +144,7 @@ impl App {
     }
 
     fn sync_queue_cache(&mut self) {
-        let (version, index, rows) = {
+        let (version, index, rows, resolved) = {
             let st = lock(&self.player);
             let changed = st.version != self.queue_version || st.index != self.queue_index;
             let rows = if changed {
@@ -158,12 +158,33 @@ impl App {
             } else {
                 None
             };
-            (st.version, st.index, rows)
+            // A pasted link only learns its real title once yt-dlp resolved it.
+            let resolved = if changed {
+                st.queue
+                    .get(st.index)
+                    .filter(|t| !t.title.is_empty())
+                    .map(|t| (t.url.clone(), t.title.clone()))
+            } else {
+                None
+            };
+            (st.version, st.index, rows, resolved)
         };
         self.queue_version = version;
         self.queue_index = index;
         if let Some(rows) = rows {
             self.queue_rows = rows;
+        }
+        if let Some((url, title)) = resolved {
+            let mut dirty = false;
+            for e in self.history.iter_mut() {
+                if e.title.is_empty() && e.url() == url {
+                    e.title = title.clone();
+                    dirty = true;
+                }
+            }
+            if dirty {
+                config::save_json(&config::history_path(), &self.history);
+            }
         }
     }
 
@@ -516,7 +537,7 @@ impl App {
                 };
                 let e = Entry {
                     id: url.clone(),
-                    title: "pasted track".into(),
+                    title: String::new(),
                     channel: String::new(),
                     duration: 0,
                     url_override: url,
@@ -524,7 +545,7 @@ impl App {
                 let tracks = vec![entry_to_track(&e)];
                 self.cmd(Cmd::Play(tracks, 0));
                 self.push_history(e);
-                self.set_toast("▶ pasted track", false);
+                self.set_toast("▶ pasted link — resolving…", false);
             }
         } else {
             self.last_query = q.clone();

@@ -6,6 +6,7 @@
   "history_limit": 300,
   "seek_step": 5.0,
   "volume_step": 5,
+  "volume": 35,
   "buffer_ms": 2000,
   "cache_kib": 256
 }

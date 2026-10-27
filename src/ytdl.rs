@@ -194,6 +194,15 @@ fn parse_num(s: &str) -> u64 {
     s.split('.').next().unwrap_or("").parse().unwrap_or(0)
 }
 
+/// A playable stream plus the metadata yt-dlp already handed us, so an entry
+/// created from a bare URL can show its real title instead of a placeholder.
+pub struct Stream {
+    pub url: String,
+    pub title: String,
+    pub channel: String,
+    pub duration: f64,
+}
+
 /// Resolves a watch URL to a direct audio URL that our decoder can stream.
 ///
 /// YouTube is inconsistent about which AAC bitrates it serves: `itag=140`
@@ -201,7 +210,7 @@ fn parse_num(s: &str) -> u64 {
 /// `itag=139` (HE-AAC, 48 kbps) almost always works. So instead of trusting
 /// the first URL `-g` prints, we ask for the whole JSON, order the AAC formats
 /// best-first and probe each with a 1 KiB Range request until one answers.
-pub fn stream_url(url: &str, cfg: &Config) -> Result<String, String> {
+pub fn stream_url(url: &str, cfg: &Config) -> Result<Stream, String> {
     let mut c = command();
     c.args(["--no-warnings", "-j", url]);
     if let Some((flag, value)) = cfg.cookie_args() {
@@ -216,6 +225,26 @@ pub fn stream_url(url: &str, cfg: &Config) -> Result<String, String> {
     }
     let info: serde_json::Value =
         serde_json::from_slice(&out.stdout).map_err(|e| format!("bad yt-dlp json: {e}"))?;
+
+    let text = |key: &str| {
+        info.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let meta = Stream {
+        url: String::new(),
+        title: text("title"),
+        channel: {
+            let channel = text("channel");
+            if channel.is_empty() {
+                text("uploader")
+            } else {
+                channel
+            }
+        },
+        duration: info.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0),
+    };
 
     let formats = info
         .get("formats")
@@ -250,9 +279,13 @@ pub fn stream_url(url: &str, cfg: &Config) -> Result<String, String> {
     candidates.sort_by_key(|(rank, abr, _)| (*rank, *abr));
 
     let mut last = String::from("no candidate answered");
+    let mut stream = meta;
     for (_, _, candidate) in candidates.iter().take(4) {
         match probe(candidate) {
-            Ok(()) => return Ok(candidate.clone()),
+            Ok(()) => {
+                stream.url = candidate.clone();
+                return Ok(stream);
+            }
             Err(e) => last = e,
         }
     }

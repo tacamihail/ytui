@@ -21,6 +21,8 @@ pub struct Config {
     pub seek_step: f64,
     /// [ ] volume step, percent.
     pub volume_step: i64,
+    /// Volume at startup, percent. Playback starts quiet on purpose.
+    pub volume: i64,
     /// Audio ring buffer in ms. Lower = less RAM, more underrun risk.
     pub buffer_ms: u32,
     /// HTTP range cache chunk in KiB (one chunk is resident at a time).
@@ -37,6 +39,7 @@ impl Default for Config {
             history_limit: 300,
             seek_step: 5.0,
             volume_step: 5,
+            volume: 35,
             buffer_ms: 2000,
             cache_kib: 256,
         }

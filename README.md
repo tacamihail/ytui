@@ -159,6 +159,7 @@ Without cookies the player still works: search and playback are public.
 | `history_limit` | `300` | history entries kept |
 | `seek_step` | `5.0` | `←` `→` seek seconds |
 | `volume_step` | `5` | `[` `]` step |
+| `volume` | `35` | starting volume, percent (playback starts quiet) |
 | `buffer_ms` | `2000` | audio ring buffer; lower = less RAM, more underruns |
 | `cache_kib` | `256` | HTTP Range chunk held in memory |
 
