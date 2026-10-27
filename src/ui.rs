@@ -227,18 +227,11 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         width: VOL_W as u16,
         height: 1,
     };
-    let filled = ((vol.clamp(0, 100) as f64 / 100.0) * VOL_W as f64).round() as usize;
-    let filled = filled.min(VOL_W);
+    let filled = ((vol.clamp(0, 100) as f64 / 100.0) * (VOL_W - 1) as f64).round() as usize;
+    let filled = filled.min(VOL_W - 1);
     let (bar_fg, head_fg) = if muted { (DIM, DIM) } else { (ACCENT, GREEN) };
-    let (bar_filled, bar_head, bar_rest) = if filled >= VOL_W {
-        ("━".repeat(VOL_W), String::new(), String::new())
-    } else {
-        (
-            "━".repeat(filled),
-            "●".to_string(),
-            "─".repeat(VOL_W - filled - 1),
-        )
-    };
+    let bar_filled = "━".repeat(filled);
+    let bar_rest = "─".repeat(VOL_W - filled - 1);
 
     let title_w = w.saturating_sub(right_w + PREFIX).max(4);
     let t = truncate(&shown, title_w);
@@ -257,7 +250,7 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(speaker, Style::new()),
         Span::raw(" "),
         Span::styled(bar_filled, Style::new().fg(bar_fg)),
-        Span::styled(bar_head, Style::new().fg(head_fg)),
+        Span::styled("●", Style::new().fg(head_fg)),
         Span::styled(bar_rest, Style::new().fg(DIM)),
         Span::raw(" "),
         Span::styled(pct, Style::new().fg(DIM)),
