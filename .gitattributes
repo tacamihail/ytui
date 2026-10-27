@@ -1,0 +1,4 @@
+* text=auto
+# Shell scripts are executed on Linux/WSL; CRLF breaks the shebang.
+*.sh text eol=lf
+Cargo.lock text eol=lf

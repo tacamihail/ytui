@@ -1,0 +1,4 @@
+/target
+/bin
+*.zip
+.DS_Store

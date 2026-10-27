@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# ytui installer — music-only YouTube TUI player.
+#
+# Installs what is missing, builds from source and drops the binary in
+# ~/.local/bin. Nothing is downloaded at runtime except audio itself.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_DST="$HOME/.local/bin/ytui"
+CFG_DIR="$HOME/.config/ytui"
+
+c_dim=$'\e[2m'; c_ok=$'\e[32m'; c_yel=$'\e[33m'; c_ac=$'\e[36m'; c_rst=$'\e[0m'
+info() { printf '%s\n' "${c_dim}::${c_rst} $*"; }
+ok()   { printf '%s\n' "${c_ok} ✔${c_rst} $*"; }
+warn() { printf '%s\n' "${c_yel} !${c_rst} $*"; }
+die()  { printf '%s\n' "${c_yel} !${c_rst} $*" >&2; exit 1; }
+
+[[ ${EUID} -eq 0 ]] && die "run as your normal user (sudo is requested only when needed)"
+
+# --- package manager ---------------------------------------------------------
+if command -v apt-get >/dev/null 2>&1; then
+  PM=apt
+  BUILD_DEPS=(build-essential pkg-config libasound2-dev)
+  RUNTIME_DEPS=(libasound2)
+elif command -v pacman >/dev/null 2>&1; then
+  PM=pacman
+  BUILD_DEPS=(base-devel alsa-lib)
+  RUNTIME_DEPS=(alsa-lib)
+elif command -v dnf >/dev/null 2>&1; then
+  PM=dnf
+  BUILD_DEPS=(gcc make pkgconf-pkg-config alsa-lib-devel)
+  RUNTIME_DEPS=(alsa-lib)
+else
+  PM=unknown
+  BUILD_DEPS=()
+  RUNTIME_DEPS=()
+  warn "unknown distribution — install ALSA headers and yt-dlp manually if the build fails"
+fi
+
+pm_install() {
+  case "$PM" in
+    apt)    sudo apt-get update -qq && sudo apt-get install -y "$@" ;;
+    pacman) sudo pacman -S --needed --noconfirm "$@" ;;
+    dnf)    sudo dnf install -y "$@" ;;
+    *)      return 1 ;;
+  esac
+}
+
+# --- yt-dlp ------------------------------------------------------------------
+# Needs a recent build: YouTube breaks old extractors within weeks.
+need_ytdlp() {
+  command -v yt-dlp >/dev/null 2>&1 || return 0
+  local v year
+  v="$(yt-dlp --version 2>/dev/null | head -1)"
+  year="${v%%.*}"
+  [[ "$year" =~ ^[0-9]+$ ]] || return 0
+  ((year >= 2025)) && return 1
+  return 0
+}
+
+install_ytdlp() {
+  info "installing a fresh yt-dlp into ~/.local/bin"
+  mkdir -p "$HOME/.local/bin"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+      -o "$HOME/.local/bin/yt-dlp"
+    chmod +x "$HOME/.local/bin/yt-dlp"
+    ok "yt-dlp $(yt-dlp --version 2>/dev/null || echo installed)"
+  else
+    pm_install yt-dlp || die "install yt-dlp manually: https://github.com/yt-dlp/yt-dlp"
+  fi
+}
+
+if need_ytdlp; then
+  install_ytdlp
+else
+  ok "yt-dlp $(yt-dlp --version 2>/dev/null | head -1)"
+fi
+
+# --- deno --------------------------------------------------------------------
+# yt-dlp solves YouTube's JS challenges with a JS runtime; deno is the only one
+# enabled by default. Without it most videos fail with "Unable to extract
+# uploader id".
+if command -v deno >/dev/null 2>&1; then
+  ok "deno $(deno --version 2>/dev/null | head -1)"
+else
+  info "installing Deno (yt-dlp needs it to resolve YouTube streams)"
+  mkdir -p "$HOME/.deno/bin"
+  tmp="$(mktemp -d)"
+  if curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
+       -o "$tmp/deno.zip"; then
+    if command -v unzip >/dev/null 2>&1; then
+      unzip -oq "$tmp/deno.zip" -d "$HOME/.deno/bin"
+    else
+      python3 -m zipfile -e "$tmp/deno.zip" "$HOME/.deno/bin"
+    fi
+    chmod +x "$HOME/.deno/bin/deno"
+    export PATH="$HOME/.deno/bin:$PATH"
+    ok "deno $(deno --version 2>/dev/null | head -1)"
+  else
+    warn "could not download Deno — install it from https://deno.com or YouTube playback will fail"
+  fi
+  rm -rf "$tmp"
+fi
+
+# --- build dependencies ------------------------------------------------------
+if [[ "$PM" != unknown ]]; then
+  missing=()
+  if [[ "$PM" == apt ]]; then
+    for p in "${BUILD_DEPS[@]}"; do
+      dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")
+    done
+  else
+    # Cheap heuristic: a working compiler + pkg-config + ALSA headers.
+    command -v cc >/dev/null 2>&1 || missing+=("${BUILD_DEPS[@]}")
+    command -v pkg-config >/dev/null 2>&1 || missing+=("${BUILD_DEPS[@]}")
+    [[ -e /usr/include/alsa/asoundlib.h ]] || missing+=("${BUILD_DEPS[@]}")
+  fi
+  if ((${#missing[@]})); then
+    info "installing build deps: ${missing[*]}"
+    pm_install "${missing[@]}" || warn "some build deps failed to install"
+  else
+    ok "build deps present"
+  fi
+fi
+
+# --- rust --------------------------------------------------------------------
+if ! command -v cargo >/dev/null 2>&1; then
+  info "installing Rust via rustup"
+  curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+command -v cargo >/dev/null 2>&1 || die "cargo not found — install Rust: https://rustup.rs"
+ok "cargo $(cargo --version | cut -d' ' -f2)"
+
+# --- build -------------------------------------------------------------------
+info "building ytui (first build downloads crates, 1–3 min)"
+(cd "$DIR" && cargo build --release)
+install -Dm755 "$DIR/target/release/ytui" "$BIN_DST"
+ok "installed -> $BIN_DST"
+
+# --- config ------------------------------------------------------------------
+mkdir -p "$CFG_DIR"
+if [[ ! -f "$CFG_DIR/config.json" ]]; then
+  cp "$DIR/config.example.json" "$CFG_DIR/config.json"
+  ok "seeded config -> $CFG_DIR/config.json"
+else
+  ok "config already present"
+fi
+
+# --- PATH --------------------------------------------------------------------
+add_path_line() {
+  local dir="$1" rc
+  case ":$PATH:" in
+    *":$dir:"*) return 1 ;;
+  esac
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+    [[ -f "$rc" ]] || continue
+    printf '\nexport PATH="%s:$PATH"\n' "$dir" >> "$rc"
+    ok "added $dir to PATH in $(basename "$rc") (open a new shell)"
+  done
+  return 0
+}
+
+add_path_line "$HOME/.local/bin" || ok "~/.local/bin already in PATH"
+add_path_line "$HOME/.deno/bin" || ok "~/.deno/bin already in PATH"
+
+# --- WSL audio hint ----------------------------------------------------------
+if grep -qi microsoft /proc/version 2>/dev/null; then
+  if [[ "$PM" == apt ]] && ! dpkg -s libasound2-plugins >/dev/null 2>&1; then
+    warn "WSL detected — install the ALSA→PulseAudio bridge for sound:"
+    warn "  sudo apt-get install -y libasound2-plugins"
+  fi
+fi
+
+echo
+printf '%s\n' "${c_ac}  ytui installed.${c_rst}"
+printf '%s\n' "  ytui doctor                 check yt-dlp + audio device"
+printf '%s\n' "  ytui auth <cookies.txt>     connect Liked Music / playlists / subscriptions"
+printf '%s\n' "  ytui                        open the player ( / search · ? help · q quit )"

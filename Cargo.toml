@@ -1,0 +1,27 @@
+[package]
+name = "ytui"
+version = "0.3.0"
+edition = "2021"
+description = "Low-RAM YouTube Music TUI player — pure Rust audio engine, no browser, no daemon"
+license = "MIT"
+
+[dependencies]
+ratatui = "=0.29.0"
+crossterm = "=0.28.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Decoding: AAC in MP4/M4A is the only thing YouTube serves that we can use.
+# Keeping the feature list minimal keeps the binary and the codec tables small.
+symphonia = { version = "0.5", default-features = false, features = [
+    "aac",
+    "isomp4",
+] }
+cpal = "0.15"
+ureq = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

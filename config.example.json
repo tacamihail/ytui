@@ -1,0 +1,11 @@
+{
+  "cookies_file": "",
+  "cookies_browser": "",
+  "results_count": 30,
+  "fetch_limit": 2000,
+  "history_limit": 300,
+  "seek_step": 5.0,
+  "volume_step": 5,
+  "buffer_ms": 2000,
+  "cache_kib": 256
+}

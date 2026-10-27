@@ -1,0 +1,157 @@
+//! cpal output: one long-lived stereo f32 stream at 48 kHz.
+//!
+//! The decoder thread pushes into a bounded ring buffer; the audio callback
+//! drains it. A mutex is used because the critical section is a pair of
+//! `copy_from_slice` calls — no allocation, no I/O, so priority inversion is
+//! not a practical concern at this buffer size.
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+use crate::audio::OUT_RATE;
+
+pub struct Sink {
+    buf: Arc<Mutex<VecDeque<f32>>>,
+    played: Arc<AtomicU64>,
+    paused: Arc<AtomicBool>,
+    volume: Arc<AtomicI32>,
+    muted: Arc<AtomicBool>,
+    dev_err: Arc<Mutex<Option<String>>>,
+    capacity: usize,
+    _stream: cpal::Stream,
+}
+
+impl Sink {
+    pub fn new(buffer_ms: u32) -> Result<Self, String> {
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or_else(|| "no audio output device found".to_string())?;
+
+        let config = cpal::StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(OUT_RATE),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let capacity = ((OUT_RATE as usize * 2 * buffer_ms.max(200) as usize) / 1000).max(4096);
+        let buf = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(capacity)));
+        let played = Arc::new(AtomicU64::new(0));
+        let paused = Arc::new(AtomicBool::new(false));
+        let volume = Arc::new(AtomicI32::new(100));
+        let muted = Arc::new(AtomicBool::new(false));
+        let dev_err = Arc::new(Mutex::new(None));
+
+        let cb_buf = Arc::clone(&buf);
+        let cb_played = Arc::clone(&played);
+        let cb_paused = Arc::clone(&paused);
+        let cb_vol = Arc::clone(&volume);
+        let cb_muted = Arc::clone(&muted);
+        let cb_err = Arc::clone(&dev_err);
+
+        let stream = device
+            .build_output_stream(
+                &config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    if cb_paused.load(Ordering::Relaxed) {
+                        data.fill(0.0);
+                        return;
+                    }
+                    let gain = if cb_muted.load(Ordering::Relaxed) {
+                        0.0
+                    } else {
+                        cb_vol.load(Ordering::Relaxed) as f32 / 100.0
+                    };
+                    let mut q = cb_buf.lock().unwrap_or_else(|e| e.into_inner());
+                    let (head, tail) = q.as_slices();
+                    let n1 = head.len().min(data.len());
+                    data[..n1].copy_from_slice(&head[..n1]);
+                    let n2 = (data.len() - n1).min(tail.len());
+                    data[n1..n1 + n2].copy_from_slice(&tail[..n2]);
+                    data[n1 + n2..].fill(0.0);
+                    q.drain(..n1 + n2);
+                    drop(q);
+                    if (gain - 1.0).abs() > f32::EPSILON {
+                        for s in data.iter_mut() {
+                            *s = (*s * gain).clamp(-1.0, 1.0);
+                        }
+                    }
+                    cb_played.fetch_add((data.len() / 2) as u64, Ordering::Relaxed);
+                },
+                move |e| {
+                    *cb_err.lock().unwrap_or_else(|x| x.into_inner()) = Some(e.to_string());
+                },
+                None,
+            )
+            .map_err(|e| format!("cannot open audio device: {e}"))?;
+
+        stream
+            .play()
+            .map_err(|e| format!("cannot start audio device: {e}"))?;
+
+        Ok(Self {
+            buf,
+            played,
+            paused,
+            volume,
+            muted,
+            dev_err,
+            capacity,
+            _stream: stream,
+        })
+    }
+
+    pub fn buffered_frames(&self) -> usize {
+        let q = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        q.len() / 2
+    }
+
+    pub fn push(&self, samples: &[f32]) {
+        let mut q = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        for &s in samples {
+            if q.len() >= self.capacity {
+                break;
+            }
+            // AAC can overshoot; keep the device from wrapping integers.
+            q.push_back(s.clamp(-1.0, 1.0));
+        }
+    }
+
+    pub fn clear(&self) {
+        self.buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    pub fn played_frames(&self) -> u64 {
+        self.played.load(Ordering::Relaxed)
+    }
+
+    pub fn set_played_frames(&self, frames: u64) {
+        self.played.store(frames, Ordering::Relaxed);
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    pub fn set_volume(&self, percent: i64) {
+        self.volume.store(percent as i32, Ordering::Relaxed);
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Relaxed);
+    }
+
+    pub fn take_error(&self) -> Option<String> {
+        self.dev_err
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+}
