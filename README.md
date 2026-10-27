@@ -147,8 +147,8 @@ Measured with a release build on WSL2 in a 130x30 terminal. The numbers are
 
 The 108 h case is the largest because it keeps the file's fragment index in
 RAM (about 0.6 MB, 39k fragments) so seeking stays a single request. Apart from
-that it's a 1.2 MB audio ring, one 256 KiB range chunk and the packet being
-decoded; nothing grows with the length of the track.
+that index, memory is a 1.2 MB audio ring, one 256 KiB range chunk and the
+packet being decoded, so normal tracks stay around 12 MB.
 
 `python3 tools/ram.py [URL ...]` runs the real TUI in a pty and prints the same
 table on your machine.
