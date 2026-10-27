@@ -22,15 +22,31 @@ afterwards.
 
 ## RAM
 
-| what | resident |
-|---|---|
-| ytui (UI + decoder + audio ring) | **~15–25 MB** |
-| yt-dlp (only while listing / resolving) | transient, exits |
-| mpv / browser / daemon | none |
+Everything is bounded: a 1.2 MB audio ring (2 s target plus 1 s headroom at
+48 kHz stereo, set by `buffer_ms`), one 256 KiB HTTP range chunk, and the
+packet being decoded. Nothing grows with track length or playback time.
 
-The player never downloads a whole track. It keeps **one HTTP Range chunk**
-(256 KiB by default) plus a **2 s audio ring** (~1 MiB), so a 3-hour mix costs
-the same RAM as a 3-minute song.
+Measured on Ubuntu 22.04 (WSL2), release build, 130×30 terminal. `VmRSS` read
+from `/proc/<pid>/status` after the list had finished loading:
+
+| state | RSS |
+|---|---|
+| idle, Liked Music (151 entries) loaded | **7.8–8.0 MB** |
+| playing a normal AAC track | **11.6–11.7 MB** |
+| playing a 108 h / 6.3 GB fragmented mix | **16.4–16.5 MB** |
+| the same after seeking to the middle | **16.4–16.5 MB** |
+
+Peak memory (`VmHWM`) stayed within ~1 MB of RSS. The multi-hour case is the
+ceiling: it keeps the stream's segment index (~39k fragments, ~0.6 MB) in RAM
+so a seek is a single request. `yt-dlp` is spawned only to list or resolve and
+exits; there is no mpv, browser or daemon.
+
+Reproduce (Linux, needs a terminal-less pty):
+
+```bash
+python3 tools/ram.py                        # idle only
+python3 tools/ram.py "https://youtu.be/..."  # idle + playing
+```
 
 ## Music only
 
