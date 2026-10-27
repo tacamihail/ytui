@@ -53,8 +53,8 @@ git clone git@github.com:<you>/ytui.git && cd ytui
 
 `install.sh` detects your package manager, installs a current `yt-dlp` and
 `deno` into `~/.local/bin` / `~/.deno/bin`, installs the ALSA headers, builds
-with `cargo build --release`, copies the binary to `~/.local/bin/ytui` and
-seeds `~/.config/ytui/config.json`.
+with `cargo build --release`, installs `~/.local/bin/ytui` (a small launcher
+over `ytui.bin`) and seeds `~/.config/ytui/config.json`.
 
 Manual build:
 
@@ -73,6 +73,17 @@ sudo apt-get install -y libasound2-plugins
 ```
 
 Then run `ytui doctor`; it should print `✔ audio output`.
+
+If you cannot install the package, extract it locally and the launcher finds it
+on its own:
+
+```bash
+cd /tmp && apt-get download libasound2-plugins
+dpkg -x libasound2-plugins_*.deb ~/.local/alsa
+```
+
+The `ytui` launcher exports `ALSA_PLUGIN_DIR` when `~/.local/alsa/...` exists,
+so audio also works when started as `wsl ... ytui` or from a desktop entry.
 
 ## Connect your YouTube account
 
@@ -172,8 +183,10 @@ Without cookies the player still works: search and playback are public.
 
 ## Troubleshooting
 
-- **`ytui doctor` says no audio device** — on WSL install
-  `libasound2-plugins`; on a desktop make sure PipeWire/PulseAudio is running.
+- **`ytui doctor` says no audio device** - on WSL install
+  `libasound2-plugins` (or extract it under `~/.local/alsa`; the launcher picks
+  that up); on a desktop make sure PipeWire/PulseAudio is running. Start ytui
+  through `~/.local/bin/ytui`, not `ytui.bin`, so the plugin path is set.
 - **`no AAC stream for this track (opus only)`** — that upload has no M4A
   audio. It is skipped by design; `symphonia` has no Opus decoder.
 - **`private — sign-in required`** — re-export cookies and run

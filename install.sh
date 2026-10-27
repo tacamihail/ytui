@@ -7,6 +7,7 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DST="$HOME/.local/bin/ytui"
+BIN_REAL="$HOME/.local/bin/ytui.bin"
 CFG_DIR="$HOME/.config/ytui"
 
 c_dim=$'\e[2m'; c_ok=$'\e[32m'; c_yel=$'\e[33m'; c_ac=$'\e[36m'; c_rst=$'\e[0m'
@@ -137,8 +138,37 @@ ok "cargo $(cargo --version | cut -d' ' -f2)"
 # --- build -------------------------------------------------------------------
 info "building ytui (first build downloads crates, 1–3 min)"
 (cd "$DIR" && cargo build --release)
-install -Dm755 "$DIR/target/release/ytui" "$BIN_DST"
-ok "installed -> $BIN_DST"
+install -Dm755 "$DIR/target/release/ytui" "$BIN_REAL"
+
+# Launcher, not the binary: on WSL the ALSA pulse plugin may only exist as an
+# extracted copy under ~/.local/alsa, so point ALSA_PLUGIN_DIR at it before
+# exec. No-op on normal Linux, where the system plugin is found anyway.
+cat > "$BIN_DST" <<'LAUNCHER'
+#!/bin/sh
+# ytui launcher: locate the WSL ALSA pulse plugin if it was extracted locally.
+if [ -z "${ALSA_PLUGIN_DIR:-}" ]; then
+    for d in \
+        "$HOME/.local/alsa/usr/lib/x86_64-linux-gnu/alsa-lib" \
+        "$HOME/.local/alsa/usr/lib/aarch64-linux-gnu/alsa-lib"
+    do
+        if [ -d "$d" ]; then
+            ALSA_PLUGIN_DIR="$d"
+            export ALSA_PLUGIN_DIR
+            break
+        fi
+    done
+fi
+
+self=$0
+case $self in
+    */*) ;;
+    *) self=$(command -v -- "$self") ;;
+esac
+dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd)
+exec "$dir/ytui.bin" "$@"
+LAUNCHER
+chmod 755 "$BIN_DST"
+ok "installed -> $BIN_DST (+ $BIN_REAL)"
 
 # --- config ------------------------------------------------------------------
 mkdir -p "$CFG_DIR"
