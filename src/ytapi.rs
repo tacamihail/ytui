@@ -51,6 +51,9 @@ pub fn cookie_header(path: &Path) -> Option<String> {
     let mut pairs: Vec<String> = Vec::new();
     for line in txt.lines() {
         let line = line.trim_end();
+        // `#HttpOnly_` marks a cookie, not a comment: browser exports prefix
+        // the auth cookies (SID/HSID/SSID) this way.
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -261,4 +264,28 @@ fn parse_duration(s: &str) -> u64 {
 fn dedup(items: &mut Vec<Entry>) {
     let mut seen = std::collections::HashSet::new();
     items.retain(|e| seen.insert(e.id.clone()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn cookie_header_reads_httponly_lines() {
+        let path = std::env::temp_dir().join(format!("ytui-cookies-{}.txt", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "# Netscape HTTP Cookie File").unwrap();
+        writeln!(f, "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsecret").unwrap();
+        writeln!(f, ".youtube.com\tTRUE\t/\tTRUE\t0\tPREF\tf6=400").unwrap();
+        writeln!(f, ".example.com\tTRUE\t/\tFALSE\t0\tOTHER\tx").unwrap();
+        drop(f);
+
+        let header = cookie_header(&path).unwrap();
+        assert!(header.contains("SID=secret"));
+        assert!(header.contains("PREF=f6=400"));
+        assert!(!header.contains("OTHER"));
+
+        let _ = std::fs::remove_file(&path);
+    }
 }

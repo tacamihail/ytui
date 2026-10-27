@@ -17,6 +17,8 @@ use crate::config::Config;
 use crate::entry::Entry;
 
 pub const LIKED_MUSIC_URL: &str = "https://music.youtube.com/playlist?list=LM";
+/// System playlist owned by the account; unlike `LM` it exposes the owner.
+pub const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
 
 /// Browser-ish UA; googlevideo accepts any modern string.
 pub const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
@@ -312,47 +314,64 @@ fn probe(url: &str) -> Result<(), String> {
     }
 }
 
-/// Reads the signed-in account's channel name and id from the Liked Music
-/// playlist, which is private and therefore owned by the user.
+/// Reads the signed-in account's channel name and id from a system playlist
+/// that belongs to the user.
+///
+/// Watch Later carries the owner in `channel`/`channel_id`; the Liked Music
+/// playlist (`LM`) is returned with those fields null, so it only serves as a
+/// fallback for accounts that cannot use Watch Later.
 pub fn account(cfg: &Config) -> Result<(String, String), String> {
     let Some((flag, value)) = cfg.cookie_args() else {
         return Err("no cookies configured".into());
     };
-    let out = command()
-        .args([
-            "--flat-playlist",
-            "--playlist-items",
-            "1",
-            "-J",
-            "--no-warnings",
-            flag,
-            &value,
-            LIKED_MUSIC_URL,
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|_| "yt-dlp not found".to_string())?;
-    if !out.status.success() {
-        return Err(friendly(&String::from_utf8_lossy(&out.stderr)));
+    let mut last_err = String::new();
+    for url in [WATCH_LATER_URL, LIKED_MUSIC_URL] {
+        let out = command()
+            .args([
+                "--flat-playlist",
+                "--playlist-items",
+                "1",
+                "-J",
+                "--no-warnings",
+                flag,
+                &value,
+                url,
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|_| "yt-dlp not found".to_string())?;
+        if !out.status.success() {
+            last_err = friendly(&String::from_utf8_lossy(&out.stderr));
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+            Ok(v) => v,
+            Err(e) => {
+                last_err = format!("bad yt-dlp json: {e}");
+                continue;
+            }
+        };
+        let name = v
+            .get("channel")
+            .and_then(|x| x.as_str())
+            .or_else(|| v.get("uploader").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let id = v
+            .get("channel_id")
+            .and_then(|x| x.as_str())
+            .or_else(|| v.get("uploader_id").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .to_string();
+        if !name.is_empty() || !id.is_empty() {
+            return Ok((name, id));
+        }
     }
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("bad yt-dlp json: {e}"))?;
-    let name = v
-        .get("channel")
-        .and_then(|x| x.as_str())
-        .or_else(|| v.get("uploader").and_then(|x| x.as_str()))
-        .unwrap_or("")
-        .to_string();
-    let id = v
-        .get("channel_id")
-        .and_then(|x| x.as_str())
-        .or_else(|| v.get("uploader_id").and_then(|x| x.as_str()))
-        .unwrap_or("")
-        .to_string();
-    if name.is_empty() && id.is_empty() {
-        return Err("could not read the account from Liked Music".into());
+    if last_err.is_empty() {
+        Err("could not read the account: cookies are accepted but YouTube returned no owner".into())
+    } else {
+        Err(last_err)
     }
-    Ok((name, id))
 }
 
 fn friendly(stderr: &str) -> String {
