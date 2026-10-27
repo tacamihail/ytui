@@ -212,6 +212,10 @@ Without cookies the player still works: search and playback are public.
   `symphonia` decodes its AAC core but not the SBR high band, so it plays at the
   right speed with duller highs. ytui prefers AAC-LC 256/128 kbps when YouTube
   offers it.
+- **A multi-hour mix hangs on "loading"** — YouTube serves those as a
+  fragmented MP4 (100+ hours, several GB). ytui now detects that layout from the
+  first chunk and opens it without indexing every fragment; seeking is disabled
+  on those large streams (the demuxer can only seek by walking them).
 
 ## Uninstall
 

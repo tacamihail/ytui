@@ -7,7 +7,7 @@ use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
@@ -26,6 +26,9 @@ pub struct Loaded {
     /// (44100): symphonia does not apply SBR, so using the container rate
     /// would play the track at double speed.
     decoded_rate: Option<u32>,
+    /// False for fragmented streams: the demuxer can only seek by walking
+    /// every moof, which takes minutes on a multi-hour upload.
+    seekable: bool,
     stereo: Vec<[f32; 2]>,
     /// Length of the stream in seconds (0 if unknown).
     pub duration: f64,
@@ -34,6 +37,7 @@ pub struct Loaded {
 impl Loaded {
     pub fn open(url: &str, chunk_bytes: usize) -> Result<Self, String> {
         let src = HttpFile::open(url, chunk_bytes).map_err(|e| format!("open stream: {e}"))?;
+        let seekable = src.is_seekable();
         let mss = MediaSourceStream::new(Box::new(src), Default::default());
 
         let mut hint = Hint::new();
@@ -71,6 +75,7 @@ impl Loaded {
             track_id,
             resampler: None,
             decoded_rate: None,
+            seekable,
             stereo: Vec::with_capacity(8192),
             duration,
         })
@@ -134,6 +139,9 @@ impl Loaded {
     }
 
     pub fn seek(&mut self, secs: f64) -> Result<(), String> {
+        if !self.seekable {
+            return Err("seeking is not available on this long fragmented stream".into());
+        }
         let to = SeekTo::Time {
             time: Time::from(secs.max(0.0)),
             track_id: Some(self.track_id),

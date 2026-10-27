@@ -21,6 +21,13 @@ pub struct HttpFile {
     cache_start: u64,
     cache: Vec<u8>,
     chunk: usize,
+    /// Fragmented MP4 (moof/sidx) is not worth random access: symphonia scans
+    /// every top-level atom when the source is seekable, which turns a 6 GB,
+    /// 108 h mix into tens of thousands of range requests before the first
+    /// sample. Large fragmented streams are therefore reported as unseekable,
+    /// which makes the demuxer stop at the first moof. Our own `seek` below
+    /// still works for the small ones.
+    seekable: bool,
 }
 
 impl HttpFile {
@@ -33,8 +40,14 @@ impl HttpFile {
             cache_start: 0,
             cache: Vec::new(),
             chunk: chunk_bytes.max(64 * 1024),
+            seekable: true,
         };
         f.fetch(0)?;
+        // Small fragmented files are cheap to scan (a few dozen fragments), so
+        // keep random access there; huge ones must not be scanned at all.
+        const FRAGMENTED_SEEK_LIMIT: u64 = 16 * 1024 * 1024;
+        let fragmented = looks_fragmented(&f.cache);
+        f.seekable = !fragmented || f.len.map(|l| l <= FRAGMENTED_SEEK_LIMIT).unwrap_or(false);
         Ok(f)
     }
 
@@ -130,9 +143,89 @@ impl Seek for HttpFile {
 
 impl MediaSource for HttpFile {
     fn is_seekable(&self) -> bool {
-        true
+        self.seekable
     }
     fn byte_len(&self) -> Option<u64> {
         self.len
+    }
+}
+
+/// True when the first chunk contains a `moof` or `sidx` box before any
+/// `mdat`, i.e. the file is a fragmented MP4 (YouTube uses these for very long
+/// uploads). Such files must not be opened in seekable mode: symphonia then
+/// walks every top-level atom to look for `moov`, which is O(fragments) and
+/// effectively hangs on multi-hour mixes.
+fn looks_fragmented(head: &[u8]) -> bool {
+    let mut off = 0usize;
+    while off + 8 <= head.len() {
+        let size32 = u32::from_be_bytes([head[off], head[off + 1], head[off + 2], head[off + 3]]);
+        let typ = &head[off + 4..off + 8];
+        if typ == b"moof" || typ == b"sidx" {
+            return true;
+        }
+        if typ == b"mdat" {
+            return false;
+        }
+        let size = match size32 {
+            0 => return false, // box extends to the end of the file
+            1 => {
+                if off + 16 > head.len() {
+                    return false;
+                }
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&head[off + 8..off + 16]);
+                u64::from_be_bytes(b)
+            }
+            n => u64::from(n),
+        };
+        if size < 8 {
+            return false;
+        }
+        match (off as u64).checked_add(size) {
+            Some(next) if next <= head.len() as u64 => off = next as usize,
+            _ => return false, // box continues past the chunk we probed
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bx(typ: &[u8; 4], payload: usize) -> Vec<u8> {
+        let mut v = ((payload + 8) as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(typ);
+        v.resize(payload + 8, 0);
+        v
+    }
+
+    #[test]
+    fn detects_fragmented_mp4() {
+        let mut head = bx(b"ftyp", 16);
+        head.extend(bx(b"moov", 735));
+        head.extend(bx(b"sidx", 4000));
+        assert!(looks_fragmented(&head));
+
+        let mut head = bx(b"ftyp", 16);
+        head.extend(bx(b"moov", 735));
+        head.extend(bx(b"moof", 900));
+        assert!(looks_fragmented(&head));
+    }
+
+    #[test]
+    fn accepts_plain_mp4() {
+        let mut head = bx(b"ftyp", 16);
+        head.extend(bx(b"moov", 735));
+        head.extend(bx(b"mdat", 4000));
+        assert!(!looks_fragmented(&head));
+
+        // mdat first (moov at the end): symphonia only needs one seek for it.
+        let mut head = bx(b"ftyp", 16);
+        head.extend(bx(b"mdat", 100_000));
+        assert!(!looks_fragmented(&head));
+
+        // Truncated header must not be mistaken for a fragment.
+        assert!(!looks_fragmented(b"\0\0\0\x10fty"));
     }
 }
