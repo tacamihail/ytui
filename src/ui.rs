@@ -1,6 +1,6 @@
 //! ratatui drawing. Catppuccin-ish palette that fits Omarchy/Hyprland setups.
 
-use crate::app::{App, TABS};
+use crate::app::{App, PlayerBtn, TABS};
 use crate::audio::{Repeat, Status};
 use crate::entry::{fmt_duration, fmt_f64};
 use crate::ytdl;
@@ -89,6 +89,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
+    app.player_buttons.clear();
     let (status, title, channel, pos, dur, vol, muted, shuffle, repeat) = {
         let st = app.player.lock().unwrap_or_else(|e| e.into_inner());
         (
@@ -178,12 +179,40 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         title
     };
+
+    // Clickable transport: " ⏮  ▶  ⏭  " (10 cells), then the title.
+    const PREFIX: usize = 10;
+    let start = inner.x + 1;
+    let buttons = [
+        (PlayerBtn::Prev, start.saturating_sub(1)),
+        (PlayerBtn::PlayPause, start + 2),
+        (PlayerBtn::Next, start + 5),
+    ];
+    for (btn, x) in buttons {
+        app.player_buttons.push((
+            Rect {
+                x,
+                y: inner.y,
+                width: 3,
+                height: 1,
+            },
+            btn,
+        ));
+    }
+    let btn_style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+
     let right_w = right.chars().count();
-    let title_w = w.saturating_sub(right_w + 5).max(4);
+    let title_w = w.saturating_sub(right_w + PREFIX).max(4);
     let t = truncate(&shown, title_w);
-    let pad = " ".repeat(w.saturating_sub(3 + t.chars().count() + right_w));
+    let pad = " ".repeat(w.saturating_sub(PREFIX + t.chars().count() + right_w));
     let line1 = Line::from(vec![
-        Span::styled(format!(" {icon} "), Style::new().fg(icol)),
+        Span::raw(" "),
+        Span::styled("⏮", btn_style),
+        Span::raw("  "),
+        Span::styled(icon, Style::new().fg(icol).add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled("⏭", btn_style),
+        Span::raw("  "),
         Span::styled(t, Style::new().fg(FG).add_modifier(Modifier::BOLD)),
         Span::raw(pad),
         Span::styled(right, Style::new().fg(DIM)),
@@ -394,7 +423,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
-    let (w, h) = (68u16, 27u16);
+    let (w, h) = (68u16, 28u16);
     let r = centered_rect(w.min(area.width), h.min(area.height), area);
     f.render_widget(Clear, r);
     let b = Block::bordered()
@@ -406,7 +435,7 @@ fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
     let inner = b.inner(r);
     f.render_widget(b, r);
 
-    let rows: [(&str, &str); 24] = [
+    let rows: [(&str, &str); 25] = [
         ("— navigation —", ""),
         ("1-6 / Tab / Shift+Tab", "switch tabs"),
         ("↑↓ / j k / wheel", "move selection"),
@@ -420,6 +449,7 @@ fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
         ("← → or h l", "seek ∓/±5s"),
         (", .", "seek ∓/±30s"),
         ("click progress bar", "seek to that position"),
+        ("click ⏮ ▶ ⏭", "previous · pause/resume · next"),
         ("[ ]", "volume ∓/±5"),
         ("m", "mute / unmute"),
         ("s", "shuffle"),

@@ -35,6 +35,14 @@ const TAB_SUBS: usize = 3;
 const TAB_HISTORY: usize = 4;
 const TAB_QUEUE: usize = 5;
 
+/// Clickable transport control in the player bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerBtn {
+    Prev,
+    PlayPause,
+    Next,
+}
+
 pub struct App {
     pub cfg: Config,
     pub tab: usize,
@@ -63,6 +71,7 @@ pub struct App {
     pub last_click: Option<(Instant, usize)>,
     // Geometry captured while drawing, used for mouse hit-testing.
     pub tab_hits: Vec<(u16, u16)>,
+    pub player_buttons: Vec<(Rect, PlayerBtn)>,
     pub gauge_area: Rect,
     pub list_items_area: Rect,
     // Queue rows are rebuilt only when the queue actually changes.
@@ -103,6 +112,7 @@ impl App {
             account,
             last_click: None,
             tab_hits: Vec::new(),
+            player_buttons: Vec::new(),
             gauge_area: Rect::default(),
             list_items_area: Rect::default(),
             queue_rows: Vec::new(),
@@ -369,6 +379,19 @@ impl App {
                             return;
                         }
                     }
+                }
+                let btn = self
+                    .player_buttons
+                    .iter()
+                    .find(|(r, _)| m.row == r.y && m.column >= r.x && m.column < r.x + r.width)
+                    .map(|(_, b)| *b);
+                if let Some(b) = btn {
+                    match b {
+                        PlayerBtn::Prev => self.cmd(Cmd::Prev),
+                        PlayerBtn::PlayPause => self.cmd(Cmd::Toggle),
+                        PlayerBtn::Next => self.cmd(Cmd::Next),
+                    }
+                    return;
                 }
                 let g = self.gauge_area;
                 if g.width > 0 && m.row == g.y && m.column >= g.x && m.column < g.x + g.width {

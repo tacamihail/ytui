@@ -155,6 +155,7 @@ Without cookies the player still works: search and playback are public.
 | `←` `→` / `h` `l` | seek ∓/±5 s |
 | `,` `.` | seek ∓/±30 s |
 | click progress bar | seek there |
+| click ⏮ / ▶ ⏸ / ⏭ | previous · pause / resume · next |
 | `[` `]` | volume ∓/±5 % |
 | `m` | mute / unmute |
 | `s` | shuffle |
