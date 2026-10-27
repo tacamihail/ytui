@@ -9,9 +9,9 @@ only spawned to list results and resolve a stream URL — it exits immediately
 afterwards.
 
 ```
-┌─ 1 Search·30 ─ 2 Liked Music·412 ─ 3 Playlists ─ 4 Subscriptions ─ 5 History ─ 6 Queue·2 ── ◉ you ┐
+┌─ 1 Liked Music·412 ─ 2 Playlists ─ 3 Subscriptions ─ 4 History ─ 5 Queue·2 ─ 6 Search·30 ── ◉ you ┐
 ├─ player ─────────────────────────────────────────────────────────────────────────────────────────┤
-│ ▶ Bullet For My Valentine — Tears Don't Fall                                         ⤨ 100%      │
+│ ⏮  ⏸  ⏭  Bullet For My Valentine — Tears Don't Fall                                     ⤨ 100%  │
 │ ━━━━━━━━━━━━━━━●────────────────────────────────────────────────────── 1:23 / 6:45  Bullet…     │
 ├─ Liked Music ────────────────────────────────────────────────────────────────────────────────────┤
 │ ▶ Song A                                                              Artist · 3:45              │
@@ -123,12 +123,12 @@ Without cookies the player still works: search and playback are public.
 
 | # | tab | source |
 |---|---|---|
-| 1 | Search | `ytsearchN:<query>` |
-| 2 | Liked Music | `music.youtube.com/playlist?list=LM` (private) |
-| 3 | Playlists | your channel's `/playlists` tab; `Enter` drills into one, `Esc` goes back |
-| 4 | Subscriptions | `youtube.com/feed/subscriptions` (private, parsed from the page) |
-| 5 | History | local `~/.local/share/ytui/history.json` |
-| 6 | Queue | live playback queue |
+| 1 | Liked Music | `music.youtube.com/playlist?list=LM` (private) — the default tab |
+| 2 | Playlists | your channel's `/playlists` tab; `Enter` drills into one, `Esc` goes back |
+| 3 | Subscriptions | `youtube.com/feed/subscriptions` (private, parsed from the page) |
+| 4 | History | local `~/.local/share/ytui/history.json` |
+| 5 | Queue | live playback queue |
+| 6 | Search | `ytsearchN:<query>` |
 
 ## Keys
 
@@ -213,9 +213,10 @@ Without cookies the player still works: search and playback are public.
   right speed with duller highs. ytui prefers AAC-LC 256/128 kbps when YouTube
   offers it.
 - **A multi-hour mix hangs on "loading"** — YouTube serves those as a
-  fragmented MP4 (100+ hours, several GB). ytui now detects that layout from the
-  first chunk and opens it without indexing every fragment; seeking is disabled
-  on those large streams (the demuxer can only seek by walking them).
+  fragmented MP4 (100+ hours, several GB). ytui detects that layout from the
+  first chunk, opens the stream at the first fragment and seeks through the
+  file's `sidx` index, so jumping to any point is one request instead of
+  walking every fragment. Seeks land on a fragment boundary (~10 s).
 
 ## Uninstall
 

@@ -282,15 +282,15 @@ impl Engine {
             return;
         };
         let secs = secs.max(0.0);
-        if loaded.seek(secs).is_err() {
+        let Ok(actual) = loaded.seek(secs) else {
             return;
-        }
+        };
         self.eof = false;
         if let Some(s) = &self.sink {
             s.clear();
-            s.set_played_frames((secs * f64::from(OUT_RATE)) as u64);
+            s.set_played_frames((actual * f64::from(OUT_RATE)) as u64);
         }
-        self.lock().pos = secs;
+        self.lock().pos = actual;
     }
 
     fn skip(&mut self, dir: i32) {

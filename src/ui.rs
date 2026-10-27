@@ -1,6 +1,6 @@
 //! ratatui drawing. Catppuccin-ish palette that fits Omarchy/Hyprland setups.
 
-use crate::app::{App, PlayerBtn, TABS};
+use crate::app::{App, PlayerBtn, TABS, TAB_LIKED, TAB_PLAYLISTS, TAB_QUEUE, TAB_SEARCH, TAB_SUBS};
 use crate::audio::{Repeat, Status};
 use crate::entry::{fmt_duration, fmt_f64};
 use crate::ytdl;
@@ -258,7 +258,7 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
-    let title = if app.tab == 2 && app.in_playlist {
+    let title = if app.tab == TAB_PLAYLISTS && app.in_playlist {
         format!(" Playlists · {} · esc back ", app.playlist_title)
     } else {
         format!(" {} ", TABS[app.tab])
@@ -272,7 +272,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 
     let selidx = app.sel[app.tab];
 
-    if app.tab == 5 {
+    if app.tab == TAB_QUEUE {
         if app.queue_rows.is_empty() {
             empty_hint(
                 f,
@@ -304,23 +304,23 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let list = app.current_vec();
     if list.is_empty() {
         let hint = match app.tab {
-            0 => "press / and search YouTube Music (or paste a URL)",
-            1 => "no liked music yet — press r (needs ytui auth)",
-            2 => {
+            TAB_SEARCH => "press / and search YouTube Music (or paste a URL)",
+            TAB_LIKED => "no liked music yet — press r (needs ytui auth)",
+            TAB_PLAYLISTS => {
                 if app.in_playlist {
                     "empty playlist"
                 } else {
                     "no playlists yet — press r (needs ytui auth)"
                 }
             }
-            3 => "no subscriptions loaded — press r (needs ytui auth)",
+            TAB_SUBS => "no subscriptions loaded — press r (needs ytui auth)",
             _ => "nothing played yet",
         };
         empty_hint(f, app, inner, hint);
         return;
     }
 
-    let is_playlist_list = app.tab == 2 && !app.in_playlist;
+    let is_playlist_list = app.tab == TAB_PLAYLISTS && !app.in_playlist;
     let items: Vec<ListItem> = list
         .iter()
         .map(|e| {

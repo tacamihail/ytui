@@ -12,7 +12,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 
-use crate::audio::http::HttpFile;
+use crate::audio::http::{FragIndex, HttpFile, WindowFile};
 use crate::audio::resample::Resampler;
 use crate::audio::OUT_RATE;
 
@@ -29,45 +29,47 @@ pub struct Loaded {
     /// False for fragmented streams: the demuxer can only seek by walking
     /// every moof, which takes minutes on a multi-hour upload.
     seekable: bool,
+    url: String,
+    chunk: usize,
+    /// Segment index + file header for fast seeks on long fragmented streams.
+    frag: Option<FragSeek>,
     stereo: Vec<[f32; 2]>,
     /// Length of the stream in seconds (0 if unknown).
     pub duration: f64,
 }
 
+struct FragSeek {
+    index: FragIndex,
+    prefix: Vec<u8>,
+}
+
 impl Loaded {
     pub fn open(url: &str, chunk_bytes: usize) -> Result<Self, String> {
-        let src = HttpFile::open(url, chunk_bytes).map_err(|e| format!("open stream: {e}"))?;
+        let mut src = HttpFile::open(url, chunk_bytes).map_err(|e| format!("open stream: {e}"))?;
         let seekable = src.is_seekable();
-        let mss = MediaSourceStream::new(Box::new(src), Default::default());
 
-        let mut hint = Hint::new();
-        hint.with_extension("m4a");
+        // Long fragmented streams: read the sidx and start a window at the
+        // first fragment, so neither opening nor seeking walks the file.
+        let mut frag = None;
+        if !seekable {
+            if let Some(index) = src.frag_index().map_err(|e| format!("read index: {e}"))? {
+                if let Some(prefix) = src
+                    .fragment_prefix()
+                    .map_err(|e| format!("read header: {e}"))?
+                {
+                    frag = Some(FragSeek { index, prefix });
+                }
+            }
+        }
 
-        let probed = symphonia::default::get_probe()
-            .format(
-                &hint,
-                mss,
-                &FormatOptions {
-                    enable_gapless: true,
-                    ..Default::default()
-                },
-                &MetadataOptions::default(),
-            )
-            .map_err(|e| format!("unsupported stream: {e}"))?;
-
-        let format = probed.format;
-        let track = format.default_track().ok_or("stream has no audio track")?;
-        let track_id = track.id;
-        let params = &track.codec_params;
-        let rate = params.sample_rate.unwrap_or(OUT_RATE);
-        let duration = params
-            .n_frames
-            .map(|n| n as f64 / f64::from(rate))
-            .unwrap_or(0.0);
-
-        let decoder = symphonia::default::get_codecs()
-            .make(params, &DecoderOptions::default())
-            .map_err(|e| format!("unsupported codec: {e}"))?;
+        let source: Box<dyn MediaSource> = match &frag {
+            Some(f) => Box::new(
+                WindowFile::open(url, chunk_bytes, f.prefix.clone(), f.index.offset(0))
+                    .map_err(|e| format!("open fragment: {e}"))?,
+            ),
+            None => Box::new(src),
+        };
+        let (format, decoder, track_id, duration) = probe(source)?;
 
         Ok(Self {
             format,
@@ -76,6 +78,9 @@ impl Loaded {
             resampler: None,
             decoded_rate: None,
             seekable,
+            url: url.to_string(),
+            chunk: chunk_bytes,
+            frag,
             stereo: Vec::with_capacity(8192),
             duration,
         })
@@ -138,12 +143,33 @@ impl Loaded {
         }
     }
 
-    pub fn seek(&mut self, secs: f64) -> Result<(), String> {
+    /// Seeks and returns the position playback actually resumes from.
+    pub fn seek(&mut self, secs: f64) -> Result<f64, String> {
+        let secs = secs.max(0.0);
+
+        // Fragmented: reopen the stream at the fragment that contains `secs`.
+        let frag_seek = self.frag.as_ref().and_then(|f| {
+            f.index
+                .find(secs)
+                .map(|(i, actual)| (f.index.offset(i), actual, f.prefix.clone()))
+        });
+        if let Some((start, actual, prefix)) = frag_seek {
+            let source = WindowFile::open(&self.url, self.chunk, prefix, start)
+                .map_err(|e| format!("seek: {e}"))?;
+            let (format, decoder, track_id, _) = probe(Box::new(source))?;
+            self.format = format;
+            self.decoder = decoder;
+            self.track_id = track_id;
+            self.resampler = None;
+            self.decoded_rate = None;
+            return Ok(actual);
+        }
+
         if !self.seekable {
-            return Err("seeking is not available on this long fragmented stream".into());
+            return Err("this stream cannot seek".into());
         }
         let to = SeekTo::Time {
-            time: Time::from(secs.max(0.0)),
+            time: Time::from(secs),
             track_id: Some(self.track_id),
         };
         self.format
@@ -152,8 +178,44 @@ impl Loaded {
         self.decoder.reset();
         self.resampler = None;
         self.decoded_rate = None;
-        Ok(())
+        Ok(secs)
     }
+}
+
+fn probe(
+    src: Box<dyn MediaSource>,
+) -> Result<(Box<dyn FormatReader>, Box<dyn Decoder>, u32, f64), String> {
+    let mss = MediaSourceStream::new(src, Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension("m4a");
+
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions {
+                enable_gapless: true,
+                ..Default::default()
+            },
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| format!("unsupported stream: {e}"))?;
+
+    let format = probed.format;
+    let track = format.default_track().ok_or("stream has no audio track")?;
+    let track_id = track.id;
+    let params = &track.codec_params;
+    let rate = params.sample_rate.unwrap_or(OUT_RATE);
+    let duration = params
+        .n_frames
+        .map(|n| n as f64 / f64::from(rate))
+        .unwrap_or(0.0);
+
+    let decoder = symphonia::default::get_codecs()
+        .make(params, &DecoderOptions::default())
+        .map_err(|e| format!("unsupported codec: {e}"))?;
+
+    Ok((format, decoder, track_id, duration))
 }
 
 fn push_stereo(samples: &[f32], channels: usize, out: &mut Vec<f32>) {

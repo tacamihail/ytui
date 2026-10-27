@@ -20,20 +20,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const TABS: [&str; 6] = [
-    "Search",
     "Liked Music",
     "Playlists",
     "Subscriptions",
     "History",
     "Queue",
+    "Search",
 ];
 
-const TAB_SEARCH: usize = 0;
-const TAB_LIKED: usize = 1;
-const TAB_PLAYLISTS: usize = 2;
-const TAB_SUBS: usize = 3;
-const TAB_HISTORY: usize = 4;
-const TAB_QUEUE: usize = 5;
+pub const TAB_LIKED: usize = 0;
+pub const TAB_PLAYLISTS: usize = 1;
+pub const TAB_SUBS: usize = 2;
+pub const TAB_HISTORY: usize = 3;
+pub const TAB_QUEUE: usize = 4;
+pub const TAB_SEARCH: usize = 5;
 
 /// Clickable transport control in the player bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,9 +85,9 @@ impl App {
     pub fn new(cfg: Config, player: audio::Player, fetch_tx: Sender<Msg>) -> Self {
         let history = config::load_json(&config::history_path()).unwrap_or_default();
         let account = auth::account().map(|a| a.name);
-        Self {
+        let mut app = Self {
             cfg,
-            tab: TAB_SEARCH,
+            tab: TAB_LIKED,
             search: Vec::new(),
             liked: Vec::new(),
             playlists: Vec::new(),
@@ -119,7 +119,10 @@ impl App {
             queue_version: 0,
             queue_index: usize::MAX,
             pending_playlist_title: String::new(),
-        }
+        };
+        // Opening the player on Liked Music loads it right away.
+        app.set_tab(TAB_LIKED);
+        app
     }
 
     // ---------------- main loop ----------------
