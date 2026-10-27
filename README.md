@@ -10,7 +10,7 @@ after resolving, so nothing else is running while you listen.
 ```
 ┌─ 1 Liked Music·412 ─ 2 Playlists ─ 3 Subscriptions ─ 4 History ─ 5 Queue·2 ─ 6 Search·30 ─ ◉ you ┐
 ├─ player ─────────────────────────────────────────────────────────────────────────────────────────┤
-│ ⏮  ⏸  ⏭  Bullet For My Valentine - Tears Don't Fall                        ⤨ vol ━━━━━━━━●─ 100% │
+│ ⏮  ⏸  ⏭  Bullet For My Valentine - Tears Don't Fall                         ⤨ 🔊 ━━━━━━━━━━ 100% │
 │ ━━━━━━━━━━━━━━━●────────────────────────────────────────────────────── 1:23 / 6:45  Bullet…      │
 ├─ Liked Music ────────────────────────────────────────────────────────────────────────────────────┤
 │ ▶ Song A                                                              Artist · 3:45              │
@@ -108,7 +108,7 @@ the help and `q` quits.
 
 The mouse works as well: click a tab, click a row to select it, double-click
 to play, click the progress bar to seek, and click the buttons in the player.
-The volume slider in the player can be clicked or dragged.
+The speaker icon mutes, and the slider next to it can be clicked or dragged.
 
 ## Config
 

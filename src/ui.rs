@@ -91,6 +91,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
     app.player_buttons.clear();
     app.vol_area = Rect::default();
+    app.mute_area = Rect::default();
     let (status, title, channel, pos, dur, vol, muted, shuffle, repeat) = {
         let st = app.player.lock().unwrap_or_else(|e| e.into_inner());
         (
@@ -206,18 +207,27 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let btn_style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
 
-    // Volume slider on the right: "vol " + 10 cells + " 35%".
+    // Volume slider on the right: speaker icon, 10 cells, then "100%".
     const VOL_W: usize = 10;
+    const ICON_W: usize = 2;
+    let speaker = if muted { "🔇" } else { "🔊" };
     let flags_w = flags.chars().count();
-    let right_w = flags_w + 4 + VOL_W + 1 + pct.chars().count();
+    let right_w = flags_w + ICON_W + 1 + VOL_W + 1 + pct.chars().count();
     let right_start = inner.x + (w.saturating_sub(right_w)) as u16;
+    let icon_x = right_start + flags_w as u16;
+    app.mute_area = Rect {
+        x: icon_x,
+        y: inner.y,
+        width: ICON_W as u16,
+        height: 1,
+    };
     app.vol_area = Rect {
-        x: right_start + (flags_w + 4) as u16,
+        x: icon_x + ICON_W as u16 + 1,
         y: inner.y,
         width: VOL_W as u16,
         height: 1,
     };
-    let filled = ((vol.clamp(0, 130) as f64 / 130.0) * VOL_W as f64).round() as usize;
+    let filled = ((vol.clamp(0, 100) as f64 / 100.0) * VOL_W as f64).round() as usize;
     let filled = filled.min(VOL_W);
     let (bar_fg, head_fg) = if muted { (DIM, DIM) } else { (ACCENT, GREEN) };
     let (bar_filled, bar_head, bar_rest) = if filled >= VOL_W {
@@ -244,7 +254,8 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(t, Style::new().fg(FG).add_modifier(Modifier::BOLD)),
         Span::raw(pad),
         Span::styled(flags, Style::new().fg(DIM)),
-        Span::styled("vol ", Style::new().fg(DIM)),
+        Span::styled(speaker, Style::new()),
+        Span::raw(" "),
         Span::styled(bar_filled, Style::new().fg(bar_fg)),
         Span::styled(bar_head, Style::new().fg(head_fg)),
         Span::styled(bar_rest, Style::new().fg(DIM)),
@@ -486,7 +497,7 @@ fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
         ("click ⏮ ⏸ ⏭", "previous, pause/resume, next"),
         ("drag volume slider", "set the volume"),
         ("[ ]", "volume down/up by 5"),
-        ("m", "mute / unmute"),
+        ("m / click icon", "mute / unmute"),
         ("s", "shuffle"),
         ("R", "repeat off / all / one"),
         ("< >", "previous / next track"),

@@ -149,7 +149,7 @@ impl Engine {
                     // Start quiet: a TUI player has no reason to blast the
                     // first track at full scale.
                     let mut st = engine.lock();
-                    st.volume = engine.cfg.volume.clamp(0, 130);
+                    st.volume = engine.cfg.volume.clamp(0, 100);
                 }
                 s.set_volume(engine.lock().volume);
                 engine.sink = Some(s);
@@ -216,7 +216,7 @@ impl Engine {
             }
             Cmd::SeekAbs(secs) => self.seek_to(secs),
             Cmd::Volume(v) => {
-                let v = v.clamp(0, 130);
+                let v = v.clamp(0, 100);
                 if let Some(s) = &self.sink {
                     s.set_volume(v);
                 }

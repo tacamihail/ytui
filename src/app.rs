@@ -73,6 +73,7 @@ pub struct App {
     pub tab_hits: Vec<(u16, u16)>,
     pub player_buttons: Vec<(Rect, PlayerBtn)>,
     pub vol_area: Rect,
+    pub mute_area: Rect,
     dragging_volume: bool,
     pub gauge_area: Rect,
     pub list_items_area: Rect,
@@ -116,6 +117,7 @@ impl App {
             tab_hits: Vec::new(),
             player_buttons: Vec::new(),
             vol_area: Rect::default(),
+            mute_area: Rect::default(),
             dragging_volume: false,
             gauge_area: Rect::default(),
             list_items_area: Rect::default(),
@@ -400,6 +402,12 @@ impl App {
                     }
                     return;
                 }
+                let mi = self.mute_area;
+                if mi.width > 0 && m.row == mi.y && m.column >= mi.x && m.column < mi.x + mi.width {
+                    let muted = lock(&self.player).muted;
+                    self.cmd(Cmd::Mute(!muted));
+                    return;
+                }
                 let v = self.vol_area;
                 if v.width > 0 && m.row == v.y && m.column >= v.x && m.column < v.x + v.width {
                     self.dragging_volume = true;
@@ -458,7 +466,7 @@ impl App {
         }
         let rel = col.saturating_sub(a.x).min(a.width - 1);
         let frac = f64::from(rel) / f64::from(a.width - 1);
-        let vol = (frac * 130.0).round() as i64;
+        let vol = (frac * 100.0).round() as i64;
         self.cmd(Cmd::Volume(vol));
         // Touching the slider is an explicit "make it audible" gesture.
         if lock(&self.player).muted {
@@ -670,7 +678,7 @@ impl App {
 
     fn change_volume(&mut self, delta: i64) {
         let cur = lock(&self.player).volume;
-        let next = (cur + delta).clamp(0, 130);
+        let next = (cur + delta).clamp(0, 100);
         self.cmd(Cmd::Volume(next));
         self.set_toast(format!("volume: {next}%"), false);
     }
