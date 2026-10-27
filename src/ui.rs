@@ -152,10 +152,13 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    // The glyph is the *action*: ⏸ while playing, ⏵ while paused. Use the
+    // same media family as ⏮/⏭ so all three render at one size; ◌ comes from
+    // a different font and looked tiny next to them.
     let (icon, icol) = match status {
-        Status::Paused => ("⏸", YELLOW),
-        Status::Loading => ("◌", ACCENT),
-        _ => ("▶", GREEN),
+        Status::Paused => ("⏵", YELLOW),
+        Status::Loading => ("⟳", ACCENT),
+        _ => ("⏸", GREEN),
     };
 
     let mut flags = String::new();
@@ -449,7 +452,7 @@ fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
         ("← → or h l", "seek ∓/±5s"),
         (", .", "seek ∓/±30s"),
         ("click progress bar", "seek to that position"),
-        ("click ⏮ ▶ ⏭", "previous · pause/resume · next"),
+        ("click ⏮ ⏸ ⏭", "previous · pause/resume · next"),
         ("[ ]", "volume ∓/±5"),
         ("m", "mute / unmute"),
         ("s", "shuffle"),
