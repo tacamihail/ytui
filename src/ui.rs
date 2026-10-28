@@ -179,7 +179,9 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         format!("{vol}%")
     };
     // Fixed width so the slider does not move while the number changes.
-    let pct = format!("{pct:<5}");
+    // Fixed width so the number and the bar keep their columns; right-aligned
+    // because the value sits directly left of the slider.
+    let pct = format!("{pct:>5}");
 
     let shown = if title.is_empty() {
         "…".to_string()
@@ -208,18 +210,18 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let btn_style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
 
-    // Volume slider on the right: 10 cells, the percentage, then the mute
-    // icon. The icon comes last on purpose: a font is free to draw the speaker
-    // emoji one cell wide or two, and anything drawn after it would land a
-    // cell off, taking the click areas with it.
+    // Volume block on the right: percentage, 10 slider cells, mute icon. The
+    // icon comes last on purpose: a font is free to draw the speaker emoji one
+    // cell wide or two, and anything drawn after it would land a cell off,
+    // taking the click areas with it.
     const VOL_W: usize = 10;
     const ICON_W: usize = 2;
     let speaker = if muted { "🔇" } else { "🔊" };
     let flags_w = flags.width();
-    let right_w = flags_w + VOL_W + 1 + pct.width() + 1 + ICON_W + 1;
+    let right_w = flags_w + pct.width() + 1 + VOL_W + 1 + ICON_W + 1;
     let right_start = inner.x + (w.saturating_sub(right_w)) as u16;
     app.vol_area = Rect {
-        x: right_start + flags_w as u16,
+        x: right_start + (flags_w + pct.width() + 1) as u16,
         y: inner.y,
         width: VOL_W as u16,
         height: 1,
@@ -250,11 +252,11 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(t, Style::new().fg(FG).add_modifier(Modifier::BOLD)),
         Span::raw(pad),
         Span::styled(flags, Style::new().fg(DIM)),
+        Span::styled(pct, Style::new().fg(DIM)),
+        Span::raw(" "),
         Span::styled(bar_filled, Style::new().fg(bar_fg)),
         Span::styled("●", Style::new().fg(head_fg)),
         Span::styled(bar_rest, Style::new().fg(DIM)),
-        Span::raw(" "),
-        Span::styled(pct, Style::new().fg(DIM)),
         Span::raw(" "),
         Span::styled(speaker, Style::new()),
         Span::raw(" "),
@@ -574,7 +576,7 @@ mod tests {
     #[test]
     fn wide_titles_fit_their_column() {
         const PREFIX: usize = 10;
-        const RIGHT_W: usize = 20; // 10 bar cells + " " + "100% " + " " + icon + " "
+        const RIGHT_W: usize = 20; // " 100%" + " " + 10 bar cells + " " + icon + " "
         let w = 100;
         let title_w = w - RIGHT_W - PREFIX;
         for title in [

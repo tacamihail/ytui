@@ -10,7 +10,7 @@ after resolving, so nothing else is running while you listen.
 ```
 ┌─ 1 Liked Music·412 ─ 2 Playlists ─ 3 Subscriptions ─ 4 History ─ 5 Queue·2 ─ 6 Search·30 ─ ◉ you ┐
 ├─ player ─────────────────────────────────────────────────────────────────────────────────────────┤
-│ ⏮  ⏸  ⏭  Bullet For My Valentine - Tears Don't Fall                        ⤨ ━━━━━━━━━● 100%  🔊 │
+│ ⏮  ⏸  ⏭  Bullet For My Valentine - Tears Don't Fall                        ⤨  100% ━━━━━━━━━● 🔊 │
 │ ━━━━━━━━━━━━━━━●────────────────────────────────────────────────────── 1:23 / 6:45  Bullet…      │
 ├─ Liked Music ────────────────────────────────────────────────────────────────────────────────────┤
 │ ▶ Song A                                                              Artist · 3:45              │
