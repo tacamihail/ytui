@@ -81,6 +81,9 @@ pub struct App {
     pub queue_rows: Vec<(String, bool)>,
     queue_version: u64,
     queue_index: usize,
+    /// Last notice sequence number taken from the player, so a skip message
+    /// is shown exactly once.
+    notice_seq: u64,
     pending_playlist_title: String,
 }
 
@@ -124,6 +127,7 @@ impl App {
             queue_rows: Vec::new(),
             queue_version: 0,
             queue_index: usize::MAX,
+            notice_seq: 0,
             pending_playlist_title: String::new(),
         };
         // Opening the player on Liked Music loads it right away.
@@ -140,6 +144,7 @@ impl App {
     ) -> io::Result<()> {
         loop {
             app.sync_queue_cache();
+            app.pick_up_notice();
             terminal.draw(|f| ui::draw(f, app))?;
             if poll(Duration::from_millis(120))? {
                 match read()? {
@@ -254,6 +259,21 @@ impl App {
             matches!(&self.toast, Some((_, t, _)) if t.elapsed() > Duration::from_secs(5));
         if expired {
             self.toast = None;
+        }
+    }
+
+    /// The engine cannot reach the toast directly, so it bumps a counter when
+    /// it walks past a track YouTube would not serve.
+    fn pick_up_notice(&mut self) {
+        let (seq, msg) = {
+            let st = lock(&self.player);
+            (st.notice_seq, st.notice.clone())
+        };
+        if seq != self.notice_seq {
+            self.notice_seq = seq;
+            if let Some(msg) = msg {
+                self.set_toast(msg, true);
+            }
         }
     }
 
@@ -628,13 +648,13 @@ impl App {
 
     fn activate(&mut self) {
         if self.tab == TAB_QUEUE {
-            let (len, cur) = {
+            let (len, cur, failed) = {
                 let st = lock(&self.player);
-                (st.queue.len(), st.index)
+                (st.queue.len(), st.index, st.status == Status::Error)
             };
             let i = self.sel[TAB_QUEUE];
             if i < len {
-                if i == cur {
+                if i == cur && !failed {
                     self.set_toast("already playing", false);
                 } else {
                     self.cmd(Cmd::PlayIndex(i));

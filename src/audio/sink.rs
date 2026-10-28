@@ -1,4 +1,4 @@
-//! cpal output: one long-lived stereo f32 stream at 48 kHz.
+//! cpal output: one long-lived stereo f32 stream at the track's sample rate.
 //!
 //! The decoder thread fills a bounded ring buffer and the audio callback drains
 //! it. The callback holds the mutex for two `copy_from_slice` calls and never
@@ -10,8 +10,6 @@ use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::audio::OUT_RATE;
-
 pub struct Sink {
     buf: Arc<Mutex<VecDeque<f32>>>,
     played: Arc<AtomicU64>,
@@ -20,6 +18,7 @@ pub struct Sink {
     muted: Arc<AtomicBool>,
     dev_err: Arc<Mutex<Option<String>>>,
     capacity: usize,
+    rate: u32,
     _stream: cpal::Stream,
 }
 
@@ -31,12 +30,22 @@ pub struct Sink {
 /// otherwise every top-up would overflow and silently throw the tail of the
 /// packet away, which makes the music skip and run faster than real time. Give
 /// it a full extra second of headroom.
-fn ring_capacity(buffer_ms: u32) -> usize {
-    ((OUT_RATE as usize * 2 * (buffer_ms.max(200) as usize + 1000)) / 1000).max(8192)
+fn ring_capacity(buffer_ms: u32, rate: u32) -> usize {
+    ((rate as usize * 2 * (buffer_ms.max(200) as usize + 1000)) / 1000).max(8192)
 }
 
 impl Sink {
-    pub fn new(buffer_ms: u32) -> Result<Self, String> {
+    /// Preferred rate of the default output device, if it can be queried.
+    pub fn default_rate() -> Option<u32> {
+        let host = cpal::default_host();
+        let device = host.default_output_device()?;
+        device
+            .default_output_config()
+            .ok()
+            .map(|c| c.sample_rate().0)
+    }
+
+    pub fn new(rate: u32, buffer_ms: u32) -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -44,11 +53,11 @@ impl Sink {
 
         let config = cpal::StreamConfig {
             channels: 2,
-            sample_rate: cpal::SampleRate(OUT_RATE),
+            sample_rate: cpal::SampleRate(rate),
             buffer_size: cpal::BufferSize::Default,
         };
 
-        let capacity = ring_capacity(buffer_ms);
+        let capacity = ring_capacity(buffer_ms, rate);
         let buf = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(capacity)));
         let played = Arc::new(AtomicU64::new(0));
         let paused = Arc::new(AtomicBool::new(false));
@@ -111,8 +120,13 @@ impl Sink {
             muted,
             dev_err,
             capacity,
+            rate,
             _stream: stream,
         })
+    }
+
+    pub fn rate(&self) -> u32 {
+        self.rate
     }
 
     pub fn buffered_frames(&self) -> usize {
@@ -175,13 +189,15 @@ mod tests {
     /// able to hold the refill threshold plus a whole decoded packet.
     #[test]
     fn ring_has_headroom_over_refill_threshold() {
-        for buffer_ms in [200u32, 500, 1000, 2000, 5000] {
-            let target = (OUT_RATE as usize * buffer_ms as usize / 1000).max(4096);
-            let capacity = ring_capacity(buffer_ms) / 2;
-            assert!(
-                capacity > target + OUT_RATE as usize / 10,
-                "buffer_ms={buffer_ms}: capacity {capacity} too close to target {target}"
-            );
+        for rate in [22_050u32, 44_100, 48_000, 96_000] {
+            for buffer_ms in [200u32, 500, 1000, 2000, 5000] {
+                let target = (rate as usize * buffer_ms as usize / 1000).max(4096);
+                let capacity = ring_capacity(buffer_ms, rate) / 2;
+                assert!(
+                    capacity > target + rate as usize / 10,
+                    "rate={rate} buffer_ms={buffer_ms}: capacity {capacity} too close to target {target}"
+                );
+            }
         }
     }
 }

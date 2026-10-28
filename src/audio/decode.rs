@@ -26,6 +26,11 @@ pub struct Loaded {
     /// (44100): symphonia does not apply SBR, so using the container rate
     /// would play the track at double speed.
     decoded_rate: Option<u32>,
+    /// Rate the sink is running at; decoded audio is resampled to this when
+    /// the decoder rate differs.
+    target_rate: u32,
+    /// Container sample rate, used to pick the output stream rate.
+    rate: u32,
     /// False for fragmented streams: the demuxer can only seek by walking
     /// every moof, which takes minutes on a multi-hour upload.
     seekable: bool,
@@ -69,7 +74,7 @@ impl Loaded {
             ),
             None => Box::new(src),
         };
-        let (format, decoder, track_id, duration) = probe(source)?;
+        let (format, decoder, track_id, duration, rate) = probe(source)?;
 
         Ok(Self {
             format,
@@ -77,6 +82,8 @@ impl Loaded {
             track_id,
             resampler: None,
             decoded_rate: None,
+            target_rate: OUT_RATE,
+            rate,
             seekable,
             url: url.to_string(),
             chunk: chunk_bytes,
@@ -86,8 +93,22 @@ impl Loaded {
         })
     }
 
-    /// Decodes the next packet into `out` (interleaved stereo f32 @ 48 kHz).
-    /// Returns `false` at end of stream.
+    /// Sample rate advertised by the container.
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+
+    /// Point the decoder at the rate the sink is actually running at.
+    pub fn set_target_rate(&mut self, rate: u32) {
+        if rate != self.target_rate {
+            self.target_rate = rate;
+            self.resampler = None;
+            self.decoded_rate = None;
+        }
+    }
+
+    /// Decodes the next packet into `out` (interleaved stereo f32 at the sink
+    /// rate). Returns `false` at end of stream.
     pub fn next(&mut self, out: &mut Vec<f32>) -> Result<bool, String> {
         loop {
             let packet = match self.format.next_packet() {
@@ -112,10 +133,10 @@ impl Loaded {
             // The decoder decides the real rate (HE-AAC decodes at its core
             // rate), so build/refresh the resampler from the decoded spec.
             if self.decoded_rate != Some(spec.rate) {
-                self.resampler = if spec.rate == OUT_RATE {
+                self.resampler = if spec.rate == self.target_rate {
                     None
                 } else {
-                    Some(Resampler::new(spec.rate, OUT_RATE))
+                    Some(Resampler::new(spec.rate, self.target_rate))
                 };
                 self.decoded_rate = Some(spec.rate);
             }
@@ -156,7 +177,7 @@ impl Loaded {
         if let Some((start, actual, prefix)) = frag_seek {
             let source = WindowFile::open(&self.url, self.chunk, prefix, start)
                 .map_err(|e| format!("seek: {e}"))?;
-            let (format, decoder, track_id, _) = probe(Box::new(source))?;
+            let (format, decoder, track_id, _, _) = probe(Box::new(source))?;
             self.format = format;
             self.decoder = decoder;
             self.track_id = track_id;
@@ -184,7 +205,7 @@ impl Loaded {
 
 fn probe(
     src: Box<dyn MediaSource>,
-) -> Result<(Box<dyn FormatReader>, Box<dyn Decoder>, u32, f64), String> {
+) -> Result<(Box<dyn FormatReader>, Box<dyn Decoder>, u32, f64, u32), String> {
     let mss = MediaSourceStream::new(src, Default::default());
     let mut hint = Hint::new();
     hint.with_extension("m4a");
@@ -215,7 +236,7 @@ fn probe(
         .make(params, &DecoderOptions::default())
         .map_err(|e| format!("unsupported codec: {e}"))?;
 
-    Ok((format, decoder, track_id, duration))
+    Ok((format, decoder, track_id, duration, rate))
 }
 
 fn push_stereo(samples: &[f32], channels: usize, out: &mut Vec<f32>) {

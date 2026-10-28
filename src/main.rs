@@ -139,11 +139,12 @@ fn doctor() -> i32 {
         None => println!("· cookies: none (search and playback work without them)"),
     }
 
+    let rate = u64::from(audio::output_rate());
     println!(
         "· buffer {} ms · range cache {} KiB · ~{} KiB audio RAM",
         cfg.buffer_ms,
         cfg.cache_kib,
-        (cfg.buffer_ms as u64 + 1000) * 48 * 2 * 4 / 1000 + cfg.cache_kib
+        (cfg.buffer_ms as u64 + 1000) * rate / 1000 * 2 * 4 / 1000 + cfg.cache_kib
     );
 
     if healthy {

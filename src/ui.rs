@@ -141,7 +141,7 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         };
         let second = if app.cfg.has_cookies() {
             Line::from(Span::styled(
-                format!(" ♪ 48 kHz stereo · volume {vol}%"),
+                format!(" ♪ stereo · volume {vol}%"),
                 Style::new().fg(DIM),
             ))
         } else {
@@ -355,17 +355,34 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    let playing = {
+        let st = app.player.lock().unwrap_or_else(|e| e.into_inner());
+        st.url.clone()
+    };
+
     let is_playlist_list = app.tab == TAB_PLAYLISTS && !app.in_playlist;
     let items: Vec<ListItem> = list
         .iter()
         .map(|e| {
+            let now = !is_playlist_list && !playing.is_empty() && e.url() == playing;
+            let (marker, mstyle) = if now {
+                ("▶ ", Style::new().fg(GREEN))
+            } else {
+                ("  ", Style::new().fg(DIM))
+            };
             let right = if is_playlist_list {
                 format!("  {} playlists", e.channel)
             } else {
                 format!("  {} · {}", e.channel, e.duration_str())
             };
+            let title_style = if now {
+                Style::new().fg(GREEN).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(FG)
+            };
             ListItem::new(Line::from(vec![
-                Span::styled(e.title.clone(), Style::new().fg(FG)),
+                Span::styled(marker, mstyle),
+                Span::styled(e.title.clone(), title_style),
                 Span::styled(right, Style::new().fg(DIM)),
             ]))
         })

@@ -374,7 +374,19 @@ pub fn account(cfg: &Config) -> Result<(String, String), String> {
 
 fn friendly(stderr: &str) -> String {
     let low = stderr.to_lowercase();
-    if low.contains("private") || low.contains("sign in") || low.contains("login") {
+    if low.contains("in your country") {
+        "blocked in your country".into()
+    } else if low.contains("video unavailable") || low.contains("this video is not available") {
+        // YouTube answers this for removed uploads, region blocks and tracks
+        // that only exist in its catalogue. Nothing about it is fixable here.
+        "unavailable on youtube".into()
+    } else if low.contains("not a bot") {
+        "youtube wants a sign-in check, try again later".into()
+    } else if low.contains("confirm your age") || low.contains("age-restricted") {
+        "age-restricted, the cookies must be from an adult account".into()
+    } else if low.contains("members-only") || low.contains("join this channel") {
+        "members-only, this account cannot play it".into()
+    } else if low.contains("private") || low.contains("sign in") || low.contains("login") {
         "private: sign-in required, run `ytui auth <cookies.txt>`".into()
     } else if low.contains("cookie") {
         format!(
@@ -390,7 +402,9 @@ fn friendly(stderr: &str) -> String {
 
 fn first_lines(s: &str) -> String {
     s.lines()
-        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.strip_prefix("ERROR: ").unwrap_or(l))
         .take(2)
         .collect::<Vec<_>>()
         .join(" · ")
