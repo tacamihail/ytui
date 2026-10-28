@@ -142,10 +142,19 @@ fn doctor() -> i32 {
     let cfg = config::load();
     match cfg.cookie_args() {
         Some((flag, value)) => {
-            println!("✔ cookies: {value} ({flag})");
-            match auth::account() {
-                Some(a) => println!("✔ account: {}", a.name),
-                None => println!("· account not verified yet, run `ytui auth --status`"),
+            // The saved account name can be months old; ask YouTube once so
+            // doctor catches cookies that no longer sign in instead of
+            // reporting a healthy account.
+            match ytdl::account(&cfg) {
+                Ok((name, _)) => {
+                    println!("✔ cookies: {value} ({flag})");
+                    println!("✔ account: {name}");
+                }
+                Err(e) => {
+                    println!("✗ cookies could not be verified: {value} ({flag})");
+                    println!("  {e}");
+                    healthy = false;
+                }
             }
         }
         None => println!("· cookies: none (search and playback work without them)"),

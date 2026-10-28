@@ -386,6 +386,10 @@ fn friendly(stderr: &str) -> String {
         "age-restricted, the cookies must be from an adult account".into()
     } else if low.contains("members-only") || low.contains("join this channel") {
         "members-only, this account cannot play it".into()
+    } else if low.contains("playlist does not exist") {
+        // YouTube answers this for Watch Later / Liked Music when the cookies
+        // are signed out or missing their HttpOnly half.
+        "playlist not found, cookies may have expired: run `ytui auth <cookies.txt>`".into()
     } else if low.contains("private") || low.contains("sign in") || low.contains("login") {
         "private: sign-in required, run `ytui auth <cookies.txt>`".into()
     } else if low.contains("cookie") {
@@ -408,4 +412,17 @@ fn first_lines(s: &str) -> String {
         .take(2)
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Watch Later and Liked Music answer this when the cookies do not sign
+    /// in; the raw yt-dlp line does not tell the user what to do.
+    #[test]
+    fn missing_playlists_point_at_the_cookies() {
+        let err = "ERROR: [youtube:tab] LM: YouTube said: The playlist does not exist.";
+        assert!(friendly(err).contains("ytui auth"));
+    }
 }

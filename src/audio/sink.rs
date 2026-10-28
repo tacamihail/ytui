@@ -5,12 +5,14 @@
 //! allocates.
 
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 pub struct Sink {
+    name: String,
     buf: Arc<Mutex<VecDeque<f32>>>,
     played: Arc<AtomicU64>,
     paused: Arc<AtomicBool>,
@@ -37,22 +39,185 @@ fn ring_capacity(buffer_ms: u32, rate: u32) -> usize {
     ((rate as usize * 2 * (buffer_ms.max(200) as usize + 1000)) / 1000).max(8192)
 }
 
+/// True inside WSL, where ALSA has no sound card at all: WSLg only exposes a
+/// PulseAudio socket.
+fn is_wsl() -> bool {
+    Path::new("/mnt/wslg/PulseServer").exists()
+        || std::fs::read_to_string("/proc/version")
+            .map(|v| v.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+}
+
+/// True when PulseAudio is the intended output. On WSL that is the only
+/// option; elsewhere `PULSE_SERVER` means the user routed ALSA there on
+/// purpose, so the plugin is still the right first guess.
+fn prefers_pulse() -> bool {
+    std::env::var_os("PULSE_SERVER").is_some() || is_wsl()
+}
+
+/// Where a device name sits in the list of devices to try.
+///
+/// `default` is the name ALSA resolves from its system configuration. On WSL
+/// it points at hardware card 0, which does not exist, so the plugin-backed
+/// `pulse` PCM has to come first there.
+fn rank(name: &str, prefer_pulse: bool) -> u8 {
+    match (prefer_pulse, name) {
+        (true, "pulse") => 0,
+        (true, "pipewire") => 1,
+        (true, "default") => 2,
+        (false, "default") => 0,
+        (false, "pulse") => 1,
+        (false, "pipewire") => 2,
+        _ => 3,
+    }
+}
+
+/// Output devices to try, best candidate first.
+///
+/// `HostTrait` has no open-by-name, but the ALSA backend enumerates every PCM
+/// from the configuration, including the `pulse` PCM that
+/// `libasound2-plugins` adds. Opening the candidates in turn therefore finds
+/// the plugin without writing `~/.asoundrc`.
+fn candidates() -> Vec<(String, cpal::Device)> {
+    let host = cpal::default_host();
+    let prefer_pulse = prefers_pulse();
+    let mut devices: Vec<(String, cpal::Device)> = Vec::new();
+
+    if let Some(device) = host.default_output_device() {
+        devices.push(("default".to_string(), device));
+    }
+
+    // On a healthy machine the default PCM is the answer. Enumerating opens
+    // every PCM in the configuration (playback *and* capture), so only do it
+    // when the default is not expected to work: on WSL, or when it cannot even
+    // be queried. This failed query is also what says `pulse` is needed.
+    let default_works = !prefer_pulse
+        && devices
+            .first()
+            .is_some_and(|(_, device)| device.default_output_config().is_ok());
+
+    if !default_works {
+        if let Ok(list) = host.output_devices() {
+            for device in list {
+                let name = match device.name() {
+                    Ok(name) => name,
+                    Err(_) => continue,
+                };
+                // The default device is constructed above; do not try it twice.
+                if devices.iter().any(|(seen, _)| *seen == name) {
+                    continue;
+                }
+                devices.push((name, device));
+            }
+        }
+    }
+
+    // A stable sort keeps the ALSA hint order for everything with equal rank.
+    devices.sort_by_key(|(name, _)| rank(name, prefer_pulse));
+    devices
+}
+
+/// The useful tail of cpal's ALSA error, e.g. `No such file or directory (2)`.
+fn brief(err: &str) -> String {
+    let tail = err
+        .rsplit("failed with error ")
+        .next()
+        .unwrap_or(err)
+        .trim();
+    tail.trim_matches('\'').to_string()
+}
+
+/// A message the player can show on one line. The raw cpal/ALSA sentence is
+/// several times wider than a terminal and hides the thing that can be fixed.
+fn open_error(tries: &[(String, String)]) -> String {
+    let first = tries
+        .first()
+        .map(|(_, err)| brief(err))
+        .unwrap_or_else(|| "no output device".to_string());
+    let pulse_tried = tries
+        .iter()
+        .any(|(name, _)| name == "pulse" || name == "pipewire");
+
+    if is_wsl() && !pulse_tried {
+        "no WSL sound card: install libasound2-plugins (sudo apt-get install -y libasound2-plugins)"
+            .to_string()
+    } else if prefers_pulse() && pulse_tried {
+        format!("cannot reach PulseAudio: {first} (check PULSE_SERVER)")
+    } else {
+        format!("cannot open audio device: {first}")
+    }
+}
+
+/// ALSA prints its own diagnostics (`cannot find card '0'`) to stderr while
+/// probing. Inside the TUI that lands in the middle of the frame, so silence
+/// stderr for the duration of an open attempt; `open_error` reports the
+/// failure instead.
+#[cfg(target_os = "linux")]
+struct QuietStderr {
+    saved: libc::c_int,
+}
+
+#[cfg(target_os = "linux")]
+impl QuietStderr {
+    fn new() -> Option<Self> {
+        unsafe {
+            let saved = libc::dup(libc::STDERR_FILENO);
+            if saved < 0 {
+                return None;
+            }
+            let null = libc::open(
+                b"/dev/null\0".as_ptr() as *const libc::c_char,
+                libc::O_WRONLY,
+            );
+            if null < 0 {
+                libc::close(saved);
+                return None;
+            }
+            let switched = libc::dup2(null, libc::STDERR_FILENO);
+            libc::close(null);
+            if switched < 0 {
+                libc::close(saved);
+                return None;
+            }
+            Some(Self { saved })
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for QuietStderr {
+    fn drop(&mut self) {
+        unsafe {
+            libc::dup2(self.saved, libc::STDERR_FILENO);
+            libc::close(self.saved);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+struct QuietStderr;
+
+#[cfg(not(target_os = "linux"))]
+impl QuietStderr {
+    fn new() -> Option<Self> {
+        None
+    }
+}
+
 impl Sink {
-    /// Preferred rate of the default output device, if it can be queried.
+    /// Preferred rate of the output device, if it can be queried.
     pub fn default_rate() -> Option<u32> {
-        let host = cpal::default_host();
-        let device = host.default_output_device()?;
-        device
-            .default_output_config()
-            .ok()
-            .map(|c| c.sample_rate().0)
+        let _quiet = QuietStderr::new();
+        for (_, device) in candidates() {
+            if let Ok(config) = device.default_output_config() {
+                return Some(config.sample_rate().0);
+            }
+        }
+        None
     }
 
     pub fn new(rate: u32, buffer_ms: u32) -> Result<Self, String> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| "no audio output device found".to_string())?;
+        let _quiet = QuietStderr::new();
 
         let config = cpal::StreamConfig {
             channels: 2,
@@ -69,16 +234,20 @@ impl Sink {
         let muted = Arc::new(AtomicBool::new(false));
         let dev_err = Arc::new(Mutex::new(None));
 
-        let cb_buf = Arc::clone(&buf);
-        let cb_played = Arc::clone(&played);
-        let cb_paused = Arc::clone(&paused);
-        let cb_hold = Arc::clone(&hold);
-        let cb_vol = Arc::clone(&volume);
-        let cb_muted = Arc::clone(&muted);
-        let cb_err = Arc::clone(&dev_err);
+        let mut stream = None;
+        let mut name = String::new();
+        let mut tries: Vec<(String, String)> = Vec::new();
 
-        let stream = device
-            .build_output_stream(
+        for (device_name, device) in candidates() {
+            let cb_buf = Arc::clone(&buf);
+            let cb_played = Arc::clone(&played);
+            let cb_paused = Arc::clone(&paused);
+            let cb_hold = Arc::clone(&hold);
+            let cb_vol = Arc::clone(&volume);
+            let cb_muted = Arc::clone(&muted);
+            let cb_err = Arc::clone(&dev_err);
+
+            let built = device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     if cb_paused.load(Ordering::Relaxed) || cb_hold.load(Ordering::Relaxed) {
@@ -110,14 +279,26 @@ impl Sink {
                     *cb_err.lock().unwrap_or_else(|x| x.into_inner()) = Some(e.to_string());
                 },
                 None,
-            )
-            .map_err(|e| format!("cannot open audio device: {e}"))?;
+            );
+
+            match built {
+                Ok(s) => {
+                    stream = Some(s);
+                    name = device_name;
+                    break;
+                }
+                Err(e) => tries.push((device_name, e.to_string())),
+            }
+        }
+
+        let stream = stream.ok_or_else(|| open_error(&tries))?;
 
         stream
             .play()
-            .map_err(|e| format!("cannot start audio device: {e}"))?;
+            .map_err(|e| format!("cannot start audio device: {}", brief(&e.to_string())))?;
 
         Ok(Self {
+            name,
             buf,
             played,
             paused,
@@ -139,6 +320,11 @@ impl Sink {
 
     pub fn rate(&self) -> u32 {
         self.rate
+    }
+
+    /// Name of the PCM that was opened, e.g. `pulse` on WSL.
+    pub fn device_name(&self) -> &str {
+        &self.name
     }
 
     pub fn buffered_frames(&self) -> usize {
@@ -211,5 +397,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// WSL has no card 0, so `default` fails there and the PulseAudio PCM has
+    /// to be tried first. On a normal machine the hardware default wins.
+    #[test]
+    fn pulse_comes_first_only_where_it_is_the_only_option() {
+        assert!(rank("pulse", true) < rank("default", true));
+        assert!(rank("default", false) < rank("pulse", false));
+        assert!(rank("pipewire", true) < rank("default", true));
+        assert!(rank("hw:CARD=Intel", true) > rank("pulse", true));
+    }
+
+    /// The player status line is one row wide, so the three-line cpal error
+    /// has to be reduced to its actionable tail.
+    #[test]
+    fn backend_errors_are_shortened() {
+        let err = "A backend-specific error has occurred: ALSA function \
+                   'snd_pcm_open' failed with error 'No such file or directory (2)'";
+        assert_eq!(brief(err), "No such file or directory (2)");
+        assert_eq!(brief("plain error"), "plain error");
     }
 }

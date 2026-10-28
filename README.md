@@ -63,14 +63,20 @@ install -Dm755 target/release/ytui ~/.local/bin/ytui
 
 ### WSL
 
-WSL has no sound card, only a PulseAudio socket. Install the bridge:
+WSL has no sound card, only a PulseAudio socket. ALSA's `default` device still
+points at card 0, so ytui asks for the `pulse` PCM first and only falls back to
+`default` when that fails. You just need the bridge:
 
 ```bash
 sudo apt-get install -y libasound2-plugins
 ```
 
-If you can't use sudo, extract it into your home directory and the launcher
-will find it:
+No `~/.asoundrc` edit is needed. `ytui doctor` prints the PCM it picked, for
+example `✔ audio output: pulse @ 44100 Hz stereo`.
+
+If you can't use sudo, `install.sh` extracts the package into `~/.local/alsa`
+when apt fails and points the launcher at it with a private ALSA config. Your
+`~/.asoundrc` is not touched. The manual equivalent is:
 
 ```bash
 cd /tmp
@@ -78,7 +84,8 @@ apt-get download libasound2-plugins
 dpkg -x libasound2-plugins_*.deb ~/.local/alsa
 ```
 
-`ytui doctor` should then print an `audio output` line instead of an error.
+Then rerun `./install.sh` so it writes `~/.config/ytui/asound.conf` for the
+launcher.
 
 ## Account
 
@@ -94,8 +101,10 @@ ytui logout                  # forget the cookies and the account
 
 To export the file, install "Get cookies.txt LOCALLY" in Chrome or Firefox,
 open <https://music.youtube.com> while signed in and export the `youtube.com`
-cookies. `ytui auth` checks them against your Liked Music playlist, saves the
-channel in `~/.config/ytui/account.json` and copies the cookies to
+cookies. The export has to include the HttpOnly cookies: without them the file
+is signed out, and `ytui auth` refuses it rather than overwriting a working
+`~/.config/ytui/cookies.txt`. `ytui auth` then checks the cookies against
+YouTube, saves the channel in `~/.config/ytui/account.json` and copies them to
 `~/.config/ytui/cookies.txt` with mode `600`.
 
 Search and playback work without an account. Subscriptions don't: ytui parses
@@ -198,7 +207,10 @@ table on your machine, plus the peak of the resolver processes.
 
 ## Problems
 
-No sound on WSL: `libasound2-plugins` is missing. See the WSL section above.
+No sound on WSL: `libasound2-plugins` is missing. Rerun `./install.sh` or run
+`sudo apt-get install -y libasound2-plugins`; no `~/.asoundrc` is needed. If
+`ytui doctor` says it cannot reach PulseAudio, check WSLg (`wsl --update` on
+Windows) and that `PULSE_SERVER` points at `/mnt/wslg/PulseServer`.
 On a desktop, check that PipeWire or PulseAudio is running.
 
 "no AAC stream for this track (opus only)": the upload has no M4A audio and
@@ -209,6 +221,12 @@ or is otherwise not served to this account. Nothing in ytui can fix it; the
 track stays in the list until you unlike it on YouTube.
 
 "private: sign-in required": the cookies expired. Export them again.
+
+"playlist not found" on Liked Music or Watch Later: the export is signed out or
+incomplete. Netscape exports need the HttpOnly cookies too ("Get cookies.txt
+LOCALLY" includes them), so export while <https://music.youtube.com> is open in
+a signed-in browser and run `ytui auth <file>` again. `ytui doctor` and
+`ytui auth --status` check the cookies against YouTube.
 
 Search returns nothing or a 403: `yt-dlp` is too old.
 

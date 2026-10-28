@@ -846,23 +846,18 @@ fn track_is_gone(err: &str) -> bool {
         || e.contains("age-restricted")
 }
 
-/// Opens the default output device for a moment; used by `ytui doctor`.
+/// Opens the output device for a moment; used by `ytui doctor`.
+///
+/// This goes through the same fallback as playback, so a WSL setup reports
+/// `pulse @ 44100 Hz` instead of the card 0 failure ALSA's `default` hits.
 pub fn check_device() -> Result<String, String> {
-    use cpal::traits::{DeviceTrait, HostTrait};
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| "no default output device".to_string())?;
-    let name = device
-        .name()
-        .unwrap_or_else(|e| format!("unknown device ({e})"));
-    let rate = device
-        .default_output_config()
-        .map(|c| c.sample_rate().0)
-        .unwrap_or(OUT_RATE);
-    // Merely existing is not enough: the device has to actually start.
-    let _sink = sink::Sink::new(rate, 200)?;
-    Ok(format!("{name} @ {rate} Hz stereo"))
+    let rate = sink::Sink::default_rate().unwrap_or(OUT_RATE);
+    let opened = sink::Sink::new(rate, 200)?;
+    Ok(format!(
+        "{} @ {} Hz stereo",
+        opened.device_name(),
+        opened.rate()
+    ))
 }
 
 fn seed() -> u64 {

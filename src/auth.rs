@@ -64,6 +64,15 @@ fn import(path: &str) -> i32 {
         eprintln!("✗ {path} does not look like a YouTube cookies.txt export");
         return 1;
     }
+    if !looks_signed_in(&txt) {
+        eprintln!("✗ {path} has no signed-in YouTube cookies");
+        eprintln!("  it is missing the first-party session cookie (SID or __Secure-1PSID),");
+        eprintln!("  so the export came from a signed-out browser or lost its HttpOnly");
+        eprintln!("  cookies. Open https://music.youtube.com in a signed-in browser and");
+        eprintln!("  export again with an extension that includes HttpOnly cookies");
+        eprintln!("  (\"Get cookies.txt LOCALLY\" does). The existing file was left alone.");
+        return 1;
+    }
     let dst = config::cookies_path();
     if let Some(dir) = dst.parent() {
         let _ = fs::create_dir_all(dir);
@@ -141,14 +150,24 @@ pub fn status() -> i32 {
             return 1;
         }
     }
-    match config::load_json::<Account>(&config::account_path()) {
-        Some(a) => {
-            println!("account: {} ({})", a.name, a.channel_id);
+
+    // `account.json` only records the last successful verification; the
+    // cookies themselves may have been replaced or expired since. Ask YouTube
+    // so `--status` means "connected right now", not "connected once".
+    match ytdl::account(&cfg) {
+        Ok((name, id)) => {
+            let account = Account {
+                name: name.clone(),
+                channel_id: id,
+            };
+            config::save_json(&config::account_path(), &account);
+            println!("✔ account: {name}");
             0
         }
-        None => {
-            println!("account: not verified (run `ytui auth --status` after importing)");
-            0
+        Err(e) => {
+            println!("✗ cookies could not be verified: {e}");
+            println!("  re-export cookies.txt from a signed-in browser, then run `ytui auth <file>`");
+            1
         }
     }
 }
@@ -172,6 +191,37 @@ pub fn account() -> Option<Account> {
 fn restrict_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+}
+
+/// Signed-in YouTube cookies always include a first-party session cookie.
+/// Exports with only the `__Secure-3P*` variants come from a signed-out
+/// browser, or from a tool that skipped the HttpOnly half of the jar.
+fn looks_signed_in(txt: &str) -> bool {
+    txt.lines().any(|line| {
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+        if line.starts_with('#') {
+            return false;
+        }
+        matches!(
+            line.split('\t').nth(5),
+            Some("SID" | "__Secure-1PSID" | "SAPISID" | "APISID" | "__Secure-1PAPISID")
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SIGNED_IN: &str = "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1999999999\t__Secure-1PSID\tx\n";
+    const SIGNED_OUT: &str = ".youtube.com\tTRUE\t/\tTRUE\t1999999999\t__Secure-3PSID\tx\n";
+
+    #[test]
+    fn incomplete_exports_are_not_imported() {
+        assert!(looks_signed_in(SIGNED_IN));
+        assert!(!looks_signed_in(SIGNED_OUT));
+        assert!(!looks_signed_in("# comment\n"));
+    }
 }
 
 #[cfg(not(unix))]
