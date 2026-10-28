@@ -28,6 +28,24 @@ fn spinner(elapsed: Duration) -> char {
     SPINNER[(elapsed.as_millis() / 80) as usize % SPINNER.len()]
 }
 
+/// Transport buttons. The media codepoints (⏮ U+23EE, ⏸ U+23F8, ⏭ U+23ED)
+/// are emoji-presentation characters: terminals hand them to a colour emoji
+/// font, which draws tiny coloured blobs at the baseline, and most monospace
+/// fonts do not carry them at all. These glyphs are plain text characters, so
+/// they always come out monochrome at the cell size, whatever the font.
+const ICON_PREV: &str = "◀◀";
+const ICON_NEXT: &str = "▶▶";
+const ICON_PAUSE: &str = "‖";
+const ICON_PLAY: &str = "▶";
+/// Blank cells between two transport buttons.
+const GAP: usize = 2;
+
+/// Cells taken by " ◀◀  ▶  ▶▶  ": the leading space, the three buttons and
+/// their gaps. The title, its padding and the click areas are placed after it.
+fn transport_width(icon: &str) -> usize {
+    1 + ICON_PREV.width() + GAP + icon.width() + GAP + ICON_NEXT.width() + GAP
+}
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let rows = Layout::vertical([
@@ -163,15 +181,13 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // The glyph is the *action*: ⏸ while playing, ⏵ while paused. Use the
-    // same media family as ⏮/⏭ so all three render at one size; ◌ comes from
-    // a different font and looked tiny next to them. While yt-dlp is working
-    // out the stream URL the button becomes the same wheel as the status
-    // line, so a requested track visibly spins until it starts.
+    // The glyph is the *action*: pause while playing, play while paused. While
+    // yt-dlp is working out the stream URL the button becomes the same wheel as
+    // the status line, so a requested track visibly spins until it starts.
     let (icon, icol) = match status {
-        Status::Paused => ("⏵".to_string(), YELLOW),
+        Status::Paused => (ICON_PLAY.to_string(), YELLOW),
         Status::Loading => (spinner(app.anim.elapsed()).to_string(), ACCENT),
-        _ => ("⏸".to_string(), GREEN),
+        _ => (ICON_PAUSE.to_string(), GREEN),
     };
 
     let mut flags = String::new();
@@ -199,20 +215,24 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         title
     };
 
-    // Clickable transport: " ⏮  ▶  ⏭  " (10 cells), then the title.
-    const PREFIX: usize = 10;
+    // Clickable transport: " ◀◀  ‖  ▶▶  ", then the title. The hit boxes cover
+    // the glyph plus the gap that follows it, so the one-cell pause button is
+    // as easy to hit as the two-cell skip buttons.
+    let prefix = transport_width(&icon);
     let start = inner.x + 1;
+    let play_x = start + (ICON_PREV.width() + GAP) as u16;
+    let next_x = play_x + (icon.width() + GAP) as u16;
     let buttons = [
-        (PlayerBtn::Prev, start.saturating_sub(1)),
-        (PlayerBtn::PlayPause, start + 2),
-        (PlayerBtn::Next, start + 5),
+        (PlayerBtn::Prev, start, ICON_PREV.width() as u16 + 1),
+        (PlayerBtn::PlayPause, play_x, icon.width() as u16 + GAP as u16),
+        (PlayerBtn::Next, next_x, ICON_NEXT.width() as u16 + 1),
     ];
-    for (btn, x) in buttons {
+    for (btn, x, width) in buttons {
         app.player_buttons.push((
             Rect {
                 x,
                 y: inner.y,
-                width: 3,
+                width,
                 height: 1,
             },
             btn,
@@ -248,17 +268,18 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
     let bar_filled = "━".repeat(filled);
     let bar_rest = "─".repeat(VOL_W - filled - 1);
 
-    let title_w = w.saturating_sub(right_w + PREFIX).max(4);
+    let gap = " ".repeat(GAP);
+    let title_w = w.saturating_sub(right_w + prefix).max(4);
     let t = truncate(&shown, title_w);
-    let pad = " ".repeat(w.saturating_sub(PREFIX + t.width() + right_w));
+    let pad = " ".repeat(w.saturating_sub(prefix + t.width() + right_w));
     let line1 = Line::from(vec![
         Span::raw(" "),
-        Span::styled("⏮", btn_style),
-        Span::raw("  "),
+        Span::styled(ICON_PREV, btn_style),
+        Span::raw(gap.clone()),
         Span::styled(icon, Style::new().fg(icol).add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled("⏭", btn_style),
-        Span::raw("  "),
+        Span::raw(gap.clone()),
+        Span::styled(ICON_NEXT, btn_style),
+        Span::raw(gap),
         Span::styled(t, Style::new().fg(FG).add_modifier(Modifier::BOLD)),
         Span::raw(pad),
         Span::styled(flags, Style::new().fg(DIM)),
@@ -564,7 +585,7 @@ fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
         ("← → or h l", "seek 5s back/forward"),
         (", .", "seek 30s back/forward"),
         ("click progress bar", "seek to that position"),
-        ("click ⏮ ⏸ ⏭", "previous, pause/resume, next"),
+        ("click ◀◀ ‖ ▶▶", "previous, pause/resume, next"),
         ("drag volume slider", "set the volume"),
         ("[ ]", "volume down/up by 5"),
         ("m / click icon", "mute / unmute"),
@@ -629,10 +650,10 @@ mod tests {
     /// wide glyphs, the block slides left of its mouse area.
     #[test]
     fn wide_titles_fit_their_column() {
-        const PREFIX: usize = 10;
+        let prefix = transport_width(ICON_PAUSE);
         const RIGHT_W: usize = 20; // " 100%" + " " + 10 bar cells + " " + icon + " "
         let w = 100;
-        let title_w = w - RIGHT_W - PREFIX;
+        let title_w = w - RIGHT_W - prefix;
         for title in [
             "plain ascii title",
             "Căpitănescu - Choke Me",
@@ -646,6 +667,26 @@ mod tests {
                 "{title:?} became {t:?}, {} cells for {title_w}",
                 t.width()
             );
+        }
+    }
+
+    /// The media codepoints (⏮/⏸/⏭) are emoji-presentation: terminals hand
+    /// them to a colour emoji font, which draws tiny blobs, and most monospace
+    /// fonts do not have them at all. The transport glyphs must stay plain text
+    /// and one or two cells wide, or the click areas drift from the drawing.
+    #[test]
+    fn transport_glyphs_are_text_width() {
+        for glyph in [ICON_PREV, ICON_NEXT, ICON_PAUSE, ICON_PLAY] {
+            assert_eq!(
+                glyph.width(),
+                glyph.chars().count(),
+                "{glyph:?} must be one cell per character"
+            );
+            assert!(glyph.width() <= 2, "{glyph:?} is too wide");
+        }
+        let loading = spinner(Duration::ZERO).to_string();
+        for icon in [ICON_PAUSE, ICON_PLAY, loading.as_str()] {
+            assert_eq!(transport_width(icon), 12, "{icon:?} moves the title");
         }
     }
 
