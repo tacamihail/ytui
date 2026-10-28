@@ -19,6 +19,7 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 
 COLS, ROWS = 130, 30
@@ -68,13 +69,58 @@ def rss(pid):
     return vals.get("VmRSS", 0) / 1024, vals.get("VmHWM", 0) / 1024
 
 
-def play(master, url):
+def children_of(pid):
+    """Direct and indirect child pids, found through /proc/<pid>/stat."""
+    kids = {}
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat") as f:
+                ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        kids.setdefault(ppid, []).append(int(name))
+    out, todo = [], [pid]
+    while todo:
+        for c in kids.get(todo.pop(), []):
+            out.append(c)
+            todo.append(c)
+    return out
+
+
+def tree_rss(pid):
+    """RSS of everything below pid: yt-dlp and its deno while resolving."""
+    total = 0.0
+    for c in children_of(pid):
+        try:
+            total += rss(c)[0]
+        except OSError:
+            pass
+    return total
+
+
+def play(master, pid, url):
+    """Paste a URL, start it, and return the peak RSS of the resolver."""
+    peak = [0.0]
+    stop = threading.Event()
+
+    def sample():
+        while not stop.is_set():
+            peak[0] = max(peak[0], tree_rss(pid))
+            time.sleep(0.1)
+
+    th = threading.Thread(target=sample)
+    th.start()
     os.write(master, b"/")
     drain(master, 0.3)
     os.write(master, url.encode())
     drain(master, 0.3)
     os.write(master, b"\r")
     drain(master, SETTLE)
+    stop.set()
+    th.join()
+    return peak[0]
 
 
 def main():
@@ -87,9 +133,10 @@ def main():
     drain(master, 8.0)
     rss_now, peak = rss(p.pid)
     rows = [("idle, Liked Music loaded", rss_now, peak)]
+    resolver = 0.0
 
     for url in urls:
-        play(master, url)
+        resolver = max(resolver, play(master, p.pid, url))
         rss_now, peak = rss(p.pid)
         label = url if len(url) <= 36 else url[:33] + "..."
         rows.append((f"playing {label}", rss_now, peak))
@@ -106,6 +153,11 @@ def main():
     print("-" * 60)
     for label, rss_now, peak in rows:
         print(f"{label:40} {rss_now:8.1f}M {peak:8.1f}M")
+    if urls:
+        print(
+            f"\nwhile resolving, yt-dlp and deno peaked at {resolver:.0f} MB"
+            "\n(separate processes, a few seconds per track)"
+        )
     return 0
 
 

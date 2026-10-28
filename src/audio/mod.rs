@@ -8,9 +8,9 @@ mod resample;
 mod sink;
 
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::ytdl;
@@ -143,39 +143,132 @@ struct Engine {
     /// Dead tracks walked past since the last time playback started on
     /// purpose; see `MAX_SKIPS`.
     fails: usize,
-    /// Asks the resolver thread to work out the next track's audio URL while
-    /// the current one plays. `yt-dlp` takes a few seconds per track, which is
-    /// most of the pause between songs.
-    prefetch_tx: Sender<String>,
-    prefetched: Arc<Mutex<Option<(String, ytdl::Stream)>>>,
+    /// Resolves the next track while the current one plays. `yt-dlp` takes a
+    /// few seconds per track, which is most of the pause between songs.
+    prefetch: Arc<Prefetch>,
     tmp: Vec<f32>,
     rng: u64,
 }
 
-/// One background thread resolves URLs; `yt-dlp` is a subprocess, so this only
-/// costs the resolved URL in memory (a few hundred bytes).
-fn start_prefetcher(cfg: Config) -> (Sender<String>, Arc<Mutex<Option<(String, ytdl::Stream)>>>) {
-    let (tx, rx) = mpsc::channel::<String>();
-    let slot = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&slot);
-    let _ = thread::Builder::new()
-        .name("ytui-prefetch".into())
-        .stack_size(512 * 1024)
-        .spawn(move || {
-            for url in rx {
-                let Ok(stream) = ytdl::stream_url(&url, &cfg) else {
-                    continue;
-                };
-                let mut g = out.lock().unwrap_or_else(|e| e.into_inner());
-                *g = Some((url, stream));
-            }
+/// Works out stream URLs in the background, one at a time.
+///
+/// Each run starts `yt-dlp`, which in turn starts deno to solve YouTube's
+/// JavaScript challenge; together they use a few hundred megabytes for a
+/// couple of seconds. Running two at once doubles that, so everything goes
+/// through this one thread and a newer request replaces a queued one.
+struct Prefetch {
+    inner: Mutex<Job>,
+    cv: Condvar,
+    cfg: Config,
+}
+
+#[derive(Default)]
+struct Job {
+    /// URL the engine wants next, if any.
+    want: Option<String>,
+    /// URL being resolved right now.
+    running: Option<String>,
+    /// Finished result, waiting to be taken.
+    done: Option<(String, Result<ytdl::Stream, String>)>,
+}
+
+impl Prefetch {
+    fn spawn(cfg: Config) -> Arc<Self> {
+        let p = Arc::new(Self {
+            inner: Mutex::new(Job::default()),
+            cv: Condvar::new(),
+            cfg,
         });
-    (tx, slot)
+        let worker = Arc::clone(&p);
+        let _ = thread::Builder::new()
+            .name("ytui-resolve".into())
+            .stack_size(512 * 1024)
+            .spawn(move || worker.run());
+        p
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Job> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn run(&self) {
+        loop {
+            let url = {
+                let mut g = self.lock();
+                loop {
+                    if let Some(u) = g.want.take() {
+                        break u;
+                    }
+                    g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+                }
+            };
+            self.lock().running = Some(url.clone());
+            let res = ytdl::stream_url(&url, &self.cfg);
+            let mut g = self.lock();
+            g.running = None;
+            // A request that arrived while we were busy means this result is
+            // already stale; drop it instead of holding a URL we won't play.
+            if g.want.is_none() {
+                g.done = Some((url, res));
+            }
+            drop(g);
+            self.cv.notify_all();
+        }
+    }
+
+    /// Ask for `url` unless it is already resolved or on its way.
+    fn request(&self, url: &str) {
+        let mut g = self.lock();
+        let known = g.done.as_ref().is_some_and(|(u, _)| u == url)
+            || g.running.as_deref() == Some(url)
+            || g.want.as_deref() == Some(url);
+        if !known {
+            g.want = Some(url.to_string());
+            drop(g);
+            self.cv.notify_all();
+        }
+    }
+
+    fn take(&self, url: &str) -> Option<Result<ytdl::Stream, String>> {
+        let mut g = self.lock();
+        match g.done.as_ref() {
+            Some((u, _)) if u == url => g.done.take().map(|(_, r)| r),
+            _ => None,
+        }
+    }
+
+    fn working_on(&self, url: &str) -> bool {
+        let g = self.lock();
+        g.running.as_deref() == Some(url) || g.want.as_deref() == Some(url)
+    }
+
+    /// Wait for `url` while it is being resolved, so a skip does not start a
+    /// second resolver.
+    fn wait(&self, url: &str, limit: Duration) -> Option<Result<ytdl::Stream, String>> {
+        let deadline = Instant::now() + limit;
+        let mut g = self.lock();
+        loop {
+            if let Some((u, _)) = g.done.as_ref() {
+                if u == url {
+                    return g.done.take().map(|(_, r)| r);
+                }
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let (next, _) = self
+                .cv
+                .wait_timeout(g, left)
+                .unwrap_or_else(|e| e.into_inner());
+            g = next;
+        }
+    }
 }
 
 impl Engine {
     fn new(cfg: Config, state: Arc<Mutex<State>>) -> Self {
-        let (prefetch_tx, prefetched) = start_prefetcher(cfg.clone());
+        let prefetch = Prefetch::spawn(cfg.clone());
         let mut engine = Self {
             cfg,
             state,
@@ -183,8 +276,7 @@ impl Engine {
             loaded: None,
             eof: false,
             fails: 0,
-            prefetch_tx,
-            prefetched,
+            prefetch,
             tmp: Vec::with_capacity(16384),
             rng: seed(),
         };
@@ -234,20 +326,21 @@ impl Engine {
         (self.sink_rate() as usize * self.cfg.buffer_ms as usize / 1000).max(4096)
     }
 
-    /// The next track's stream, if the background thread already worked it out.
-    fn take_prefetched(&self, url: &str) -> Option<ytdl::Stream> {
-        let mut g = self.prefetched.lock().unwrap_or_else(|e| e.into_inner());
-        match g.as_ref() {
-            Some((u, _)) if u == url => g.take().map(|(_, s)| s),
-            _ => None,
-        }
-    }
-
+    /// The stream for `url`: from the background thread if it is ready, if it
+    /// is being worked on right now, or straight from yt-dlp.
     fn resolve(&self, url: &str) -> Result<ytdl::Stream, String> {
-        match self.take_prefetched(url) {
-            Some(s) => Ok(s),
-            None => ytdl::stream_url(url, &self.cfg),
+        if let Some(r) = self.prefetch.take(url) {
+            return r;
         }
+        // This is the usual case when a song is skipped early: waiting for the
+        // resolver that is already on this URL is faster than starting a
+        // second one, and it keeps only one deno alive.
+        if self.prefetch.working_on(url) {
+            if let Some(r) = self.prefetch.wait(url, Duration::from_secs(20)) {
+                return r;
+            }
+        }
+        ytdl::stream_url(url, &self.cfg)
     }
 
     /// Ask for the next track's URL once the current one is known to play.
@@ -266,15 +359,8 @@ impl Engine {
             };
             i.and_then(|i| st.queue.get(i)).map(|t| t.url.clone())
         };
-        let Some(url) = next else { return };
-        let already = self
-            .prefetched
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .is_some_and(|(u, _)| u.as_str() == url.as_str());
-        if !already {
-            let _ = self.prefetch_tx.send(url);
+        if let Some(url) = next {
+            self.prefetch.request(&url);
         }
     }
 

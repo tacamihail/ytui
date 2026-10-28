@@ -23,6 +23,7 @@ use std::io;
 use std::sync::mpsc;
 
 fn main() {
+    tune_allocator();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(cmd) = args.first() {
         match cmd.as_str() {
@@ -47,6 +48,17 @@ fn main() {
     if let Err(e) = run_tui() {
         eprintln!("ytui: {e}");
         std::process::exit(1);
+    }
+}
+
+/// glibc gives each thread its own 64 MB heap arena, so a handful of threads
+/// is enough to make VIRT look like hundreds of megabytes even though almost
+/// none of it is resident. Two arenas is plenty for this many threads, and it
+/// keeps the virtual size flat instead of jumping whenever a thread allocates.
+fn tune_allocator() {
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 2);
     }
 }
 

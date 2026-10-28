@@ -1931,6 +1931,7 @@ version = "0.3.10"
 dependencies = [
  "cpal",
  "crossterm",
+ "libc",
  "ratatui",
  "serde",
  "serde_json",

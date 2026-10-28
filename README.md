@@ -181,8 +181,19 @@ that index, memory is a roughly 1 MB audio ring, one 256 KiB range chunk, the
 packet being decoded and the next track's resolved URL, so normal tracks stay
 around 12 MB.
 
+These are ytui's own numbers. Resolving a track also runs `yt-dlp`, which
+starts deno to solve YouTube's JavaScript challenge: about 110 MB plus 300 MB
+for two or three seconds, once per track. That is the spike a system monitor
+shows when a track is resolved, and it belongs to those processes, not to the
+player. Skipping to the track that is already being resolved waits for that
+resolution instead of starting a second one.
+
+The virtual size is bigger still (about 350 MB) because PulseAudio maps a few
+64 MB shared-memory pools and glibc reserves heap for each thread. Almost none
+of that is resident, so RSS is the number to watch.
+
 `python3 tools/ram.py [URL ...]` runs the real TUI in a pty and prints the same
-table on your machine.
+table on your machine, plus the peak of the resolver processes.
 
 ## Problems
 
