@@ -8,6 +8,7 @@ mod audio;
 mod auth;
 mod config;
 mod entry;
+mod listcache;
 mod ui;
 mod ytapi;
 mod ytdl;

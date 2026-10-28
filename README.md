@@ -122,6 +122,13 @@ that page itself, so it needs the cookie file, not `--browser`.
 `Enter` on a playlist opens it, `Esc` goes back. History is local
 (`~/.local/share/ytui/history.json`); Queue is whatever is playing now.
 
+Liked Music, Playlists and Subscriptions are also cached in
+`~/.config/ytui/cache/`, so switching to a tab paints the last list
+immediately. A cache older than 15 minutes is refreshed in the background while
+the old rows stay on screen; `r` refreshes right away. On a cold start,
+`--lazy-playlist` streams the first page as yt-dlp reads it, so rows fill in
+progressively instead of all appearing at once.
+
 ## Keys
 
 `1`-`6`, `Tab` and `Shift+Tab` switch tabs. `Up`/`Down` or `j`/`k` move the
@@ -169,6 +176,7 @@ rather than the list; `space` retries.
 - `~/.config/ytui/config.json` - config
 - `~/.config/ytui/cookies.txt` - imported cookies, mode `600`
 - `~/.config/ytui/account.json` - channel name and id
+- `~/.config/ytui/cache/` - last listing per tab, ignored after logout
 - `~/.local/share/ytui/history.json` - play history
 
 ## Memory
@@ -188,8 +196,14 @@ Peak memory (VmHWM) was at most 1.5 MB above RSS.
 The 108 h case is the largest because it keeps the file's fragment index in
 RAM (about 0.6 MB, 39k fragments) so seeking stays a single request. Apart from
 that index, memory is a roughly 1 MB audio ring, one 256 KiB range chunk, the
-packet being decoded and the next track's resolved URL, so normal tracks stay
-around 12 MB.
+packet being decoded and up to 16 resolved URLs (about 25 KiB).
+
+The next three tracks' URLs are resolved while the current one plays, one at a
+time, so the resolver peak below does not grow. The first extra resolve starts
+right away; the rest are spaced 1.2 s apart and run at `nice 10`, so they do not
+compete with the decoder. A track you choose yourself is resolved immediately
+and never waits behind that queue. On a machine where audio still crackles
+during playback, `YTUI_PREFETCH=0 ytui` disables background resolution.
 
 These are ytui's own numbers. Resolving a track also runs `yt-dlp`, which
 starts deno to solve YouTube's JavaScript challenge: about 110 MB plus 300 MB

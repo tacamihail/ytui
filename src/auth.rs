@@ -6,6 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{self, Config};
+use crate::listcache;
 use crate::ytdl;
 
 const USAGE: &str = "\
@@ -179,6 +180,8 @@ pub fn logout() -> i32 {
     config::save(&cfg);
     let _ = fs::remove_file(config::cookies_path());
     let _ = fs::remove_file(config::account_path());
+    // Cached lists belong to the account that was just signed out.
+    listcache::clear();
     println!("✔ logged out");
     0
 }

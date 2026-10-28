@@ -4,6 +4,7 @@ use crate::audio::{self, Cmd, Repeat, State as PlayerState, Status, Track};
 use crate::auth;
 use crate::config::{self, Config};
 use crate::entry::{fmt_f64, Entry};
+use crate::listcache;
 use crate::ui;
 use crate::ytdl::{self, Kind, Msg};
 use crossterm::event::{
@@ -62,6 +63,13 @@ pub struct App {
     pub list_state: ListState,
     pub list_offset: usize,
     pub loading: Option<(Kind, Instant)>,
+    /// Rows received by the fetch in progress, shown in the status bar.
+    pub fetch_count: usize,
+    /// Identifies the newest fetch; messages from older ones are dropped.
+    fetch_seq: u64,
+    /// Set while a refresh keeps the cached rows visible: they are replaced by
+    /// the first new page instead of being cleared up front.
+    pending_clear: Option<Kind>,
     pub toast: Option<(String, Instant, bool)>,
     pub search_open: bool,
     pub search_input: String,
@@ -69,6 +77,9 @@ pub struct App {
     pub last_query: String,
     pub should_quit: bool,
     pub player: Arc<Mutex<PlayerState>>,
+    /// Animation clock for spinners; started once so every draw agrees on the
+    /// frame and the wheel does not jump when a message arrives.
+    pub anim: Instant,
     pub cmd_tx: Sender<Cmd>,
     pub fetch_tx: Sender<Msg>,
     pub account: Option<String>,
@@ -110,6 +121,9 @@ impl App {
             list_state: ListState::default(),
             list_offset: 0,
             loading: None,
+            fetch_count: 0,
+            fetch_seq: 0,
+            pending_clear: None,
             toast: None,
             search_open: false,
             search_input: String::new(),
@@ -117,6 +131,7 @@ impl App {
             last_query: String::new(),
             should_quit: false,
             player: Arc::clone(&player.state),
+            anim: Instant::now(),
             cmd_tx: player.tx_clone(),
             fetch_tx,
             account,
@@ -150,7 +165,21 @@ impl App {
             app.sync_queue_cache();
             app.pick_up_notice();
             terminal.draw(|f| ui::draw(f, app))?;
-            if poll(Duration::from_millis(120))? {
+            // While a list is streaming in or a track is being resolved,
+            // redraw often enough that the spinner turns; when idle there is
+            // nothing to animate.
+            let resolving = app
+                .player
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .status
+                == Status::Loading;
+            let wait = if app.loading.is_some() || resolving {
+                Duration::from_millis(33)
+            } else {
+                Duration::from_millis(120)
+            };
+            if poll(wait)? {
                 match read()? {
                     Event::Key(k) => {
                         if k.kind != KeyEventKind::Release {
@@ -220,35 +249,64 @@ impl App {
 
     pub fn on_fetch(&mut self, msg: Msg) {
         match msg {
-            Msg::Begin(kind) => {
+            Msg::Begin(seq, kind) => {
+                if seq != self.fetch_seq {
+                    return;
+                }
                 self.loading = Some((kind, Instant::now()));
-                match kind {
-                    Kind::PlaylistTracks => {
-                        self.playlist_tracks.clear();
-                        self.in_playlist = true;
-                        self.playlist_title = self.pending_playlist_title.clone();
-                        self.sel[TAB_PLAYLISTS] = 0;
-                    }
-                    _ => {
-                        self.list_mut(kind).clear();
-                        self.sel[self.tab_of(kind)] = 0;
-                    }
+                self.fetch_count = 0;
+                if kind == Kind::PlaylistTracks {
+                    self.playlist_tracks.clear();
+                    self.in_playlist = true;
+                    self.playlist_title = self.pending_playlist_title.clone();
+                    self.sel[TAB_PLAYLISTS] = 0;
+                    self.pending_clear = None;
+                } else if self.list_mut(kind).is_empty() {
+                    self.pending_clear = None;
+                } else {
+                    // Keep the cached rows visible until the first new page
+                    // arrives, so a refresh never flashes an empty tab.
+                    self.pending_clear = Some(kind);
                 }
             }
-            Msg::Add(kind, entry) => {
+            Msg::Add(seq, kind, entry) => {
+                if seq != self.fetch_seq {
+                    return;
+                }
+                if self.pending_clear == Some(kind) {
+                    self.pending_clear = None;
+                    self.list_mut(kind).clear();
+                    self.sel[self.tab_of(kind)] = 0;
+                }
                 if kind == Kind::PlaylistTracks {
                     self.playlist_tracks.push(entry);
                 } else {
                     self.list_mut(kind).push(entry);
                 }
+                self.fetch_count += 1;
             }
-            Msg::Done(kind, label) => {
+            Msg::Done(seq, kind, label) => {
+                if seq != self.fetch_seq {
+                    return;
+                }
+                if self.pending_clear.take() == Some(kind) {
+                    // The refresh came back empty; keeping the old rows would
+                    // show tracks the account no longer has.
+                    self.list_mut(kind).clear();
+                    self.sel[self.tab_of(kind)] = 0;
+                }
                 self.loading = None;
                 self.clamp_sel();
-                let _ = kind;
+                self.save_cache(kind);
                 self.set_toast(format!("✔ {label}"), false);
             }
-            Msg::Error(kind, err) => {
+            Msg::Error(seq, kind, err) => {
+                if seq != self.fetch_seq {
+                    return;
+                }
+                // A failed refresh keeps the cached rows; the toast explains
+                // why they may be stale.
+                self.pending_clear = None;
                 self.loading = None;
                 if kind == Kind::PlaylistTracks {
                     self.in_playlist = false;
@@ -509,9 +567,23 @@ impl App {
             return;
         }
         match tab {
-            TAB_LIKED if self.liked.is_empty() => self.fetch_liked(false),
-            TAB_PLAYLISTS if self.playlists.is_empty() => self.fetch_playlists(false),
-            TAB_SUBS if self.subs.is_empty() => self.fetch_subs(false),
+            TAB_LIKED if self.liked.is_empty() => {
+                // A fresh cache paints instantly and skips the network; a
+                // stale one paints too, with a refresh behind it.
+                if self.load_cached(Kind::LikedMusic) != Some(true) {
+                    self.fetch_liked(false);
+                }
+            }
+            TAB_PLAYLISTS if self.playlists.is_empty() => {
+                if self.load_cached(Kind::Playlists) != Some(true) {
+                    self.fetch_playlists(false);
+                }
+            }
+            TAB_SUBS if self.subs.is_empty() => {
+                if self.load_cached(Kind::Subscriptions) != Some(true) {
+                    self.fetch_subs(false);
+                }
+            }
             _ => {}
         }
     }
@@ -605,8 +677,44 @@ impl App {
     }
 
     fn start_fetch(&mut self, kind: Kind, target: String) {
+        self.fetch_seq = self.fetch_seq.wrapping_add(1);
+        self.fetch_count = 0;
+        self.pending_clear = None;
         self.loading = Some((kind, Instant::now()));
-        ytdl::spawn(kind, target, self.cfg.clone(), self.fetch_tx.clone());
+        ytdl::spawn(
+            self.fetch_seq,
+            kind,
+            target,
+            self.cfg.clone(),
+            self.fetch_tx.clone(),
+        );
+    }
+
+    /// Paints the last saved listing for `kind` without touching the network.
+    /// `Some(fresh)` means the cache was used; `false` means a refresh should
+    /// follow, `Some(true)` means it is recent enough to keep.
+    fn load_cached(&mut self, kind: Kind) -> Option<bool> {
+        let key = listcache::key(kind)?;
+        let cached = listcache::load(key, &listcache::stamp(&self.cfg))?;
+        // An empty list is never trusted for long: it may just mean the last
+        // fetch ran while signed out.
+        let fresh = cached.fresh() && !cached.entries.is_empty();
+        *self.list_mut(kind) = cached.entries;
+        self.clamp_sel();
+        Some(fresh)
+    }
+
+    fn save_cache(&self, kind: Kind) {
+        let Some(key) = listcache::key(kind) else {
+            return;
+        };
+        let entries = match kind {
+            Kind::LikedMusic => &self.liked,
+            Kind::Playlists => &self.playlists,
+            Kind::Subscriptions => &self.subs,
+            Kind::Search | Kind::PlaylistTracks => return,
+        };
+        listcache::save(key, &listcache::stamp(&self.cfg), entries);
     }
 
     fn submit_search(&mut self) {

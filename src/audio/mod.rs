@@ -7,10 +7,11 @@ mod http;
 mod resample;
 mod sink;
 
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
 use crate::ytdl;
@@ -153,26 +154,40 @@ struct Engine {
     rng: u64,
 }
 
-/// Works out stream URLs in the background, one at a time.
+/// Works out stream URLs in the background, one at a time, and keeps a small
+/// LRU of recently resolved links.
 ///
 /// Each run starts `yt-dlp`, which in turn starts deno to solve YouTube's
-/// JavaScript challenge; together they use a few hundred megabytes for a
-/// couple of seconds. Running two at once doubles that, so everything goes
-/// through this one thread and a newer request replaces a queued one.
+/// JavaScript challenge; together they use ~135 MiB for a couple of seconds.
+/// Running two at once doubles that, so the background queue is handled by a
+/// single thread. A link by itself is only ~1.2 KiB, so caching a handful is
+/// free and turns replays and skips back into instant starts.
 struct Prefetch {
     inner: Mutex<Job>,
     cv: Condvar,
     cfg: Config,
 }
 
+/// Resolved links kept for replays. Sixteen googlevideo URLs are ~25 KiB.
+const URL_CACHE_MAX: usize = 16;
+/// Upcoming tracks to resolve while the current one plays.
+const PREFETCH_AHEAD: usize = 3;
+/// Stop using a link this long before YouTube's own expiry, so there is time
+/// to re-resolve when a track is played from an old cache entry.
+const URL_EXPIRY_MARGIN_SECS: u64 = 5 * 60;
+/// Space between background resolves. The first one still starts immediately,
+/// the way the old single-track prefetch did; the extra ones are not urgent
+/// and should not compete with the decoder in one burst.
+const PREFETCH_GAP: Duration = Duration::from_millis(1200);
+
 #[derive(Default)]
 struct Job {
-    /// URL the engine wants next, if any.
-    want: Option<String>,
+    /// Tracks to resolve in the background, in play order.
+    queue: VecDeque<String>,
     /// URL being resolved right now.
     running: Option<String>,
-    /// Finished result, waiting to be taken.
-    done: Option<(String, Result<ytdl::Stream, String>)>,
+    /// Oldest first. A hit moves its entry to the back.
+    cache: VecDeque<(String, ytdl::Stream)>,
 }
 
 impl Prefetch {
@@ -199,62 +214,89 @@ impl Prefetch {
             let url = {
                 let mut g = self.lock();
                 loop {
-                    if let Some(u) = g.want.take() {
+                    if let Some(u) = g.queue.pop_front() {
+                        // A foreground click may have resolved it while it
+                        // sat in the queue.
+                        if g.cache.iter().any(|(c, _)| c == &u) {
+                            continue;
+                        }
+                        g.running = Some(u.clone());
                         break u;
                     }
                     g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
                 }
             };
-            self.lock().running = Some(url.clone());
             let res = ytdl::stream_url(&url, &self.cfg);
             let mut g = self.lock();
             g.running = None;
-            // A request that arrived while we were busy means this result is
-            // already stale; drop it instead of holding a URL we won't play.
-            if g.want.is_none() {
-                g.done = Some((url, res));
+            if let Ok(s) = res {
+                remember(&mut g, &url, s);
             }
             drop(g);
             self.cv.notify_all();
+            // Resolving three tracks back to back would keep one core busy
+            // for several seconds right after playback starts. One job is
+            // enough of a head start; give the decoder a clear run before the
+            // next, so the extra prefetch cannot cause underruns.
+            thread::sleep(PREFETCH_GAP);
         }
     }
 
-    /// Ask for `url` unless it is already resolved or on its way.
-    fn request(&self, url: &str) {
+    /// Replace the background queue with the tracks after the one that just
+    /// started. Replacing instead of appending matters after a jump: guesses
+    /// made for the old position would otherwise sit in front of the list for
+    /// the new one.
+    fn request(&self, urls: Vec<String>) {
         let mut g = self.lock();
-        let known = g.done.as_ref().is_some_and(|(u, _)| u == url)
-            || g.running.as_deref() == Some(url)
-            || g.want.as_deref() == Some(url);
-        if !known {
-            g.want = Some(url.to_string());
-            drop(g);
+        let mut queue = VecDeque::new();
+        for url in urls {
+            let known = g.cache.iter().any(|(u, _)| u == &url)
+                || g.running.as_deref() == Some(url.as_str())
+                || queue.contains(&url);
+            if !known {
+                queue.push_back(url);
+            }
+        }
+        while queue.len() > PREFETCH_AHEAD {
+            queue.pop_back();
+        }
+        let changed = g.queue != queue;
+        g.queue = queue;
+        drop(g);
+        if changed {
             self.cv.notify_all();
         }
     }
 
-    fn take(&self, url: &str) -> Option<Result<ytdl::Stream, String>> {
-        let mut g = self.lock();
-        match g.done.as_ref() {
-            Some((u, _)) if u == url => g.done.take().map(|(_, r)| r),
-            _ => None,
-        }
+    /// A cached, still-valid link for `url`.
+    fn take(&self, url: &str) -> Option<ytdl::Stream> {
+        take_cached(&mut self.lock(), url)
     }
 
-    fn working_on(&self, url: &str) -> bool {
-        let g = self.lock();
-        g.running.as_deref() == Some(url) || g.want.as_deref() == Some(url)
+    fn running(&self, url: &str) -> bool {
+        self.lock().running.as_deref() == Some(url)
     }
 
-    /// Wait for `url` while it is being resolved, so a skip does not start a
-    /// second resolver.
-    fn wait(&self, url: &str, limit: Duration) -> Option<Result<ytdl::Stream, String>> {
+    fn drop_queued(&self, url: &str) {
+        self.lock().queue.retain(|u| u != url);
+    }
+
+    fn remember(&self, url: &str, stream: &ytdl::Stream) {
+        remember(&mut self.lock(), url, stream.clone());
+    }
+
+    /// Waits for a resolve that is already in flight for exactly `url`. `None`
+    /// means it finished without a usable link and the caller should resolve
+    /// the track itself.
+    fn wait(&self, url: &str, limit: Duration) -> Option<ytdl::Stream> {
         let deadline = Instant::now() + limit;
         let mut g = self.lock();
         loop {
-            if let Some((u, _)) = g.done.as_ref() {
-                if u == url {
-                    return g.done.take().map(|(_, r)| r);
-                }
+            if let Some(s) = take_cached(&mut g, url) {
+                return Some(s);
+            }
+            if g.running.as_deref() != Some(url) {
+                return None;
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -267,6 +309,52 @@ impl Prefetch {
             g = next;
         }
     }
+}
+
+fn cached_index(g: &Job, url: &str) -> Option<usize> {
+    g.cache.iter().position(|(u, _)| u == url)
+}
+
+/// Removes a cache hit and puts it back at the back, unless YouTube's expiry
+/// timestamp says the link is about to stop working.
+fn take_cached(g: &mut Job, url: &str) -> Option<ytdl::Stream> {
+    let i = cached_index(g, url)?;
+    let (u, s) = g.cache.remove(i)?;
+    if link_expired(&s.url) {
+        return None;
+    }
+    g.cache.push_back((u, s.clone()));
+    Some(s)
+}
+
+fn remember(g: &mut Job, url: &str, s: ytdl::Stream) {
+    if let Some(i) = cached_index(g, url) {
+        g.cache.remove(i);
+    }
+    g.cache.push_back((url.to_string(), s));
+    while g.cache.len() > URL_CACHE_MAX {
+        g.cache.pop_front();
+    }
+}
+
+/// googlevideo URLs carry `expire=<unix seconds>`. A link without the
+/// parameter is assumed usable; the decoder's own 403 handling still applies.
+fn link_expired(url: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    for pair in query.split('&') {
+        if let Some(v) = pair.strip_prefix("expire=") {
+            if let Ok(exp) = v.parse::<u64>() {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                return exp <= now + URL_EXPIRY_MARGIN_SECS;
+            }
+        }
+    }
+    false
 }
 
 impl Engine {
@@ -344,41 +432,69 @@ impl Engine {
         self.lock().pos = at;
     }
 
-    /// The stream for `url`: from the background thread if it is ready, if it
-    /// is being worked on right now, or straight from yt-dlp.
+    /// The stream for `url`: from the cache when it is a replay or a skip
+    /// back, from the background thread when that is already resolving this
+    /// exact URL, otherwise straight from yt-dlp. A click never waits behind
+    /// the prefetch queue.
     fn resolve(&self, url: &str) -> Result<ytdl::Stream, String> {
-        if let Some(r) = self.prefetch.take(url) {
-            return r;
+        if let Some(s) = self.prefetch.take(url) {
+            return Ok(s);
         }
         // This is the usual case when a song is skipped early: waiting for the
         // resolver that is already on this URL is faster than starting a
-        // second one, and it keeps only one deno alive.
-        if self.prefetch.working_on(url) {
-            if let Some(r) = self.prefetch.wait(url, Duration::from_secs(20)) {
-                return r;
+        // second one, and it keeps only one yt-dlp alive.
+        if self.prefetch.running(url) {
+            if let Some(s) = self.prefetch.wait(url, Duration::from_secs(20)) {
+                return Ok(s);
             }
         }
-        ytdl::stream_url(url, &self.cfg)
+        // The requested track is not the one being prefetched: resolve it on
+        // this thread so the user hears it now, even if that means two yt-dlp
+        // processes overlap for a moment.
+        self.prefetch.drop_queued(url);
+        let res = ytdl::stream_url(url, &self.cfg);
+        if let Ok(stream) = &res {
+            self.prefetch.remember(url, stream);
+        }
+        res
     }
 
-    /// Ask for the next track's URL once the current one is known to play.
-    /// Resolving takes yt-dlp a few seconds, and that pause between songs is
-    /// what people notice most.
+    /// Ask for the next few tracks' URLs once the current one is known to
+    /// play. The worker runs them one at a time; the queue is only as deep as
+    /// a few skips so links do not expire before they are used.
     fn prefetch_after(&self, index: usize) {
-        let next = {
+        // Escape hatch for slow machines (or for A/B testing a stutter):
+        // `YTUI_PREFETCH=0 ytui` resolves every track on demand only.
+        if std::env::var("YTUI_PREFETCH").ok().as_deref() == Some("0") {
+            return;
+        }
+        let urls = {
             let st = self.lock();
             let len = st.queue.len();
-            let i = match st.repeat {
-                Repeat::One => Some(index),
-                _ if st.shuffle => None,
-                _ if index + 1 < len => Some(index + 1),
-                Repeat::All if len > 0 => Some(0),
-                _ => None,
-            };
-            i.and_then(|i| st.queue.get(i)).map(|t| t.url.clone())
+            let mut urls = Vec::new();
+            if st.repeat == Repeat::One {
+                if let Some(t) = st.queue.get(index) {
+                    urls.push(t.url.clone());
+                }
+            } else if !st.shuffle {
+                for step in 1..=PREFETCH_AHEAD {
+                    let next = index + step;
+                    let next = if next < len {
+                        Some(next)
+                    } else if st.repeat == Repeat::All && len > 0 {
+                        Some(next % len)
+                    } else {
+                        None
+                    };
+                    if let Some(t) = next.and_then(|i| st.queue.get(i)) {
+                        urls.push(t.url.clone());
+                    }
+                }
+            }
+            urls
         };
-        if let Some(url) = next {
-            self.prefetch.request(&url);
+        if !urls.is_empty() {
+            self.prefetch.request(urls);
         }
     }
 
@@ -892,5 +1008,71 @@ mod tests {
         ));
         assert!(!track_is_gone("open stream: connection refused"));
         assert!(!track_is_gone("cannot open audio device: no such device"));
+    }
+
+    fn stream(url: &str) -> ytdl::Stream {
+        ytdl::Stream {
+            url: url.to_string(),
+            title: "track".into(),
+            channel: "channel".into(),
+            duration: 180.0,
+        }
+    }
+
+    fn now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn link(expire: u64) -> String {
+        format!("https://rr1.googlevideo.com/videoplayback?expire={expire}&mime=audio")
+    }
+
+    #[test]
+    fn expired_links_are_not_reused() {
+        assert!(link_expired(&link(now().saturating_sub(1))));
+        // Expiring within the safety margin counts as expired, so there is
+        // time to resolve a fresh link before playback starts.
+        assert!(link_expired(&link(now() + 60)));
+        assert!(!link_expired(&link(now() + 3600)));
+        // No `expire=` parameter: assume usable and let the decoder decide.
+        assert!(!link_expired("https://rr1.googlevideo.com/videoplayback?mime=audio"));
+    }
+
+    #[test]
+    fn the_url_cache_keeps_the_newest_entries() {
+        let mut g = Job::default();
+        for i in 0..(URL_CACHE_MAX + 4) {
+            remember(&mut g, &format!("u{i}"), stream(&link(now() + 3600)));
+        }
+        assert_eq!(g.cache.len(), URL_CACHE_MAX);
+        assert!(take_cached(&mut g, "u0").is_none());
+        let newest = format!("u{}", URL_CACHE_MAX + 3);
+        assert!(take_cached(&mut g, &newest).is_some());
+        // A hit stays cached, so skipping back is instant too.
+        assert!(take_cached(&mut g, &newest).is_some());
+    }
+
+    #[test]
+    fn a_jump_replaces_the_prefetch_queue() {
+        let p = Prefetch {
+            inner: Mutex::new(Job::default()),
+            cv: Condvar::new(),
+            cfg: Config::default(),
+        };
+        p.request(vec!["a".into(), "b".into(), "c".into()]);
+        assert_eq!(
+            p.lock().queue,
+            VecDeque::from(vec!["a".into(), "b".into(), "c".into()])
+        );
+        // Jumping elsewhere must not leave the old position's guesses in front.
+        p.request(vec!["x".into()]);
+        assert_eq!(p.lock().queue, VecDeque::from(vec!["x".into()]));
+        // A track that is already resolved is not queued again.
+        remember(&mut p.lock(), "x", stream(&link(now() + 3600)));
+        p.request(vec!["x".into(), "y".into()]);
+        assert_eq!(p.lock().queue, VecDeque::from(vec!["y".into()]));
     }
 }

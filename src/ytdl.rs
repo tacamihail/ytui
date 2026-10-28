@@ -33,10 +33,13 @@ pub enum Kind {
 
 #[derive(Debug)]
 pub enum Msg {
-    Begin(Kind),
-    Add(Kind, Entry),
-    Done(Kind, String),
-    Error(Kind, String),
+    /// `seq` identifies the fetch that produced the message. A newer fetch
+    /// bumps the counter, so a slow listing cannot append rows to a list that
+    /// has already been replaced.
+    Begin(u64, Kind),
+    Add(u64, Kind, Entry),
+    Done(u64, Kind, String),
+    Error(u64, Kind, String),
 }
 
 const SEP: char = '\u{1f}';
@@ -67,8 +70,23 @@ pub(crate) fn tool_path() -> String {
         .unwrap_or_default()
 }
 
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|d| d.join(name).is_file()))
+        .unwrap_or(false)
+}
+
 pub(crate) fn command() -> Command {
-    let mut c = Command::new("yt-dlp");
+    // Resolving a track is background work, but yt-dlp + deno still burn a
+    // core for a couple of seconds. Running it below the audio thread's
+    // priority keeps a busy prefetch from turning into the occasional click.
+    let mut c = if on_path("nice") && on_path("yt-dlp") {
+        let mut c = Command::new("nice");
+        c.args(["-n", "10", "yt-dlp"]);
+        c
+    } else {
+        Command::new("yt-dlp")
+    };
     c.env("PATH", tool_path());
     c
 }
@@ -84,34 +102,38 @@ pub fn label(kind: Kind) -> &'static str {
 }
 
 /// Runs a listing on a background thread, streaming entries through `tx`.
-pub fn spawn(kind: Kind, target: String, cfg: Config, tx: Sender<Msg>) {
+pub fn spawn(seq: u64, kind: Kind, target: String, cfg: Config, tx: Sender<Msg>) {
     thread::spawn(move || {
-        let _ = tx.send(Msg::Begin(kind));
+        let _ = tx.send(Msg::Begin(seq, kind));
         let res = match kind {
             Kind::Subscriptions => crate::ytapi::subscription_feed(&cfg).map(|list| {
                 let n = list.len();
                 for e in list {
-                    let _ = tx.send(Msg::Add(kind, e));
+                    let _ = tx.send(Msg::Add(seq, kind, e));
                 }
                 n
             }),
-            _ => run(kind, &target, &cfg, &tx),
+            _ => run(seq, kind, &target, &cfg, &tx),
         };
         match res {
             Ok(n) => {
-                let _ = tx.send(Msg::Done(kind, format!("{}: {} items", label(kind), n)));
+                let _ = tx.send(Msg::Done(seq, kind, format!("{}: {} items", label(kind), n)));
             }
             Err(e) => {
-                let _ = tx.send(Msg::Error(kind, e));
+                let _ = tx.send(Msg::Error(seq, kind, e));
             }
         }
     });
 }
 
-fn run(kind: Kind, target: &str, cfg: &Config, tx: &Sender<Msg>) -> Result<usize, String> {
+fn run(seq: u64, kind: Kind, target: &str, cfg: &Config, tx: &Sender<Msg>) -> Result<usize, String> {
     let mut c = command();
     c.args([
         "--flat-playlist",
+        // Print rows page by page instead of collecting the whole playlist
+        // first: the first screen is on screen in about a second even when
+        // the list has thousands of entries.
+        "--lazy-playlist",
         "--no-warnings",
         "--print",
         TEMPLATE,
@@ -146,7 +168,7 @@ fn run(kind: Kind, target: &str, cfg: &Config, tx: &Sender<Msg>) -> Result<usize
     for line in BufReader::new(out).lines().map_while(Result::ok) {
         if let Some(entry) = parse_line(kind, &line) {
             n += 1;
-            let _ = tx.send(Msg::Add(kind, entry));
+            let _ = tx.send(Msg::Add(seq, kind, entry));
         }
     }
 
@@ -196,6 +218,7 @@ fn parse_num(s: &str) -> u64 {
 
 /// A playable stream plus the metadata yt-dlp already handed us, so an entry
 /// created from a bare URL can show its real title instead of a placeholder.
+#[derive(Clone, Debug)]
 pub struct Stream {
     pub url: String,
     pub title: String,

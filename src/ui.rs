@@ -20,6 +20,14 @@ const FG: Color = Color::Rgb(205, 214, 244);
 const BORDER: Color = Color::Rgb(88, 96, 120);
 const SELBG: Color = Color::Rgb(49, 54, 73);
 
+/// Braille wheel used for every background wait, in the status line and in
+/// place of the play button while a track is being resolved.
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+fn spinner(elapsed: Duration) -> char {
+    SPINNER[(elapsed.as_millis() / 80) as usize % SPINNER.len()]
+}
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let rows = Layout::vertical([
@@ -157,11 +165,13 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
 
     // The glyph is the *action*: ⏸ while playing, ⏵ while paused. Use the
     // same media family as ⏮/⏭ so all three render at one size; ◌ comes from
-    // a different font and looked tiny next to them.
+    // a different font and looked tiny next to them. While yt-dlp is working
+    // out the stream URL the button becomes the same wheel as the status
+    // line, so a requested track visibly spins until it starts.
     let (icon, icol) = match status {
-        Status::Paused => ("⏵", YELLOW),
-        Status::Loading => ("⟳", ACCENT),
-        _ => ("⏸", GREEN),
+        Status::Paused => ("⏵".to_string(), YELLOW),
+        Status::Loading => (spinner(app.anim.elapsed()).to_string(), ACCENT),
+        _ => ("⏸".to_string(), GREEN),
     };
 
     let mut flags = String::new();
@@ -323,8 +333,9 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             );
             return;
         }
-        let items: Vec<ListItem> = app
-            .queue_rows
+        let len = app.queue_rows.len();
+        let (start, end) = window(app.list_offset, selidx, inner.height as usize, len);
+        let items: Vec<ListItem> = app.queue_rows[start..end]
             .iter()
             .map(|(title, current)| {
                 let (marker, mstyle) = if *current {
@@ -338,24 +349,29 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 ]))
             })
             .collect();
-        render_items(f, app, items, selidx, inner);
+        app.list_offset = start;
+        render_items(f, app, items, selidx - start, inner);
         return;
     }
 
     let list = app.current_vec();
     if list.is_empty() {
-        let hint = match app.tab {
-            TAB_SEARCH => "press / and search YouTube Music (or paste a URL)",
-            TAB_LIKED => "no liked music yet, press r (needs ytui auth)",
-            TAB_PLAYLISTS => {
-                if app.in_playlist {
-                    "empty playlist"
-                } else {
-                    "no playlists yet, press r (needs ytui auth)"
+        let hint = if app.loading.is_some() {
+            "loading…"
+        } else {
+            match app.tab {
+                TAB_SEARCH => "press / and search YouTube Music (or paste a URL)",
+                TAB_LIKED => "no liked music yet, press r (needs ytui auth)",
+                TAB_PLAYLISTS => {
+                    if app.in_playlist {
+                        "empty playlist"
+                    } else {
+                        "no playlists yet, press r (needs ytui auth)"
+                    }
                 }
+                TAB_SUBS => "no subscriptions loaded, press r (needs ytui auth)",
+                _ => "nothing played yet",
             }
-            TAB_SUBS => "no subscriptions loaded, press r (needs ytui auth)",
-            _ => "nothing played yet",
         };
         empty_hint(f, app, inner, hint);
         return;
@@ -367,10 +383,24 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let is_playlist_list = app.tab == TAB_PLAYLISTS && !app.in_playlist;
-    let items: Vec<ListItem> = list
+    // Video id of the playing track, so the marker can be decided without
+    // formatting a URL for every row on screen.
+    let playing_id = playing
+        .split_once("v=")
+        .map(|(_, rest)| rest.split('&').next().unwrap_or(rest))
+        .unwrap_or("");
+    let len = list.len();
+    let (start, end) = window(app.list_offset, selidx, inner.height as usize, len);
+    let items: Vec<ListItem> = list[start..end]
         .iter()
         .map(|e| {
-            let now = !is_playlist_list && !playing.is_empty() && e.url() == playing;
+            let now = !is_playlist_list
+                && !playing.is_empty()
+                && if e.url_override.is_empty() {
+                    e.id == playing_id
+                } else {
+                    e.url_override == playing
+                };
             let (marker, mstyle) = if now {
                 ("▶ ", Style::new().fg(GREEN))
             } else {
@@ -393,12 +423,36 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             ]))
         })
         .collect();
-    render_items(f, app, items, selidx, inner);
+    app.list_offset = start;
+    render_items(f, app, items, selidx - start, inner);
+}
+
+/// First visible row for a viewport of `height` rows, keeping `sel` on screen.
+/// `offset` is the previous frame's window start, so a one-row move scrolls by
+/// one row instead of re-centring the list.
+fn window(offset: usize, sel: usize, height: usize, len: usize) -> (usize, usize) {
+    if len == 0 {
+        return (0, 0);
+    }
+    let height = height.max(1);
+    let last_start = len.saturating_sub(height);
+    let sel = sel.min(len - 1);
+    let mut start = offset.min(last_start);
+    if sel < start {
+        start = sel;
+    } else if sel >= start + height {
+        start = sel + 1 - height;
+    }
+    start = start.min(last_start);
+    (start, (start + height).min(len))
 }
 
 fn render_items(f: &mut Frame, app: &mut App, items: Vec<ListItem>, selidx: usize, inner: Rect) {
     let mut st = std::mem::take(&mut app.list_state);
-    st.select(Some(selidx.min(items.len() - 1)));
+    st.select(Some(selidx.min(items.len().saturating_sub(1))));
+    // The list only sees the visible slice, so its own offset is always zero;
+    // the absolute window start lives in `app.list_offset`.
+    *st.offset_mut() = 0;
     let list = List::new(items).highlight_style(
         Style::new()
             .bg(SELBG)
@@ -406,7 +460,7 @@ fn render_items(f: &mut Frame, app: &mut App, items: Vec<ListItem>, selidx: usiz
             .add_modifier(Modifier::BOLD),
     );
     f.render_stateful_widget(list, inner, &mut st);
-    app.list_offset = st.offset();
+    // The window start is absolute; the list widget only knows the slice.
     app.list_state = st;
 }
 
@@ -419,9 +473,7 @@ fn empty_hint(f: &mut Frame, _app: &mut App, inner: Rect, hint: &str) {
 
 fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     let loading = app.loading.map(|(k, t)| {
-        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-        let i = (t.elapsed().as_millis() / 80) as usize % 10;
-        (frames[i], ytdl::label(k))
+        (spinner(t.elapsed()), ytdl::label(k), app.fetch_count)
     });
     let toast = app
         .toast
@@ -429,11 +481,13 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
         .filter(|(_, t, _)| t.elapsed() < Duration::from_secs(5))
         .map(|(m, _, e)| (m.clone(), *e));
 
-    let line = if let Some((spin, what)) = loading {
-        Line::from(Span::styled(
-            format!(" {spin} fetching {what}…"),
-            Style::new().fg(ACCENT),
-        ))
+    let line = if let Some((spin, what, rows)) = loading {
+        let detail = if rows > 0 {
+            format!(" {spin} fetching {what}… {rows}")
+        } else {
+            format!(" {spin} fetching {what}…")
+        };
+        Line::from(Span::styled(detail, Style::new().fg(ACCENT)))
     } else if let Some((msg, err)) = toast {
         Line::from(Span::styled(
             format!(" {msg}"),
@@ -593,6 +647,19 @@ mod tests {
                 t.width()
             );
         }
+    }
+
+    /// A windowed list only builds the rows on screen, but the selection must
+    /// still be able to move past the viewport at either end.
+    #[test]
+    fn window_keeps_the_selection_visible() {
+        assert_eq!(window(0, 0, 20, 500), (0, 20));
+        assert_eq!(window(0, 19, 20, 500), (0, 20));
+        assert_eq!(window(0, 20, 20, 500), (1, 21));
+        assert_eq!(window(400, 399, 20, 500), (399, 419));
+        assert_eq!(window(480, 499, 20, 500), (480, 500));
+        assert_eq!(window(0, 0, 20, 5), (0, 5));
+        assert_eq!(window(0, 0, 0, 0), (0, 0));
     }
 }
 
