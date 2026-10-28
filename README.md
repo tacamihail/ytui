@@ -228,3 +228,7 @@ prefers AAC-LC when YouTube offers it.
 rm ~/.local/bin/ytui ~/.local/bin/ytui.bin
 rm -rf ~/.config/ytui ~/.local/share/ytui
 ```
+
+## License
+
+MIT. The full text is in [LICENSE](LICENSE).
