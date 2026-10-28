@@ -143,6 +143,9 @@ struct Engine {
     /// Dead tracks walked past since the last time playback started on
     /// purpose; see `MAX_SKIPS`.
     fails: usize,
+    /// Where the output should resume once the ring has enough audio, in
+    /// seconds. `Some` while the sink is held after a start or a seek.
+    holding: Option<f64>,
     /// Resolves the next track while the current one plays. `yt-dlp` takes a
     /// few seconds per track, which is most of the pause between songs.
     prefetch: Arc<Prefetch>,
@@ -276,6 +279,7 @@ impl Engine {
             loaded: None,
             eof: false,
             fails: 0,
+            holding: None,
             prefetch,
             tmp: Vec::with_capacity(16384),
             rng: seed(),
@@ -324,6 +328,20 @@ impl Engine {
 
     fn target_frames(&self) -> usize {
         (self.sink_rate() as usize * self.cfg.buffer_ms as usize / 1000).max(4096)
+    }
+
+    /// Stop the output and remember where it should resume. The decoder fills
+    /// the ring from there, and `tick` lets it go once there is enough audio.
+    /// The silence in between is not counted, so the clock starts where the
+    /// sound does instead of a few seconds in.
+    fn hold_at(&mut self, at: f64) {
+        self.holding = Some(at);
+        if let Some(s) = &self.sink {
+            s.clear();
+            s.set_played_frames((at * f64::from(s.rate())) as u64);
+            s.set_hold(true);
+        }
+        self.lock().pos = at;
     }
 
     /// The stream for `url`: from the background thread if it is ready, if it
@@ -478,10 +496,12 @@ impl Engine {
             Cmd::Stop => {
                 self.loaded = None;
                 self.eof = false;
+                self.holding = None;
                 if let Some(s) = &self.sink {
                     s.clear();
                     s.set_played_frames(0);
                     s.set_paused(false);
+                    s.set_hold(false);
                 }
                 let mut st = self.lock();
                 st.status = Status::Stopped;
@@ -511,11 +531,7 @@ impl Engine {
             return;
         };
         self.eof = false;
-        if let Some(s) = &self.sink {
-            s.clear();
-            s.set_played_frames((actual * f64::from(s.rate())) as u64);
-        }
-        self.lock().pos = actual;
+        self.hold_at(actual);
     }
 
     fn skip(&mut self, dir: i32) {
@@ -546,10 +562,9 @@ impl Engine {
         self.loaded = None;
         self.eof = false;
         if let Some(s) = &self.sink {
-            s.clear();
-            s.set_played_frames(0);
             s.set_paused(false);
         }
+        self.hold_at(0.0);
         {
             let mut st = self.lock();
             st.index = index;
@@ -599,6 +614,8 @@ impl Engine {
                 // avoids resampling 44.1 kHz AAC up to 48 kHz and back.
                 self.retune_sink(l.rate());
                 l.set_target_rate(self.sink_rate());
+                // A rate change replaces the sink, which starts out released.
+                self.hold_at(0.0);
 
                 let mut st = self.lock();
                 st.status = if st.status == Status::Paused {
@@ -641,8 +658,10 @@ impl Engine {
     fn fail(&mut self, err: String) {
         self.loaded = None;
         self.eof = false;
+        self.holding = None;
         if let Some(s) = &self.sink {
             s.clear();
+            s.set_hold(false);
         }
         let mut st = self.lock();
         st.status = Status::Error;
@@ -657,11 +676,18 @@ impl Engine {
             }
         }
 
-        // Pump the decoder while the ring buffer has room.
+        // Pump the decoder while the ring buffer has room. After a start or a
+        // seek only a short pre-roll is needed to let go of the output, so do
+        // not sit there decoding the whole buffer first.
         if self.loaded.is_some() && !self.eof {
             loop {
                 let Some(sink) = &self.sink else { break };
-                if sink.buffered_frames() >= self.target_frames() {
+                let limit = if self.holding.is_some() {
+                    (sink.rate() as usize / 2).max(1)
+                } else {
+                    self.target_frames()
+                };
+                if sink.buffered_frames() >= limit {
                     break;
                 }
                 let mut tmp = std::mem::take(&mut self.tmp);
@@ -688,6 +714,18 @@ impl Engine {
                         self.fail(e);
                         break;
                     }
+                }
+            }
+        }
+
+        // Let the output go once there is enough audio to play without a gap.
+        if let Some(at) = self.holding {
+            if let Some(s) = &self.sink {
+                let need = (s.rate() as usize / 2).max(1);
+                if s.buffered_frames() >= need || self.eof {
+                    s.set_played_frames((at * f64::from(s.rate())) as u64);
+                    s.set_hold(false);
+                    self.holding = None;
                 }
             }
         }
@@ -730,12 +768,8 @@ impl Engine {
             if let Some(loaded) = &mut self.loaded {
                 if loaded.seek(0.0).is_ok() {
                     self.eof = false;
-                    if let Some(s) = &self.sink {
-                        s.clear();
-                        s.set_played_frames(0);
-                    }
+                    self.hold_at(0.0);
                     let mut st = self.lock();
-                    st.pos = 0.0;
                     st.status = Status::Playing;
                     return;
                 }
@@ -744,9 +778,11 @@ impl Engine {
 
         self.eof = false;
         self.loaded = None;
+        self.holding = None;
         if let Some(s) = &self.sink {
             s.clear();
             s.set_played_frames(0);
+            s.set_hold(false);
         }
 
         if len == 0 {

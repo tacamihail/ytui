@@ -14,6 +14,9 @@ pub struct Sink {
     buf: Arc<Mutex<VecDeque<f32>>>,
     played: Arc<AtomicU64>,
     paused: Arc<AtomicBool>,
+    /// Set while a track is being opened and the ring is still filling. The
+    /// callback then outputs silence without counting it as played time.
+    hold: Arc<AtomicBool>,
     volume: Arc<AtomicI32>,
     muted: Arc<AtomicBool>,
     dev_err: Arc<Mutex<Option<String>>>,
@@ -61,6 +64,7 @@ impl Sink {
         let buf = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(capacity)));
         let played = Arc::new(AtomicU64::new(0));
         let paused = Arc::new(AtomicBool::new(false));
+        let hold = Arc::new(AtomicBool::new(false));
         let volume = Arc::new(AtomicI32::new(100));
         let muted = Arc::new(AtomicBool::new(false));
         let dev_err = Arc::new(Mutex::new(None));
@@ -68,6 +72,7 @@ impl Sink {
         let cb_buf = Arc::clone(&buf);
         let cb_played = Arc::clone(&played);
         let cb_paused = Arc::clone(&paused);
+        let cb_hold = Arc::clone(&hold);
         let cb_vol = Arc::clone(&volume);
         let cb_muted = Arc::clone(&muted);
         let cb_err = Arc::clone(&dev_err);
@@ -76,7 +81,7 @@ impl Sink {
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if cb_paused.load(Ordering::Relaxed) {
+                    if cb_paused.load(Ordering::Relaxed) || cb_hold.load(Ordering::Relaxed) {
                         data.fill(0.0);
                         return;
                     }
@@ -116,6 +121,7 @@ impl Sink {
             buf,
             played,
             paused,
+            hold,
             volume,
             muted,
             dev_err,
@@ -123,6 +129,12 @@ impl Sink {
             rate,
             _stream: stream,
         })
+    }
+
+    /// Halt the output while the decoder fills the ring, without touching the
+    /// user's pause state and without counting the silence as playback.
+    pub fn set_hold(&self, on: bool) {
+        self.hold.store(on, Ordering::Relaxed);
     }
 
     pub fn rate(&self) -> u32 {
