@@ -9,6 +9,7 @@ use ratatui::prelude::{Color, Line, Modifier, Span, Style};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 use std::time::Duration;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const ACCENT: Color = Color::Rgb(137, 220, 235);
 const GREEN: Color = Color::Rgb(166, 227, 161);
@@ -207,18 +208,23 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let btn_style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
 
-    // Volume slider on the right: speaker icon, 10 cells, then "100%".
+    // Volume slider on the right: mute icon, 10 cells, then "100%".
+    //
+    // Both glyphs are one cell wide in every font. The speaker emoji is not:
+    // fonts that give it one cell instead of two shift the slider one cell to
+    // the left, and then clicks land to the right of what the eye sees.
     const VOL_W: usize = 10;
-    const ICON_W: usize = 2;
-    let speaker = if muted { "🔇" } else { "🔊" };
-    let flags_w = flags.chars().count();
-    let right_w = flags_w + ICON_W + 1 + VOL_W + 1 + pct.chars().count();
+    const ICON_W: usize = 1;
+    let speaker = if muted { "×" } else { "♪" };
+    let flags_w = flags.width();
+    let right_w = flags_w + ICON_W + 1 + VOL_W + 1 + pct.width();
     let right_start = inner.x + (w.saturating_sub(right_w)) as u16;
     let icon_x = right_start + flags_w as u16;
     app.mute_area = Rect {
         x: icon_x,
         y: inner.y,
-        width: ICON_W as u16,
+        // Include the space after the icon so the target is easy to hit.
+        width: ICON_W as u16 + 1,
         height: 1,
     };
     app.vol_area = Rect {
@@ -235,7 +241,7 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
 
     let title_w = w.saturating_sub(right_w + PREFIX).max(4);
     let t = truncate(&shown, title_w);
-    let pad = " ".repeat(w.saturating_sub(PREFIX + t.chars().count() + right_w));
+    let pad = " ".repeat(w.saturating_sub(PREFIX + t.width() + right_w));
     let line1 = Line::from(vec![
         Span::raw(" "),
         Span::styled("⏮", btn_style),
@@ -538,12 +544,56 @@ fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+    if s.width() <= max {
         return s.to_string();
     }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    if max < 2 {
+        return "…".repeat(max);
+    }
+    // Leave one cell for the ellipsis and measure in cells rather than chars,
+    // so a wide glyph in a title does not push the rest of the line along.
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(1);
+        if used + w + 1 > max {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The player line right-aligns the volume block by padding after the
+    /// title. If the padding is computed in chars while the title contains
+    /// wide glyphs, the block slides left of its mouse area.
+    #[test]
+    fn wide_titles_fit_their_column() {
+        const PREFIX: usize = 10;
+        const RIGHT_W: usize = 18; // icon + space + 10 bar cells + space + "100% "
+        let w = 100;
+        let title_w = w - RIGHT_W - PREFIX;
+        for title in [
+            "plain ascii title",
+            "Căpitănescu - Choke Me",
+            "漢字のタイトルです",
+            "👨‍👩‍👧 family",
+            "🇷🇴 Romania",
+        ] {
+            let t = truncate(title, title_w);
+            assert!(
+                t.width() <= title_w,
+                "{title:?} became {t:?}, {} cells for {title_w}",
+                t.width()
+            );
+        }
+    }
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

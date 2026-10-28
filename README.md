@@ -10,7 +10,7 @@ after resolving, so nothing else is running while you listen.
 ```
 ┌─ 1 Liked Music·412 ─ 2 Playlists ─ 3 Subscriptions ─ 4 History ─ 5 Queue·2 ─ 6 Search·30 ─ ◉ you ┐
 ├─ player ─────────────────────────────────────────────────────────────────────────────────────────┤
-│ ⏮  ⏸  ⏭  Bullet For My Valentine - Tears Don't Fall                         ⤨ 🔊 ━━━━━━━━━● 100% │
+│ ⏮  ⏸  ⏭  Bullet For My Valentine - Tears Don't Fall                         ⤨ ♪ ━━━━━━━━━● 100% │
 │ ━━━━━━━━━━━━━━━●────────────────────────────────────────────────────── 1:23 / 6:45  Bullet…      │
 ├─ Liked Music ────────────────────────────────────────────────────────────────────────────────────┤
 │ ▶ Song A                                                              Artist · 3:45              │
@@ -127,8 +127,8 @@ the help and `q` quits.
 
 The mouse works as well: click a tab, click a row to select it, double-click
 to play, click the progress bar to seek, and click the buttons in the player.
-The wheel moves five rows at a time. The speaker icon mutes, and the slider
-next to it can be clicked or dragged.
+The wheel moves five rows at a time. The `♪` next to the slider mutes (it turns
+into `×`), and the slider itself can be clicked or dragged.
 
 The row that is playing is marked with a green ▶ in every list that contains
 it, so it is easy to find your place after browsing elsewhere.

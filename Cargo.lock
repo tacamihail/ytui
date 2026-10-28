@@ -1927,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "ytui"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "cpal",
  "crossterm",
@@ -1936,6 +1936,7 @@ dependencies = [
  "serde",
  "serde_json",
  "symphonia",
+ "unicode-width 0.2.0",
  "ureq",
 ]
 
