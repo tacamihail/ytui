@@ -127,7 +127,8 @@ the help and `q` quits.
 
 The mouse works as well: click a tab, click a row to select it, double-click
 to play, click the progress bar to seek, and click the buttons in the player.
-The speaker icon mutes, and the slider next to it can be clicked or dragged.
+The wheel moves five rows at a time. The speaker icon mutes, and the slider
+next to it can be clicked or dragged.
 
 The row that is playing is marked with a green ▶ in every list that contains
 it, so it is easy to find your place after browsing elsewhere.

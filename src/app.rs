@@ -35,6 +35,10 @@ pub const TAB_HISTORY: usize = 3;
 pub const TAB_QUEUE: usize = 4;
 pub const TAB_SEARCH: usize = 5;
 
+/// Rows one wheel notch moves. One row per notch means dozens of flicks to get
+/// anywhere in a few hundred tracks.
+const WHEEL_ROWS: i32 = 5;
+
 /// Clickable transport control in the player bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayerBtn {
@@ -467,8 +471,8 @@ impl App {
                     }
                 }
             }
-            MouseEventKind::ScrollUp => self.move_sel(-1),
-            MouseEventKind::ScrollDown => self.move_sel(1),
+            MouseEventKind::ScrollUp => self.move_sel(-WHEEL_ROWS),
+            MouseEventKind::ScrollDown => self.move_sel(WHEEL_ROWS),
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.dragging_volume {
                     self.set_volume_at(m.column);
