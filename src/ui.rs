@@ -208,29 +208,26 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let btn_style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
 
-    // Volume slider on the right: mute icon, 10 cells, then "100%".
-    //
-    // Both glyphs are one cell wide in every font. The speaker emoji is not:
-    // fonts that give it one cell instead of two shift the slider one cell to
-    // the left, and then clicks land to the right of what the eye sees.
+    // Volume slider on the right: 10 cells, the percentage, then the mute
+    // icon. The icon comes last on purpose: a font is free to draw the speaker
+    // emoji one cell wide or two, and anything drawn after it would land a
+    // cell off, taking the click areas with it.
     const VOL_W: usize = 10;
-    const ICON_W: usize = 1;
-    let speaker = if muted { "×" } else { "♪" };
+    const ICON_W: usize = 2;
+    let speaker = if muted { "🔇" } else { "🔊" };
     let flags_w = flags.width();
-    let right_w = flags_w + ICON_W + 1 + VOL_W + 1 + pct.width();
+    let right_w = flags_w + VOL_W + 1 + pct.width() + 1 + ICON_W + 1;
     let right_start = inner.x + (w.saturating_sub(right_w)) as u16;
-    let icon_x = right_start + flags_w as u16;
-    app.mute_area = Rect {
-        x: icon_x,
-        y: inner.y,
-        // Include the space after the icon so the target is easy to hit.
-        width: ICON_W as u16 + 1,
-        height: 1,
-    };
     app.vol_area = Rect {
-        x: icon_x + ICON_W as u16 + 1,
+        x: right_start + flags_w as u16,
         y: inner.y,
         width: VOL_W as u16,
+        height: 1,
+    };
+    app.mute_area = Rect {
+        x: right_start + (right_w - ICON_W - 1) as u16,
+        y: inner.y,
+        width: ICON_W as u16,
         height: 1,
     };
     let filled = ((vol.clamp(0, 100) as f64 / 100.0) * (VOL_W - 1) as f64).round() as usize;
@@ -253,13 +250,14 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(t, Style::new().fg(FG).add_modifier(Modifier::BOLD)),
         Span::raw(pad),
         Span::styled(flags, Style::new().fg(DIM)),
-        Span::styled(speaker, Style::new()),
-        Span::raw(" "),
         Span::styled(bar_filled, Style::new().fg(bar_fg)),
         Span::styled("●", Style::new().fg(head_fg)),
         Span::styled(bar_rest, Style::new().fg(DIM)),
         Span::raw(" "),
         Span::styled(pct, Style::new().fg(DIM)),
+        Span::raw(" "),
+        Span::styled(speaker, Style::new()),
+        Span::raw(" "),
     ]);
 
     let time_str = format!("{} / {}", fmt_f64(pos), fmt_f64(dur));
@@ -576,7 +574,7 @@ mod tests {
     #[test]
     fn wide_titles_fit_their_column() {
         const PREFIX: usize = 10;
-        const RIGHT_W: usize = 18; // icon + space + 10 bar cells + space + "100% "
+        const RIGHT_W: usize = 20; // 10 bar cells + " " + "100% " + " " + icon + " "
         let w = 100;
         let title_w = w - RIGHT_W - PREFIX;
         for title in [

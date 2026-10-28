@@ -1927,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "ytui"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "cpal",
  "crossterm",
