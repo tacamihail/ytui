@@ -2,13 +2,13 @@
 
 use crate::app::{App, PlayerBtn, TABS, TAB_LIKED, TAB_PLAYLISTS, TAB_QUEUE, TAB_SEARCH, TAB_SUBS};
 use crate::audio::{Repeat, Status};
-use crate::entry::{fmt_duration, fmt_f64};
+use crate::entry::{fmt_duration, fmt_f64, Entry};
 use crate::ytdl;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::prelude::{Color, Line, Modifier, Span, Style};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const ACCENT: Color = Color::Rgb(137, 220, 235);
@@ -47,6 +47,8 @@ fn transport_width(icon: &str) -> usize {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    // Re-armed below by the list when the selected row is too wide to fit.
+    app.marquee = false;
     let area = f.area();
     let rows = Layout::vertical([
         Constraint::Length(1), // tabs + account
@@ -377,6 +379,16 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    // A long title only scrolls on the selected row, and the scroll restarts
+    // when the selection moves, so a title being read starts at its beginning
+    // instead of somewhere mid-word.
+    let key = (app.tab, app.sel[app.tab], app.in_playlist);
+    if app.marquee_key != key {
+        app.marquee_key = key;
+        app.marquee_since = Instant::now();
+    }
+    let phase = app.marquee_since.elapsed();
+
     let list = app.current_vec();
     if list.is_empty() {
         // A tab that is still fetching shows the same wheel as the status
@@ -420,9 +432,16 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or("");
     let len = list.len();
     let (start, end) = window(app.list_offset, selidx, inner.height as usize, len);
+    let cols = columns(inner.width as usize, !is_playlist_list);
+    let scrolls = list
+        .get(selidx.min(len.saturating_sub(1)))
+        .map(|e| e.title.width() > cols.title)
+        .unwrap_or(false);
+
     let items: Vec<ListItem> = list[start..end]
         .iter()
-        .map(|e| {
+        .enumerate()
+        .map(|(i, e)| {
             let now = !is_playlist_list
                 && !playing.is_empty()
                 && if e.url_override.is_empty() {
@@ -430,30 +449,129 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     e.url_override == playing
                 };
-            let (marker, mstyle) = if now {
-                ("▶ ", Style::new().fg(GREEN))
-            } else {
-                ("  ", Style::new().fg(DIM))
-            };
-            let right = if is_playlist_list {
-                format!("  {} playlists", e.channel)
-            } else {
-                format!("  {} · {}", e.channel, e.duration_str())
-            };
-            let title_style = if now {
-                Style::new().fg(GREEN).add_modifier(Modifier::BOLD)
-            } else {
-                Style::new().fg(FG)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(marker, mstyle),
-                Span::styled(e.title.clone(), title_style),
-                Span::styled(right, Style::new().fg(DIM)),
-            ]))
+            ListItem::new(row_line(
+                e,
+                now,
+                i == selidx - start,
+                is_playlist_list,
+                &cols,
+                phase,
+            ))
         })
         .collect();
     app.list_offset = start;
+    app.marquee |= scrolls;
     render_items(f, app, items, selidx - start, inner);
+}
+
+/// Fixed columns for the list: title, artist, duration.
+///
+/// The title takes whatever is left, the artist is capped so a long channel
+/// name cannot squeeze the title out, and the duration is right-aligned in a
+/// fixed width. `with_duration` is off for the playlists tab, which shows a
+/// track count instead of a running time.
+#[derive(Debug)]
+struct Cols {
+    title: usize,
+    artist: usize,
+    dur: usize,
+}
+
+fn columns(width: usize, with_duration: bool) -> Cols {
+    const MARKER: usize = 2;
+    // A narrow terminal gives up the duration column before it squeezes the
+    // title into nothing, so the row keeps working down to silly widths.
+    let room = width.saturating_sub(MARKER + 2);
+    // Wide enough for "1:02:05"; anything longer is truncated rather than
+    // allowed to push the row past the edge of the list.
+    let dur = if with_duration {
+        7.min(room.saturating_sub(12))
+    } else {
+        0
+    };
+    let gaps = if dur > 0 { 2 } else { 1 };
+    let usable = width.saturating_sub(MARKER + gaps);
+    let artist = (usable / 4).clamp(8, 26).min(usable.saturating_sub(dur + 8));
+    let title = usable.saturating_sub(artist + dur);
+    Cols { title, artist, dur }
+}
+
+/// One list row laid out in the fixed columns: play marker, title, artist and,
+/// unless this is the playlists tab, the running time.
+fn row_line(
+    e: &Entry,
+    now: bool,
+    selected: bool,
+    is_playlist_list: bool,
+    cols: &Cols,
+    phase: Duration,
+) -> Line<'static> {
+    let (marker, mstyle) = if now {
+        ("▶ ", Style::new().fg(GREEN))
+    } else {
+        ("  ", Style::new().fg(DIM))
+    };
+    let title_style = if now {
+        Style::new().fg(GREEN).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(FG)
+    };
+    let title = if selected {
+        scroll_window(&e.title, cols.title, phase)
+    } else {
+        fit(&e.title, cols.title)
+    };
+    let artist = if is_playlist_list {
+        format!("{} playlists", e.channel)
+    } else {
+        e.channel.clone()
+    };
+    let mut spans = vec![
+        Span::styled(marker, mstyle),
+        Span::styled(title, title_style),
+        Span::styled(" ", Style::new().fg(DIM)),
+        Span::styled(fit(&artist, cols.artist), Style::new().fg(DIM)),
+    ];
+    if cols.dur > 0 {
+        let time = e.duration_str();
+        let time = if time.width() > cols.dur {
+            truncate(&time, cols.dur)
+        } else {
+            format!("{time:>w$}", w = cols.dur)
+        };
+        spans.push(Span::styled(" ", Style::new().fg(DIM)));
+        spans.push(Span::styled(time, Style::new().fg(DIM)));
+    }
+    Line::from(spans)
+}
+
+/// `text` clamped to exactly `width` cells, padded so the next column starts
+/// at the same offset on every row.
+fn fit(text: &str, width: usize) -> String {
+    let mut out = truncate(text, width);
+    let used = out.width();
+    if used < width {
+        out.extend(std::iter::repeat(' ').take(width - used));
+    }
+    out
+}
+
+/// One cell of a scrolling title. Text that fits is just padded; a title wider
+/// than its column pauses on the start, then moves one character every 120 ms
+/// and wraps through a " · " gap, so it stays readable without widening the
+/// column. Only the selected row calls this.
+fn scroll_window(text: &str, width: usize, phase: Duration) -> String {
+    if text.width() <= width {
+        return fit(text, width);
+    }
+    const HOLD: Duration = Duration::from_millis(1500);
+    const STEP: Duration = Duration::from_millis(120);
+    let mut cycle: Vec<char> = text.chars().collect();
+    cycle.extend(" · ".chars());
+    let steps = (phase.saturating_sub(HOLD).as_millis() / STEP.as_millis()) as usize;
+    let start = steps % cycle.len();
+    let rotated: String = cycle[start..].iter().chain(cycle[..start].iter()).collect();
+    fit(&rotated, width)
 }
 
 /// First visible row for a viewport of `height` rows, keeping `sel` on screen.
@@ -693,6 +811,94 @@ mod tests {
         for icon in [ICON_PAUSE, ICON_PLAY, loading.as_str()] {
             assert_eq!(transport_width(icon), 12, "{icon:?} moves the title");
         }
+    }
+
+    /// Every row must fill the width exactly, or the columns stop lining up
+    /// between rows and the list looks ragged.
+    #[test]
+    fn list_columns_fill_the_row() {
+        for width in [8, 12, 20, 33, 40, 60, 80, 120, 200] {
+            for with_duration in [false, true] {
+                let c = columns(width, with_duration);
+                let gaps = if c.dur > 0 { 2 } else { 1 };
+                assert_eq!(
+                    2 + c.title + gaps + c.artist + c.dur,
+                    width,
+                    "width {width}, with_duration {with_duration}: {c:?}"
+                );
+            }
+        }
+    }
+
+    /// The selected row scrolls its title inside the cell: it rests on the
+    /// start for a moment, then moves, and never spills into the next column.
+    #[test]
+    fn selected_titles_scroll_inside_their_cell() {
+        let long = "a title that is definitely wider than the column";
+        let width = 20;
+        assert_eq!(fit(long, width).width(), width);
+        for ms in [0, 1000, 1500, 1620, 3000, 60_000] {
+            let cell = scroll_window(long, width, Duration::from_millis(ms));
+            assert_eq!(cell.width(), width, "at {ms} ms: {cell:?}");
+        }
+        let rest = scroll_window(long, width, Duration::from_millis(1000));
+        assert_eq!(rest, fit(long, width));
+        let moved = scroll_window(long, width, Duration::from_millis(1500 + 120 * 5));
+        assert_ne!(moved, rest);
+    }
+
+    /// Rows of different lengths still put the artist and the time at the same
+    /// offsets, which is the point of splitting them into columns.
+    #[test]
+    fn rows_line_up_in_columns() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let width = 60u16;
+        let cols = columns(width as usize, true);
+        let entries = [
+            Entry {
+                id: "a".into(),
+                title: "Short".into(),
+                channel: "Artist".into(),
+                duration: 185,
+                url_override: String::new(),
+            },
+            Entry {
+                id: "b".into(),
+                title: "A much longer title that has to be cut".into(),
+                channel: "Another artist with a long name".into(),
+                duration: 3725,
+                url_override: String::new(),
+            },
+        ];
+        let mut term = Terminal::new(TestBackend::new(width, 2)).unwrap();
+        term.draw(|f| {
+            let items: Vec<ListItem> = entries
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    ListItem::new(row_line(e, false, i == 0, false, &cols, Duration::ZERO))
+                })
+                .collect();
+            f.render_widget(List::new(items), f.area());
+        })
+        .unwrap();
+
+        let buf = term.backend().buffer();
+        let row = |y: u16| -> String {
+            (0..width).map(|x| buf[(x, y)].symbol()).collect()
+        };
+        let (first, second) = (row(0), row(1));
+        assert_eq!(first.width(), width as usize);
+        assert!(first.ends_with(" 3:05"), "{first:?}");
+        assert!(second.ends_with("1:02:05"), "{second:?}");
+        // `str::find` counts bytes and the ellipsis is three of them, so
+        // measure the cells in front of the artist instead.
+        let cell_of = |s: &str, needle: &str| s[..s.find(needle).unwrap()].width();
+        let artist_at = 2 + cols.title + 1;
+        assert_eq!(cell_of(&first, "Artist"), artist_at, "{first:?}");
+        assert_eq!(cell_of(&second, "Another"), artist_at, "{second:?}");
     }
 
     /// A windowed list only builds the rows on screen, but the selection must

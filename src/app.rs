@@ -80,6 +80,12 @@ pub struct App {
     /// Animation clock for spinners; started once so every draw agrees on the
     /// frame and the wheel does not jump when a message arrives.
     pub anim: Instant,
+    /// Set by the list while the selected row is scrolling, so the loop keeps
+    /// redrawing fast enough for the marquee even when nothing is loading.
+    pub marquee: bool,
+    /// Which row is scrolling (tab, index, playlist detail) and since when.
+    pub marquee_key: (usize, usize, bool),
+    pub marquee_since: Instant,
     pub cmd_tx: Sender<Cmd>,
     pub fetch_tx: Sender<Msg>,
     pub account: Option<String>,
@@ -132,6 +138,9 @@ impl App {
             should_quit: false,
             player: Arc::clone(&player.state),
             anim: Instant::now(),
+            marquee: false,
+            marquee_key: (usize::MAX, usize::MAX, false),
+            marquee_since: Instant::now(),
             cmd_tx: player.tx_clone(),
             fetch_tx,
             account,
@@ -165,16 +174,16 @@ impl App {
             app.sync_queue_cache();
             app.pick_up_notice();
             terminal.draw(|f| ui::draw(f, app))?;
-            // While a list is streaming in or a track is being resolved,
-            // redraw often enough that the spinner turns; when idle there is
-            // nothing to animate.
+            // While a list is streaming in, a track is being resolved or the
+            // selected row is scrolling its title, redraw often enough that
+            // the animation turns; when idle there is nothing to animate.
             let resolving = app
                 .player
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .status
                 == Status::Loading;
-            let wait = if app.loading.is_some() || resolving {
+            let wait = if app.loading.is_some() || resolving || app.marquee {
                 Duration::from_millis(33)
             } else {
                 Duration::from_millis(120)
