@@ -47,6 +47,13 @@ pm_install() {
   esac
 }
 
+# --- curl --------------------------------------------------------------------
+# Everything below is downloaded with curl: yt-dlp, Deno and rustup.
+if ! command -v curl >/dev/null 2>&1; then
+  info "installing curl"
+  pm_install curl || die "curl is required to download yt-dlp and Deno"
+fi
+
 # --- yt-dlp ------------------------------------------------------------------
 # Needs a recent build: YouTube breaks old extractors within weeks.
 need_ytdlp() {
@@ -88,16 +95,34 @@ else
   info "installing Deno (yt-dlp needs it to resolve YouTube streams)"
   mkdir -p "$HOME/.deno/bin"
   tmp="$(mktemp -d)"
-  if curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
-       -o "$tmp/deno.zip"; then
+
+  # Deno ships one archive per architecture, named by its Rust target triple.
+  # Only x86_64 and aarch64 have Linux builds; armv7 is not published any more.
+  case "$(uname -m)" in
+    x86_64|amd64)  deno_url=https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip ;;
+    aarch64|arm64) deno_url=https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip ;;
+    *)             deno_url= ;;
+  esac
+
+  if [[ -z "$deno_url" ]]; then
+    warn "no Deno build for $(uname -m). Install it from https://deno.com or YouTube playback will fail"
+  elif curl -fsSL "$deno_url" -o "$tmp/deno.zip"; then
     if command -v unzip >/dev/null 2>&1; then
-      unzip -oq "$tmp/deno.zip" -d "$HOME/.deno/bin"
+      unzip -oq "$tmp/deno.zip" -d "$HOME/.deno/bin" \
+        || warn "could not unpack the Deno archive"
+    elif command -v python3 >/dev/null 2>&1; then
+      python3 -m zipfile -e "$tmp/deno.zip" "$HOME/.deno/bin" \
+        || warn "could not unpack the Deno archive"
     else
-      python3 -m zipfile -e "$tmp/deno.zip" "$HOME/.deno/bin"
+      warn "need unzip or python3 to unpack Deno"
     fi
-    chmod +x "$HOME/.deno/bin/deno"
-    export PATH="$HOME/.deno/bin:$PATH"
-    ok "deno $(deno --version 2>/dev/null | head -1)"
+    if [[ -f "$HOME/.deno/bin/deno" ]]; then
+      chmod +x "$HOME/.deno/bin/deno"
+      export PATH="$HOME/.deno/bin:$PATH"
+      ok "deno $(deno --version 2>/dev/null | head -1)"
+    else
+      warn "could not install Deno. Get it from https://deno.com or YouTube playback will fail"
+    fi
   else
     warn "could not download Deno. Install it from https://deno.com or YouTube playback will fail"
   fi
