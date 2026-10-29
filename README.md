@@ -33,7 +33,9 @@ that rate, ytui falls back to 48 kHz and resamples.
 Working out a stream URL takes `yt-dlp` about four seconds, which used to be
 dead air between songs. The next track is resolved while the current one plays
 and only its URL is kept (a few hundred bytes, no audio), so the handover
-costs about 0.2 s.
+costs about 0.2 s. A resolve that hangs is killed after 30 seconds, and a
+failed one is retried once: otherwise a transient error would leave the next
+track to be resolved at the handover, which is heard as a three-second pause.
 
 The audio is pulled in 256 KiB HTTP ranges by a background thread that keeps
 about a minute of encoded sound ready ahead of the decoder. The decoded ring is

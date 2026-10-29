@@ -5,11 +5,11 @@
 //! the full JSON, picks the best AAC format that actually answers and hands the
 //! URL to the decoder.
 
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::io::{self, BufRead, BufReader, Read};
+use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::entry::Entry;
@@ -89,6 +89,67 @@ pub(crate) fn command() -> Command {
     };
     c.env("PATH", tool_path());
     c
+}
+
+/// How long a `yt-dlp -j` resolve may take before it is killed.
+///
+/// A normal answer takes a few seconds (the JS challenge is what costs most of
+/// it). Anything longer is a stuck challenge or network call: waiting forever
+/// would also freeze the background prefetch queue and leave a later handover
+/// to resolve the track on the audio thread.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Runs `cmd` and collects its output, killing it at `timeout`.
+///
+/// Both pipes are drained on their own threads so a large JSON answer cannot
+/// fill a pipe and make the process look hung.
+fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let out = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let err = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(40)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out.join();
+                let _ = err.join();
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "yt-dlp timed out"));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out.join();
+                let _ = err.join();
+                return Err(e);
+            }
+        }
+    };
+
+    Ok(Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
 }
 
 pub fn label(kind: Kind) -> &'static str {
@@ -239,10 +300,13 @@ pub fn stream_url(url: &str, cfg: &Config) -> Result<Stream, String> {
     if let Some((flag, value)) = cfg.cookie_args() {
         c.arg(flag).arg(value);
     }
-    let out = c
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|_| "yt-dlp not found, install it and run: ytui doctor".to_string())?;
+    let out = output_with_timeout(&mut c, RESOLVE_TIMEOUT).map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound => {
+            "yt-dlp not found, install it and run: ytui doctor".to_string()
+        }
+        io::ErrorKind::TimedOut => "yt-dlp timed out while resolving the stream".to_string(),
+        _ => format!("yt-dlp: {e}"),
+    })?;
     if !out.status.success() {
         return Err(friendly(&String::from_utf8_lossy(&out.stderr)));
     }
@@ -440,6 +504,32 @@ fn first_lines(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stuck resolve must not pin the prefetch queue forever.
+    #[test]
+    fn a_hung_resolver_is_killed() {
+        if !cfg!(unix) {
+            return;
+        }
+        let mut c = Command::new("sleep");
+        c.arg("5");
+        let start = Instant::now();
+        let err = output_with_timeout(&mut c, Duration::from_millis(200)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn output_is_collected_while_the_process_runs() {
+        if !cfg!(unix) {
+            return;
+        }
+        let mut c = Command::new("sh");
+        c.args(["-c", "printf hello"]);
+        let out = output_with_timeout(&mut c, Duration::from_secs(5)).unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"hello");
+    }
 
     /// Watch Later and Liked Music answer this when the cookies do not sign
     /// in; the raw yt-dlp line does not tell the user what to do.

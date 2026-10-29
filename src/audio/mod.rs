@@ -179,6 +179,8 @@ const URL_EXPIRY_MARGIN_SECS: u64 = 5 * 60;
 /// the way the old single-track prefetch did; the extra ones are not urgent
 /// and should not compete with the decoder in one burst.
 const PREFETCH_GAP: Duration = Duration::from_millis(1200);
+/// Gap before retrying a failed background resolve.
+const PREFETCH_RETRY_GAP: Duration = Duration::from_millis(1500);
 
 #[derive(Default)]
 struct Job {
@@ -186,6 +188,9 @@ struct Job {
     queue: VecDeque<String>,
     /// URL being resolved right now.
     running: Option<String>,
+    /// Bumped whenever `request` replaces the queue, so a job can tell whether
+    /// the position it was started for is still the one being listened to.
+    generation: u64,
     /// Oldest first. A hit moves its entry to the back.
     cache: VecDeque<(String, ytdl::Stream)>,
 }
@@ -211,7 +216,7 @@ impl Prefetch {
 
     fn run(&self) {
         loop {
-            let url = {
+            let (url, generation) = {
                 let mut g = self.lock();
                 loop {
                     if let Some(u) = g.queue.pop_front() {
@@ -221,12 +226,25 @@ impl Prefetch {
                             continue;
                         }
                         g.running = Some(u.clone());
-                        break u;
+                        break (u, g.generation);
                     }
                     g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
                 }
             };
-            let res = ytdl::stream_url(&url, &self.cfg);
+
+            let mut res = ytdl::stream_url(&url, &self.cfg);
+            if let Err(e) = &res {
+                // A transient 403 or a killed yt-dlp should not leave the next
+                // handover to resolve the track on the audio thread, which is
+                // exactly where a pause between songs comes from. A timeout is
+                // not retried, and a jump that replaced the queue means this
+                // offset is no longer the one being listened to.
+                if !e.contains("timed out") && self.lock().generation == generation {
+                    thread::sleep(PREFETCH_RETRY_GAP);
+                    res = ytdl::stream_url(&url, &self.cfg);
+                }
+            }
+
             let mut g = self.lock();
             g.running = None;
             if let Ok(s) = res {
@@ -248,6 +266,7 @@ impl Prefetch {
     /// the new one.
     fn request(&self, urls: Vec<String>) {
         let mut g = self.lock();
+        g.generation = g.generation.wrapping_add(1);
         let mut queue = VecDeque::new();
         for url in urls {
             let known = g.cache.iter().any(|(u, _)| u == &url)
