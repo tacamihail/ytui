@@ -348,9 +348,11 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         if app.queue_rows.is_empty() {
             empty_hint(
                 f,
-                app,
                 inner,
-                "queue is empty. Press enter on a list to play it, a to append",
+                Line::from(Span::styled(
+                    "queue is empty. Press enter on a list to play it, a to append",
+                    Style::new().fg(DIM),
+                )),
             );
             return;
         }
@@ -377,10 +379,15 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 
     let list = app.current_vec();
     if list.is_empty() {
+        // A tab that is still fetching shows the same wheel as the status
+        // line, so the empty area animates instead of sitting on static text.
         let hint = if app.loading.is_some() {
-            "loading…"
+            Line::from(vec![
+                Span::styled(spinner(app.anim.elapsed()).to_string(), Style::new().fg(ACCENT)),
+                Span::styled(" loading…", Style::new().fg(DIM)),
+            ])
         } else {
-            match app.tab {
+            let text = match app.tab {
                 TAB_SEARCH => "press / and search YouTube Music (or paste a URL)",
                 TAB_LIKED => "no liked music yet, press r (needs ytui auth)",
                 TAB_PLAYLISTS => {
@@ -392,9 +399,10 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 }
                 TAB_SUBS => "no subscriptions loaded, press r (needs ytui auth)",
                 _ => "nothing played yet",
-            }
+            };
+            Line::from(Span::styled(text, Style::new().fg(DIM)))
         };
-        empty_hint(f, app, inner, hint);
+        empty_hint(f, inner, hint);
         return;
     }
 
@@ -485,11 +493,8 @@ fn render_items(f: &mut Frame, app: &mut App, items: Vec<ListItem>, selidx: usiz
     app.list_state = st;
 }
 
-fn empty_hint(f: &mut Frame, _app: &mut App, inner: Rect, hint: &str) {
-    f.render_widget(
-        Paragraph::new(Span::styled(hint, Style::new().fg(DIM))).alignment(Alignment::Center),
-        inner,
-    );
+fn empty_hint(f: &mut Frame, inner: Rect, line: Line) {
+    f.render_widget(Paragraph::new(line).alignment(Alignment::Center), inner);
 }
 
 fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
