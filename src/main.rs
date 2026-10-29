@@ -10,6 +10,7 @@ mod config;
 mod entry;
 mod listcache;
 mod ui;
+mod update;
 mod ytapi;
 mod ytdl;
 
@@ -39,6 +40,7 @@ fn main() {
             "auth" => std::process::exit(auth::cli(&args[1..])),
             "logout" => std::process::exit(auth::logout()),
             "doctor" => std::process::exit(doctor()),
+            "update" => std::process::exit(update::cli(&args[1..])),
             other => {
                 eprintln!("unknown command: {other}\n");
                 help();
@@ -193,6 +195,8 @@ usage:
   ytui auth --status      show connection status
   ytui logout             forget cookies and account
   ytui doctor             check yt-dlp, audio device and config
+  ytui update             pull the latest source and rebuild
+  ytui update --check     only report whether newer commits exist
   ytui --version          print version
 
 inside the player: ? for the full key map

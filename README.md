@@ -1,5 +1,13 @@
 # ytui
 
+> [!WARNING]
+> **This project is 100% AI-generated.** Every line of code, the documentation
+> and the commit messages were written by an AI model, not by a human. It has
+> not been audited or security-reviewed. ytui handles YouTube cookies that carry
+> your account session, so read the code before trusting it with your
+> credentials and use it at your own risk. There is no warranty; see
+> [LICENSE](LICENSE).
+
 A terminal player for YouTube Music. Audio only: no browser and no video
 window.
 
@@ -18,6 +26,8 @@ after resolving, so nothing else is running while you listen.
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
  1-6 tabs · / search · enter play list · a queue · space pause · ←→/h l seek · , . 30s · [ ] vol …
 ```
+
+![ytui playing the Liked Music tab](docs/screenshot.png)
 
 ## Audio
 
@@ -62,6 +72,12 @@ The script puts a recent `yt-dlp` and `deno` in `~/.local/bin` and `~/.deno/bin`
 if they're missing, builds the release binary and installs `~/.local/bin/ytui`.
 That last file is a small launcher around `ytui.bin`; on WSL it points
 `ALSA_PLUGIN_DIR` at the PulseAudio plugin when that lives in `~/.local/alsa`.
+
+To update later, run `ytui update`: it fetches the checkout, fast-forwards it
+and rebuilds `ytui.bin`. It refuses to touch a checkout with uncommitted
+changes or local commits, and `ytui update --check` only says whether newer
+commits exist. The checkout is the one `install.sh` ran from; set `YTUI_SRC` to
+point elsewhere.
 
 To build it yourself:
 

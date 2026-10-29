@@ -70,7 +70,7 @@ impl Config {
     }
 }
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
 }
 
@@ -92,6 +92,11 @@ pub fn cookies_path() -> PathBuf {
 
 pub fn account_path() -> PathBuf {
     config_dir().join("account.json")
+}
+
+/// Checkout that `install.sh` built from; `ytui update` pulls and rebuilds it.
+pub fn source_path() -> PathBuf {
+    config_dir().join("source")
 }
 
 pub fn history_path() -> PathBuf {

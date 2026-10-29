@@ -230,6 +230,8 @@ ok "installed -> $BIN_DST (+ $BIN_REAL)"
 
 # --- config ------------------------------------------------------------------
 mkdir -p "$CFG_DIR"
+# Remember the checkout so `ytui update` can pull and rebuild it later.
+printf '%s\n' "$DIR" > "$CFG_DIR/source"
 if [[ ! -f "$CFG_DIR/config.json" ]]; then
   cp "$DIR/config.example.json" "$CFG_DIR/config.json"
   ok "seeded config -> $CFG_DIR/config.json"
