@@ -83,6 +83,10 @@ pub struct App {
     /// Set by the list while the selected row is scrolling, so the loop keeps
     /// redrawing fast enough for the marquee even when nothing is loading.
     pub marquee: bool,
+    /// Whether the terminal reports itself as focused. Terminals without
+    /// focus reporting never send FocusLost, so this stays true and the
+    /// marquee behaves as it did before.
+    pub focused: bool,
     /// Which row is scrolling (tab, index, playlist detail) and since when.
     pub marquee_key: (usize, usize, bool),
     pub marquee_since: Instant,
@@ -139,6 +143,7 @@ impl App {
             player: Arc::clone(&player.state),
             anim: Instant::now(),
             marquee: false,
+            focused: true,
             marquee_key: (usize::MAX, usize::MAX, false),
             marquee_since: Instant::now(),
             cmd_tx: player.tx_clone(),
@@ -196,6 +201,8 @@ impl App {
                         }
                     }
                     Event::Mouse(m) => app.on_mouse(m),
+                    Event::FocusGained => app.focused = true,
+                    Event::FocusLost => app.focused = false,
                     _ => {}
                 }
             }

@@ -253,6 +253,11 @@ No sound on WSL: `libasound2-plugins` is missing. Rerun `./install.sh` or run
 Windows) and that `PULSE_SERVER` points at `/mnt/wslg/PulseServer`.
 On a desktop, check that PipeWire or PulseAudio is running.
 
+A long title on the selected row scrolls to show the rest. It stops while the
+terminal is in the background, which needs focus reporting: terminals that do
+not implement it never report a lost focus, so the title simply keeps
+scrolling. Under tmux or screen, enable it with `set -g focus-events on`.
+
 "no AAC stream for this track (opus only)": the upload has no M4A audio and
 `symphonia` can't decode Opus.
 

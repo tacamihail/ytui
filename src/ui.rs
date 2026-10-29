@@ -37,6 +37,13 @@ const ICON_PREV: &str = "◀◀";
 const ICON_NEXT: &str = "▶▶";
 const ICON_PAUSE: &str = "‖";
 const ICON_PLAY: &str = "▶";
+/// Marker on the row that is playing: a plain-text music note, not U+1F3B5.
+/// The emoji is two cells wide and terminals hand it to a colour font, which
+/// draws a blob at the baseline. U+266A is text presentation, one cell in the
+/// fonts ytui targets, and its East Asian width is "ambiguous" exactly like
+/// the ▶ it replaces, so terminals that widen ambiguous glyphs treat both the
+/// same and the columns after the marker do not shift.
+const ICON_NOW: &str = "♪ ";
 /// Blank cells between two transport buttons.
 const GAP: usize = 2;
 
@@ -364,7 +371,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             .iter()
             .map(|(title, current)| {
                 let (marker, mstyle) = if *current {
-                    ("▶ ", Style::new().fg(GREEN))
+                    (ICON_NOW, Style::new().fg(GREEN))
                 } else {
                     ("  ", Style::new().fg(DIM))
                 };
@@ -381,9 +388,13 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 
     // A long title only scrolls on the selected row, and the scroll restarts
     // when the selection moves, so a title being read starts at its beginning
-    // instead of somewhere mid-word.
+    // instead of somewhere mid-word. An unfocused window does not scroll at
+    // all: nothing is watching, and freezing the clock here means the title
+    // starts over when the terminal gets focus back.
     let key = (app.tab, app.sel[app.tab], app.in_playlist);
-    if app.marquee_key != key {
+    if !app.focused {
+        app.marquee_key = (usize::MAX, usize::MAX, false);
+    } else if app.marquee_key != key {
         app.marquee_key = key;
         app.marquee_since = Instant::now();
     }
@@ -433,10 +444,11 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let len = list.len();
     let (start, end) = window(app.list_offset, selidx, inner.height as usize, len);
     let cols = columns(inner.width as usize, !is_playlist_list);
-    let scrolls = list
-        .get(selidx.min(len.saturating_sub(1)))
-        .map(|e| e.title.width() > cols.title)
-        .unwrap_or(false);
+    let scrolls = app.focused
+        && list
+            .get(selidx.min(len.saturating_sub(1)))
+            .map(|e| e.title.width() > cols.title)
+            .unwrap_or(false);
 
     let items: Vec<ListItem> = list[start..end]
         .iter()
@@ -452,7 +464,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             ListItem::new(row_line(
                 e,
                 now,
-                i == selidx - start,
+                app.focused && i == selidx - start,
                 is_playlist_list,
                 &cols,
                 phase,
@@ -501,13 +513,13 @@ fn columns(width: usize, with_duration: bool) -> Cols {
 fn row_line(
     e: &Entry,
     now: bool,
-    selected: bool,
+    scrolling: bool,
     is_playlist_list: bool,
     cols: &Cols,
     phase: Duration,
 ) -> Line<'static> {
     let (marker, mstyle) = if now {
-        ("▶ ", Style::new().fg(GREEN))
+        (ICON_NOW, Style::new().fg(GREEN))
     } else {
         ("  ", Style::new().fg(DIM))
     };
@@ -516,7 +528,7 @@ fn row_line(
     } else {
         Style::new().fg(FG)
     };
-    let title = if selected {
+    let title = if scrolling {
         scroll_window(&e.title, cols.title, phase)
     } else {
         fit(&e.title, cols.title)
@@ -899,6 +911,19 @@ mod tests {
         let artist_at = 2 + cols.title + 1;
         assert_eq!(cell_of(&first, "Artist"), artist_at, "{first:?}");
         assert_eq!(cell_of(&second, "Another"), artist_at, "{second:?}");
+    }
+
+    /// The playing marker has to stay a text glyph in a single cell. The
+    /// emoji note (U+1F3B5) is two cells and most fonts draw it in colour,
+    /// which pushes the title and the columns after it out of line.
+    #[test]
+    fn playing_marker_is_one_text_cell() {
+        let note = ICON_NOW.trim_end();
+        let cp = note.chars().next().expect("marker has a glyph") as u32;
+        assert_eq!(note.chars().count(), 1, "one glyph, not a sequence");
+        assert_eq!(note.width(), 1, "one cell");
+        assert!(!(0x1F000..=0x1FAFF).contains(&cp), "not an emoji codepoint");
+        assert_eq!(ICON_NOW.width(), 2, "marker plus its gap");
     }
 
     /// A windowed list only builds the rows on screen, but the selection must

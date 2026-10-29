@@ -14,7 +14,9 @@ mod update;
 mod ytapi;
 mod ytdl;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -76,19 +78,20 @@ fn run_tui() -> io::Result<()> {
         let _ = disable_raw_mode();
         let _ = io::stdout().execute(LeaveAlternateScreen);
         let _ = io::stdout().execute(DisableMouseCapture);
+        let _ = io::stdout().execute(DisableFocusChange);
         orig_hook(info);
     }));
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    let _ = execute!(stdout, EnterAlternateScreen, EnableMouseCapture);
+    let _ = execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableFocusChange);
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let res = app::App::run(&mut terminal, &mut app, fetch_rx);
 
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, DisableFocusChange);
     let _ = terminal.show_cursor();
 
     res
