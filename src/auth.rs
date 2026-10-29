@@ -19,12 +19,18 @@ usage:
   ytui logout                   forget cookies and account
 
 getting cookies.txt (works from Windows into WSL):
-  1. install the \"Get cookies.txt LOCALLY\" browser extension
-  2. open https://music.youtube.com while signed in
-  3. export youtube.com cookies to cookies.txt
-  4. ytui auth /mnt/c/Users/<you>/cookies.txt
+  1. install the \"Get cookies.txt LOCALLY\" browser extension and allow it
+     in private windows
+  2. open a private/incognito window and sign in to https://music.youtube.com
+  3. in that same tab open https://www.youtube.com/robots.txt
+  4. export the youtube.com cookies, then close the private window for good
+     YouTube rotates cookies on open tabs, so an export from a normal window
+     goes stale in hours or days; a closed private session keeps working
+  5. ytui auth /mnt/c/Users/<you>/cookies.txt
 
 supported browsers: firefox, chromium, chrome, brave, edge, vivaldi, opera
+  reading cookies from a browser skips the export, but subscriptions still
+  need a cookies.txt file, because ytui parses that page itself
 ";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

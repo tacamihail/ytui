@@ -115,25 +115,55 @@ launcher.
 ## Account
 
 Liked Music, playlists and subscriptions need cookies from a browser that is
-signed in to YouTube. There's no OAuth app and no API key.
+signed in to YouTube. There is no OAuth app and no API key: YouTube disabled
+OAuth for yt-dlp, so cookies are the only way in.
 
 ```bash
 ytui auth ~/cookies.txt      # import a Netscape cookies.txt
-ytui auth --browser firefox  # or read them from a local browser
+ytui auth --browser chrome   # or read them from a local browser
 ytui auth --status           # what is connected right now
 ytui logout                  # forget the cookies and the account
 ```
 
-To export the file, install "Get cookies.txt LOCALLY" in Chrome or Firefox,
-open <https://music.youtube.com> while signed in and export the `youtube.com`
-cookies. The export has to include the HttpOnly cookies: without them the file
-is signed out, and `ytui auth` refuses it rather than overwriting a working
-`~/.config/ytui/cookies.txt`. `ytui auth` then checks the cookies against
-YouTube, saves the channel in `~/.config/ytui/account.json` and copies them to
+### Exporting cookies that keep working
+
+YouTube rotates the account cookies on every open YouTube tab, as a security
+measure. An export taken from a normal browser window goes stale within hours
+or days, and exporting again from that same window keeps it stale. The fix is
+to export from a session that is never opened again:
+
+1. install "Get cookies.txt LOCALLY" and allow it in private windows
+   (`chrome://extensions` → Details → *Allow in Incognito*)
+2. open a **new private/incognito window** and sign in to
+   <https://music.youtube.com>
+3. in that same tab, open <https://www.youtube.com/robots.txt>; keep it the
+   only private tab
+4. export the `youtube.com` cookies to `cookies.txt`
+5. **close the private window** and never reopen it
+
+Nothing rotates that session after step 5, so the file keeps working for weeks
+or months instead of expiring. This is the same advice as the "Exporting
+YouTube cookies" section of the yt-dlp wiki.
+
+The export has to include the HttpOnly cookies: without them the file is
+signed out, and `ytui auth` refuses it rather than overwriting a working
+`~/.config/ytui/cookies.txt`. `ytui auth` checks the cookies against YouTube,
+saves the channel in `~/.config/ytui/account.json` and copies them to
 `~/.config/ytui/cookies.txt` with mode `600`.
 
-Search and playback work without an account. Subscriptions don't: ytui parses
-that page itself, so it needs the cookie file, not `--browser`.
+### Reading cookies from the browser
+
+`ytui auth --browser <name>` skips the export: yt-dlp reads the browser's
+cookie database on every run, so there is nothing in a file to go stale. Two
+limits:
+
+- on Linux, Chrome-family browsers encrypt their cookies with the system
+  keyring. It works only if the keyring is unlocked and yt-dlp can decrypt
+  them, otherwise `ytui auth` reports that it could not verify the account.
+- subscriptions still need a file, because ytui parses that page itself.
+  `--browser` alone leaves tab 3 empty.
+
+Search and playback work without an account.
 
 ## Tabs
 
