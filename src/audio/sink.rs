@@ -273,7 +273,11 @@ impl Sink {
                             *s = (*s * gain).clamp(-1.0, 1.0);
                         }
                     }
-                    cb_played.fetch_add((data.len() / 2) as u64, Ordering::Relaxed);
+                    // Count only the frames the ring actually held. If the
+                    // decoder falls behind, the callback still runs and writes
+                    // silence for the rest; counting that would make the clock
+                    // jump ahead of the music while nothing is heard.
+                    cb_played.fetch_add(((n1 + n2) / 2) as u64, Ordering::Relaxed);
                 },
                 move |e| {
                     *cb_err.lock().unwrap_or_else(|x| x.into_inner()) = Some(e.to_string());

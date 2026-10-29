@@ -35,6 +35,13 @@ dead air between songs. The next track is resolved while the current one plays
 and only its URL is kept (a few hundred bytes, no audio), so the handover
 costs about 0.2 s.
 
+The audio is pulled in 256 KiB HTTP ranges by a background thread that keeps
+about a minute of encoded sound ready ahead of the decoder. The decoded ring is
+only two seconds, so earlier a range request that stalled for a few seconds was
+an audible hole in the middle of a track; now the music plays on while the
+request catches up. The ranges reuse one keep-alive connection instead of
+opening a new TLS session every sixteen seconds.
+
 Opus (`itag` 251) would be a bit better than 128 kbps AAC, but `symphonia` has
 no Opus decoder, so those uploads are skipped with a message.
 
@@ -195,8 +202,9 @@ Peak memory (VmHWM) was at most 1.5 MB above RSS.
 
 The 108 h case is the largest because it keeps the file's fragment index in
 RAM (about 0.6 MB, 39k fragments) so seeking stays a single request. Apart from
-that index, memory is a roughly 1 MB audio ring, one 256 KiB range chunk, the
-packet being decoded and up to 16 resolved URLs (about 25 KiB).
+that index, memory is a roughly 1 MB audio ring, up to six 256 KiB range chunks
+(four queued ahead of the decoder and two in flight, about 1.5 MB), the packet
+being decoded and up to 16 resolved URLs (about 25 KiB).
 
 The next three tracks' URLs are resolved while the current one plays, one at a
 time, so the resolver peak below does not grow. The first extra resolve starts

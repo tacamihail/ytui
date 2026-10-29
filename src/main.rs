@@ -162,11 +162,14 @@ fn doctor() -> i32 {
     }
 
     let rate = u64::from(audio::output_rate());
+    // The decoded ring, then the encoded ranges the reader keeps ready: about
+    // a megabyte queued ahead plus two ranges in flight (see http.rs).
+    let audio_kib = (cfg.buffer_ms as u64 + 1000) * rate / 1000 * 2 * 4 / 1000
+        + 1024
+        + 2 * cfg.cache_kib;
     println!(
         "· buffer {} ms · range cache {} KiB · ~{} KiB audio RAM",
-        cfg.buffer_ms,
-        cfg.cache_kib,
-        (cfg.buffer_ms as u64 + 1000) * rate / 1000 * 2 * 4 / 1000 + cfg.cache_kib
+        cfg.buffer_ms, cfg.cache_kib, audio_kib
     );
 
     if healthy {
