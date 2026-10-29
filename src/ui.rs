@@ -545,7 +545,14 @@ fn row_line(
         Span::styled(fit(&artist, cols.artist), Style::new().fg(DIM)),
     ];
     if cols.dur > 0 {
-        let time = e.duration_str();
+        let mut time = e.duration_str();
+        if time.width() > cols.dur {
+            // "108:31:42" does not fit the column. The seconds matter less
+            // than the hours, so drop them rather than cut the tail off.
+            if let Some((hm, _)) = time.rsplit_once(':') {
+                time = hm.to_string();
+            }
+        }
         let time = if time.width() > cols.dur {
             truncate(&time, cols.dur)
         } else {
@@ -924,6 +931,24 @@ mod tests {
         assert_eq!(note.width(), 1, "one cell");
         assert!(!(0x1F000..=0x1FAFF).contains(&cp), "not an emoji codepoint");
         assert_eq!(ICON_NOW.width(), 2, "marker plus its gap");
+    }
+
+    /// A 108-hour stream must still show its hours: the seconds are what get
+    /// dropped when the time does not fit the column.
+    #[test]
+    fn long_durations_keep_their_hours() {
+        let e = Entry {
+            id: "x".into(),
+            title: "t".into(),
+            channel: "c".into(),
+            duration: 390_702,
+            url_override: String::new(),
+        };
+        let cols = columns(60, true);
+        let line = row_line(&e, false, false, false, &cols, Duration::ZERO);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.ends_with(" 108:31"), "{text:?}");
+        assert_eq!(text.width(), 60);
     }
 
     /// A windowed list only builds the rows on screen, but the selection must
