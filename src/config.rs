@@ -108,14 +108,23 @@ pub fn load() -> Config {
         Ok(txt) => serde_json::from_str::<Config>(&txt).unwrap_or_default(),
         Err(_) => Config::default(),
     };
-    // Pick up `ytui auth` output without needing the user to edit JSON.
-    if cfg.cookies_file.is_empty() && cookies_path().exists() {
-        cfg.cookies_file = cookies_path().display().to_string();
-    }
+    adopt_cookies_file(&mut cfg, cookies_path().exists());
     if !config_path().exists() {
         save(&cfg);
     }
     cfg
+}
+
+/// Picks up `ytui auth <file>` output without needing the user to edit JSON.
+///
+/// A configured browser profile always wins: `ytui auth --browser` clears
+/// `cookies_file` on purpose, and resurrecting a leftover export here would
+/// silently switch back to the stale file, which is exactly the "my cookies
+/// expired again" trap. Only an empty config adopts `cookies.txt`.
+fn adopt_cookies_file(cfg: &mut Config, cookies_exist: bool) {
+    if cfg.cookies_file.is_empty() && cfg.cookies_browser.is_empty() && cookies_exist {
+        cfg.cookies_file = cookies_path().display().to_string();
+    }
 }
 
 pub fn save(cfg: &Config) {
@@ -136,5 +145,36 @@ pub fn save_json<T: Serialize>(path: &Path, value: &T) {
     }
     if let Ok(s) = serde_json::to_string_pretty(value) {
         let _ = fs::write(path, s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_browser_profile_is_not_overridden_by_a_leftover_export() {
+        let mut cfg = Config {
+            cookies_browser: "chrome".into(),
+            ..Config::default()
+        };
+        adopt_cookies_file(&mut cfg, true);
+        assert!(cfg.cookies_file.is_empty());
+        assert_eq!(cfg.cookie_args(), Some(("--cookies-from-browser", "chrome".into())));
+    }
+
+    #[test]
+    fn an_empty_config_adopts_the_saved_export() {
+        let mut cfg = Config::default();
+        adopt_cookies_file(&mut cfg, true);
+        assert_eq!(cfg.cookies_file, cookies_path().display().to_string());
+    }
+
+    #[test]
+    fn nothing_is_adopted_without_a_file() {
+        let mut cfg = Config::default();
+        adopt_cookies_file(&mut cfg, false);
+        assert!(cfg.cookies_file.is_empty());
+        assert_eq!(cfg.cookie_args(), None);
     }
 }
