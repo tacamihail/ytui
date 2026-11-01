@@ -90,8 +90,15 @@ fn cache_dir() -> PathBuf {
 }
 
 fn load_from(dir: &Path, key: &str, stamp: &str) -> Option<Cached> {
-    let c: Cached = config::load_json(&dir.join(format!("{key}.json")))?;
-    (c.stamp == stamp).then_some(c)
+    let mut c: Cached = config::load_json(&dir.join(format!("{key}.json")))?;
+    if c.stamp != stamp {
+        return None;
+    }
+    // Older builds could cache feed rows that had no title: a bare `videoId`
+    // from a shorts shelf or a menu command was mistaken for a video, and those
+    // rows painted as blank lines. Drop them instead of showing holes.
+    c.entries.retain(|e| !e.title.trim().is_empty());
+    Some(c)
 }
 
 fn save_to(dir: &Path, key: &str, stamp: &str, entries: &[Entry]) {
@@ -147,6 +154,20 @@ mod tests {
         let dir = tmp_dir();
         save_to(&dir, "liked", "file:10:20", &[entry("a")]);
         assert!(load_from(&dir, "liked", "file:11:21").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Caches written by older builds can contain rows whose title never got
+    /// parsed. They used to show up as blank lines in the lists.
+    #[test]
+    fn untitled_rows_are_dropped_on_load() {
+        let dir = tmp_dir();
+        let mut blank = entry("b");
+        blank.title = "  ".into();
+        save_to(&dir, "subs", "file:10:20", &[entry("a"), blank]);
+        let c = load_from(&dir, "subs", "file:10:20").expect("cache should load");
+        assert_eq!(c.entries.len(), 1);
+        assert_eq!(c.entries[0].id, "a");
         let _ = fs::remove_dir_all(&dir);
     }
 

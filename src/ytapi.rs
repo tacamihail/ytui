@@ -34,15 +34,24 @@ pub fn subscription_feed(cfg: &Config) -> Result<Vec<Entry>, String> {
     let data = extract_json(&body, "ytInitialData")
         .ok_or_else(|| "could not find ytInitialData in the subscriptions page".to_string())?;
 
-    let mut out = Vec::new();
-    collect(&data, &mut out);
-    dedup(&mut out);
+    let mut out = feed_entries(&data);
 
     if out.is_empty() {
         return Err("subscriptions feed came back empty, are you signed in?".into());
     }
     out.truncate(cfg.fetch_limit.max(1) as usize);
     Ok(out)
+}
+
+/// Rows for the feed: every real video in `ytInitialData`, without duplicates.
+/// A row with no title cannot be read or picked on purpose, so it is never let
+/// through: the tabs would paint it as a blank line.
+fn feed_entries(data: &Value) -> Vec<Entry> {
+    let mut out = Vec::new();
+    collect(data, &mut out);
+    out.retain(|e| !e.title.trim().is_empty());
+    dedup(&mut out);
+    out
 }
 
 /// Builds a `Cookie:` header from a Netscape cookies.txt.
@@ -113,12 +122,16 @@ fn collect(v: &Value, out: &mut Vec<Entry>) {
     match v {
         Value::Object(map) => {
             if let Some(id) = map.get("videoId").and_then(Value::as_str) {
-                if is_video_id(id) {
-                    let title = map
-                        .get("title")
-                        .or_else(|| map.get("headline"))
-                        .and_then(text_of)
-                        .unwrap_or_default();
+                let title = map
+                    .get("title")
+                    .or_else(|| map.get("headline"))
+                    .and_then(text_of)
+                    .unwrap_or_default();
+                // `videoId` also appears in thumbnails, menus and command
+                // payloads, often pointing at some other video. Only a node
+                // that carries a title is a video in the feed; the rest would
+                // become untitled rows.
+                if is_video_id(id) && !title.trim().is_empty() {
                     let channel = map
                         .get("ownerText")
                         .or_else(|| map.get("longBylineText"))
@@ -141,6 +154,11 @@ fn collect(v: &Value, out: &mut Vec<Entry>) {
             }
             if let Some(lockup) = map.get("lockupViewModel") {
                 if let Some(e) = from_lockup(lockup) {
+                    out.push(e);
+                }
+            }
+            if let Some(short) = map.get("shortsLockupViewModel") {
+                if let Some(e) = from_short(short) {
                     out.push(e);
                 }
             }
@@ -209,6 +227,28 @@ fn from_lockup(lockup: &Value) -> Option<Entry> {
         title,
         channel,
         duration,
+        url_override: String::new(),
+    })
+}
+
+/// Shorts shelf: `shortsLockupViewModel` keeps the video id inside the tap
+/// command and the title in `overlayMetadata`, with no channel or length.
+fn from_short(short: &Value) -> Option<Entry> {
+    let id = short
+        .pointer("/onTap/innertubeCommand/reelWatchEndpoint/videoId")
+        .and_then(Value::as_str)?;
+    if !is_video_id(id) {
+        return None;
+    }
+    let title = short
+        .pointer("/overlayMetadata/primaryText")
+        .and_then(text_of)
+        .unwrap_or_default();
+    Some(Entry {
+        id: id.to_string(),
+        title,
+        channel: String::new(),
+        duration: 0,
         url_override: String::new(),
     })
 }
@@ -287,5 +327,46 @@ mod tests {
         assert!(!header.contains("OTHER"));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The feed is walked for anything with a `videoId`, and the subscriptions
+    /// page is full of those inside thumbnails, menus and shorts players. Rows
+    /// from those nodes have no title and used to paint as blank lines, so the
+    /// walk must keep only real videos, including the shorts shelf.
+    #[test]
+    fn feed_rows_always_carry_a_title() {
+        let data: Value = serde_json::from_str(
+            r#"{
+              "contents": [
+                {"videoRenderer": {
+                  "videoId": "aaaaaaaaaaa",
+                  "title": {"runs": [{"text": "A real video"}]},
+                  "ownerText": {"runs": [{"text": "A channel"}]},
+                  "lengthText": {"simpleText": "3:07"},
+                  "menu": {"watchEndpoint": {"videoId": "bbbbbbbbbbb"}}
+                }},
+                {"lockupViewModel": {
+                  "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+                  "contentId": "ccccccccccc",
+                  "metadata": {"lockupMetadataViewModel": {
+                    "title": {"content": "New UI video"}
+                  }}
+                }},
+                {"richItemRenderer": {"content": {"shortsLockupViewModel": {
+                  "onTap": {"innertubeCommand": {"reelWatchEndpoint": {"videoId": "ddddddddddd"}}},
+                  "overlayMetadata": {"primaryText": {"content": "A short"}}
+                }}}}
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let out = feed_entries(&data);
+
+        let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();        let titles: Vec<&str> = out.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(ids, ["aaaaaaaaaaa", "ccccccccccc", "ddddddddddd"]);
+        assert_eq!(titles, ["A real video", "New UI video", "A short"]);
+        assert_eq!(out[0].duration, 187);
+        assert_eq!(out[0].channel, "A channel");
     }
 }
