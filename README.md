@@ -61,13 +61,19 @@ no Opus decoder, so those uploads are skipped with a message.
 ## Install
 
 You need Rust, `yt-dlp`, `deno` (yt-dlp uses it for YouTube's JS challenges)
-and the ALSA headers: `libasound2-dev` on Debian/Ubuntu, `alsa-lib` on Arch.
+and, on Linux, the ALSA headers: `libasound2-dev` on Debian/Ubuntu, `alsa-lib`
+on Arch. macOS uses CoreAudio, so it needs nothing beyond the Xcode command
+line tools (`xcode-select --install`).
 
 ```bash
 git clone https://github.com/tacamihail/ytui.git
 cd ytui
 ./install.sh
 ```
+
+Those three commands are the same on Linux, WSL and macOS. On macOS the script
+checks for the command line tools, downloads the `deno-*-apple-darwin` build
+and adds `~/.local/bin` to `~/.zprofile` when the account has no `.zshrc` yet.
 
 The script puts a recent `yt-dlp` and `deno` in `~/.local/bin` and `~/.deno/bin`
 if they're missing, builds the release binary and installs `~/.local/bin/ytui`.
@@ -84,7 +90,8 @@ To build it yourself:
 
 ```bash
 cargo build --release
-install -Dm755 target/release/ytui ~/.local/bin/ytui
+mkdir -p ~/.local/bin
+cp target/release/ytui ~/.local/bin/ytui
 ```
 
 ### WSL

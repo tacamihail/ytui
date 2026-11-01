@@ -9,6 +9,12 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DST="$HOME/.local/bin/ytui"
 BIN_REAL="$HOME/.local/bin/ytui.bin"
 CFG_DIR="$HOME/.config/ytui"
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+# The PATH the user's shell gave us. The deno step below adds its directory for
+# this run only, so the check for "already on PATH" has to look at this one or
+# the rc file never gets the line.
+PATH_AT_START="$PATH"
 
 c_dim=$'\e[2m'; c_ok=$'\e[32m'; c_yel=$'\e[33m'; c_ac=$'\e[36m'; c_rst=$'\e[0m'
 info() { printf '%s\n' "${c_dim}::${c_rst} $*"; }
@@ -19,7 +25,16 @@ die()  { printf '%s\n' "${c_yel} !${c_rst} $*" >&2; exit 1; }
 [[ ${EUID} -eq 0 ]] && die "run as your normal user (sudo is requested only when needed)"
 
 # --- package manager ---------------------------------------------------------
-if command -v apt-get >/dev/null 2>&1; then
+if [[ "$OS" == Darwin ]]; then
+  # cpal talks to CoreAudio here, so there is no audio package to install. The
+  # only requirement is a linker, which comes with the Xcode command line tools.
+  PM=brew
+  BUILD_DEPS=()
+  RUNTIME_DEPS=()
+  if ! xcode-select -p >/dev/null 2>&1; then
+    die "install the Xcode command line tools first: xcode-select --install"
+  fi
+elif command -v apt-get >/dev/null 2>&1; then
   PM=apt
   BUILD_DEPS=(build-essential pkg-config libasound2-dev)
   RUNTIME_DEPS=(libasound2)
@@ -43,6 +58,7 @@ pm_install() {
     apt)    sudo apt-get update -qq && sudo apt-get install -y "$@" ;;
     pacman) sudo pacman -S --needed --noconfirm "$@" ;;
     dnf)    sudo dnf install -y "$@" ;;
+    brew)   brew install "$@" ;;
     *)      return 1 ;;
   esac
 }
@@ -85,6 +101,12 @@ else
   ok "yt-dlp $(yt-dlp --version 2>/dev/null | head -1)"
 fi
 
+# The yt-dlp release asset is a python zipapp, so macOS needs a python3 to run
+# it. The Xcode command line tools provide one; Homebrew python works too.
+if [[ "$OS" == Darwin ]] && ! command -v python3 >/dev/null 2>&1; then
+  warn "python3 is missing, yt-dlp needs it: xcode-select --install (or brew install python)"
+fi
+
 # --- deno --------------------------------------------------------------------
 # yt-dlp solves YouTube's JS challenges with a JS runtime; deno is the only one
 # enabled by default. Without it most videos fail with "Unable to extract
@@ -96,16 +118,18 @@ else
   mkdir -p "$HOME/.deno/bin"
   tmp="$(mktemp -d)"
 
-  # Deno ships one archive per architecture, named by its Rust target triple.
-  # Only x86_64 and aarch64 have Linux builds; armv7 is not published any more.
-  case "$(uname -m)" in
-    x86_64|amd64)  deno_url=https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip ;;
-    aarch64|arm64) deno_url=https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip ;;
-    *)             deno_url= ;;
+  # Deno ships one archive per OS and architecture, named by its Rust target
+  # triple. armv7 Linux builds are not published any more.
+  case "$OS/$ARCH" in
+    Linux/x86_64|Linux/amd64)    deno_url=https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip ;;
+    Linux/aarch64|Linux/arm64)   deno_url=https://github.com/denoland/deno/releases/latest/download/deno-aarch64-unknown-linux-gnu.zip ;;
+    Darwin/x86_64)               deno_url=https://github.com/denoland/deno/releases/latest/download/deno-x86_64-apple-darwin.zip ;;
+    Darwin/arm64|Darwin/aarch64) deno_url=https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip ;;
+    *)                           deno_url= ;;
   esac
 
   if [[ -z "$deno_url" ]]; then
-    warn "no Deno build for $(uname -m). Install it from https://deno.com or YouTube playback will fail"
+    warn "no Deno build for $OS/$ARCH. Install it from https://deno.com or YouTube playback will fail"
   elif curl -fsSL "$deno_url" -o "$tmp/deno.zip"; then
     if command -v unzip >/dev/null 2>&1; then
       unzip -oq "$tmp/deno.zip" -d "$HOME/.deno/bin" \
@@ -148,7 +172,9 @@ extract_plugins() {
   rm -rf "$tmp"
 }
 
-if [[ "$PM" == apt ]]; then
+if [[ "$OS" == Darwin ]]; then
+  ok "audio runtime: CoreAudio, nothing to install"
+elif [[ "$PM" == apt ]]; then
   rt=()
   for p in "${RUNTIME_DEPS[@]}"; do
     dpkg -s "$p" >/dev/null 2>&1 || rt+=("$p")
@@ -178,7 +204,10 @@ if [[ "$PM" == apt ]]; then
 fi
 
 # --- build dependencies ------------------------------------------------------
-if [[ "$PM" != unknown ]]; then
+if [[ "$OS" == Darwin ]]; then
+  command -v cc >/dev/null 2>&1 || die "no C compiler: run xcode-select --install"
+  ok "build deps present (Xcode command line tools)"
+elif [[ "$PM" != unknown ]]; then
   missing=()
   if [[ "$PM" == apt ]]; then
     for p in "${BUILD_DEPS[@]}"; do
@@ -211,7 +240,11 @@ ok "cargo $(cargo --version | cut -d' ' -f2)"
 # --- build -------------------------------------------------------------------
 info "building ytui (the first build downloads crates, 1-3 min)"
 (cd "$DIR" && cargo build --release)
-install -Dm755 "$DIR/target/release/ytui" "$BIN_REAL"
+# `install -D` is GNU-only, and the release build has to land next to the
+# launcher on macOS too.
+mkdir -p "$(dirname "$BIN_REAL")"
+cp "$DIR/target/release/ytui" "$BIN_REAL"
+chmod 755 "$BIN_REAL"
 
 # Launcher, not the binary: on WSL the ALSA pulse plugin may only exist as an
 # extracted copy under ~/.local/alsa, so point ALSA_PLUGIN_DIR at it before
@@ -285,15 +318,23 @@ fi
 
 # --- PATH --------------------------------------------------------------------
 add_path_line() {
-  local dir="$1" rc
-  case ":$PATH:" in
+  local dir="$1" rc found=0
+  case ":$PATH_AT_START:" in
     *":$dir:"*) return 1 ;;
   esac
   for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
     [[ -f "$rc" ]] || continue
+    found=1
     printf '\nexport PATH="%s:$PATH"\n' "$dir" >> "$rc"
     ok "added $dir to PATH in $(basename "$rc") (open a new shell)"
   done
+  # A fresh macOS account has neither file; zsh reads .zprofile at login.
+  if ((!found)); then
+    rc="$HOME/.profile"
+    [[ "$OS" == Darwin ]] && rc="$HOME/.zprofile"
+    printf '\nexport PATH="%s:$PATH"\n' "$dir" >> "$rc"
+    ok "added $dir to PATH in $(basename "$rc") (open a new shell)"
+  fi
   return 0
 }
 
