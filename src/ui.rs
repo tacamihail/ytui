@@ -190,10 +190,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
 /// Checking is silent here; it only takes space once hidden tabs would move.
 fn update_chip(app: &App) -> Option<(String, Color)> {
     match &app.update {
-        UpdateState::Behind(n) => {
-            let commits = if *n == 1 { "commit" } else { "commits" };
-            Some((format!(" ↑ {n} {commits} "), YELLOW))
-        }
+        UpdateState::Available(v) => Some((format!(" ↑ {v} "), YELLOW)),
         UpdateState::Updating => Some((
             format!(" {} updating ", spinner(app.anim.elapsed())),
             ACCENT,

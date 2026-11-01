@@ -50,9 +50,9 @@ pub enum PlayerBtn {
     Next,
 }
 
-/// Latest known state of the source checkout compared with github. The check
-/// is lazy (help or `u` starts it) and runs in the background; the tabs row and
-/// the help overlay read the result.
+/// Latest known state of the version on github compared with this build. The
+/// check is lazy (help or `u` starts it) and runs in the background; the tabs
+/// row and the help overlay read the result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateState {
     /// Not checked yet: the check is lazy and starts when help is first opened,
@@ -60,7 +60,8 @@ pub enum UpdateState {
     Idle,
     Checking,
     Current,
-    Behind(usize),
+    /// A newer `[package] version` is on github.
+    Available(String),
     Updating,
     Installed,
     Failed(String),
@@ -73,8 +74,7 @@ impl UpdateState {
             UpdateState::Idle => "not checked".into(),
             UpdateState::Checking => "checking…".into(),
             UpdateState::Current => "up to date".into(),
-            UpdateState::Behind(1) => "1 commit behind".into(),
-            UpdateState::Behind(n) => format!("{n} commits behind"),
+            UpdateState::Available(v) => format!("{v} available"),
             UpdateState::Updating => "updating…".into(),
             UpdateState::Installed => "installed, restart ytui".into(),
             UpdateState::Failed(e) => {
@@ -96,8 +96,9 @@ impl UpdateState {
 
 /// Results from the background update worker.
 enum UpdMsg {
-    /// `announce` marks a check the user asked for, whose outcome is toasted.
-    Checked(Result<usize, String>, bool),
+    /// The newer version, when there is one; `announce` marks a check the user
+    /// asked for, whose outcome is toasted.
+    Checked(Result<Option<String>, String>, bool),
     Installed(Result<String, String>),
 }
 
@@ -430,7 +431,7 @@ impl App {
     /// Bound to `u`, in the main view and inside the help overlay alike.
     pub fn update_now(&mut self) {
         match self.update {
-            UpdateState::Behind(_) => self.install_update(),
+            UpdateState::Available(_) => self.install_update(),
             UpdateState::Checking => self.update_wanted = true,
             UpdateState::Idle | UpdateState::Current | UpdateState::Failed(_) => {
                 self.check_updates(true)
@@ -439,8 +440,9 @@ impl App {
         }
     }
 
-    /// Compare the checkout with github on a worker thread. Opening help starts
-    /// a check every time, and `u` refreshes it when there is nothing to install.
+    /// Compare this build's version with github on a worker thread. Opening
+    /// help starts a check every time, and `u` refreshes it when there is
+    /// nothing to install.
     pub fn check_updates(&mut self, announce: bool) {
         if matches!(self.update, UpdateState::Updating | UpdateState::Checking) {
             return;
@@ -451,7 +453,7 @@ impl App {
         }
         let tx = self.upd_tx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(UpdMsg::Checked(update::pending(), announce));
+            let _ = tx.send(UpdMsg::Checked(update::available(), announce));
         });
     }
 
@@ -476,22 +478,19 @@ impl App {
                 let wanted = std::mem::take(&mut self.update_wanted);
                 let announce = announce || wanted;
                 match result {
-                    Ok(0) => {
+                    Ok(None) => {
                         self.update = UpdateState::Current;
                         if announce {
                             self.set_toast("✔ already up to date", false);
                         }
                     }
-                    Ok(n) => {
-                        self.update = UpdateState::Behind(n);
+                    Ok(Some(v)) => {
+                        self.update = UpdateState::Available(v.clone());
                         if wanted {
                             self.install_update();
                         } else if announce {
                             self.set_toast(
-                                format!(
-                                    "{n} new commit{} on github, press u to update",
-                                    plural(n)
-                                ),
+                                format!("ytui {v} is available on github, press u to update"),
                                 false,
                             );
                         }
@@ -676,8 +675,8 @@ impl App {
                 if m.row == 0 {
                     if let Some((x0, x1)) = self.update_hit {
                         if m.column >= x0 && m.column <= x1 {
-                            // Behind installs, updating/installed has nothing
-                            // left to do; update_now guards those.
+                            // Available installs, updating/installed has
+                            // nothing left to do; update_now guards those.
                             self.update_now();
                             return;
                         }
@@ -1236,14 +1235,6 @@ fn marked_line(text: &str, mark: char) -> Option<String> {
         .map(str::to_string)
 }
 
-fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
-}
-
 fn which(bin: &str) -> bool {
     if let Ok(paths) = std::env::var("PATH") {
         for dir in paths.split(':') {
@@ -1278,12 +1269,14 @@ mod tests {
 
     #[test]
     fn update_labels_and_animation_agree() {
-        assert_eq!(UpdateState::Behind(1).label(), "1 commit behind");
-        assert_eq!(UpdateState::Behind(3).label(), "3 commits behind");
+        assert_eq!(
+            UpdateState::Available("0.3.19".into()).label(),
+            "0.3.19 available"
+        );
         assert_eq!(UpdateState::Current.label(), "up to date");
         assert!(UpdateState::Checking.animating());
         assert!(UpdateState::Updating.animating());
         assert!(!UpdateState::Idle.animating());
-        assert!(!UpdateState::Behind(2).animating());
+        assert!(!UpdateState::Available("0.3.19".into()).animating());
     }
 }

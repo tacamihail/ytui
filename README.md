@@ -80,14 +80,17 @@ if they're missing, builds the release binary and installs `~/.local/bin/ytui`.
 That last file is a small launcher around `ytui.bin`; on WSL it points
 `ALSA_PLUGIN_DIR` at the PulseAudio plugin when that lives in `~/.local/alsa`.
 
-To update later, run `ytui update`: it fetches the checkout, fast-forwards it
-and rebuilds `ytui.bin`. It refuses to touch a checkout with uncommitted
-changes or local commits, and `ytui update --check` only says whether newer
-commits exist. The checkout is the one `install.sh` ran from; set `YTUI_SRC` to
-point elsewhere. Inside the player, `?` opens help and checks github; `u`
-installs the pending update (or checks again when there is none), and it works
-from inside the help overlay too. When commits are waiting, a clickable
-`↑ n commits` chip appears next to the account name.
+To update later, run `ytui update`: it fetches the checkout and, when the
+`version` in github's `Cargo.toml` is newer than the running binary,
+fast-forwards and rebuilds `ytui.bin`. The version is bumped by hand when a
+release is cut, so commits that leave it unchanged are not installed. It
+refuses to touch a checkout with uncommitted changes or local commits, and
+`ytui update --check` only says whether a newer version exists. The checkout is
+the one `install.sh` ran from; set `YTUI_SRC` to point elsewhere. Inside the
+player, `?` opens help and checks github; `u` installs the newer version (or
+checks again when there is none), and it works from inside the help overlay
+too. When a newer version is waiting, a clickable `↑ 0.3.19` chip appears next
+to the account name.
 
 To build it yourself:
 
@@ -205,8 +208,8 @@ URL) and `r` refreshes.
 `space` or `p` pauses, `left`/`right` seek 5 seconds, `,` and `.` seek 30,
 `[` `]` change the volume, `m` mutes, `s` shuffles, `R` cycles repeat, `<` `>`
 skip tracks, `x` stops, `d` deletes an entry, `c` copies the link, `?` shows
-the help (with the version and an update check), `u` installs an update (or
-checks when there is none), and `q` quits.
+the help (with the version and an update check), `u` installs a newer version
+(or checks when there is none), and `q` quits.
 
 The mouse works as well: click a tab, click a row to select it, double-click
 to play, click the progress bar to seek, and click the buttons in the player.

@@ -1,9 +1,12 @@
-//! `ytui update`: fast-forward the source checkout and reinstall the binary.
+//! `ytui update`: install the newer version from github.
 //!
 //! ytui is distributed as source, so an update is a `git pull` plus a release
-//! build. `install.sh` records the checkout it built from in
-//! `~/.config/ytui/source`; `$YTUI_SRC` overrides it. Only fast-forwards are
-//! done: a checkout with local commits, uncommitted changes or a diverged
+//! build. Whether one is needed is decided by the `[package] version` in
+//! github's `Cargo.toml`, not by how many commits the checkout is behind: the
+//! version is bumped by hand when a release is cut, so an unbumped commit is
+//! not something to install. `install.sh` records the checkout it built from
+//! in `~/.config/ytui/source`; `$YTUI_SRC` overrides it. Only fast-forwards
+//! are done: a checkout with local commits, uncommitted changes or a diverged
 //! history is left alone so nothing of the user's work is touched.
 
 use std::fs;
@@ -15,14 +18,16 @@ use crate::config;
 const BRANCH: &str = "main";
 
 const USAGE: &str = "\
-ytui update - pull the latest source and rebuild
+ytui update - install the newer version from github
 
 usage:
-  ytui update            fetch, fast-forward and reinstall
-  ytui update --check    only report whether newer commits exist
-  ytui update --force    rebuild even when there is nothing to pull
+  ytui update            install when github has a newer version
+  ytui update --check    only report whether a newer version exists
+  ytui update --force    rebuild even when the version is unchanged
 
-the checkout is found through $YTUI_SRC, else the path install.sh saved in
+the version is the [package] version in Cargo.toml; it is bumped by hand when
+a release is cut, so commits that do not change it are not installed. the
+checkout is found through $YTUI_SRC, else the path install.sh saved in
 ~/.config/ytui/source, else the current directory if it looks like the repo
 ";
 
@@ -36,20 +41,15 @@ pub fn cli(args: &[String]) -> i32 {
     }
 }
 
-/// Commits on github `main` that the checkout does not have yet; `0` means up
-/// to date. Fetches first, so call it from a worker thread: it needs the
-/// network. `Err` when there is no checkout to compare or git fails.
-pub fn pending() -> Result<usize, String> {
+/// The version on github `main` when it is newer than the running binary;
+/// `None` when this build is already current. Fetches first, so call it from a
+/// worker thread: it needs the network. `Err` when there is no checkout to
+/// compare, the version cannot be read or git fails.
+pub fn available() -> Result<Option<String>, String> {
     let dir = checkout()?;
     git(&dir, &["fetch", "--quiet", "origin", BRANCH])?;
-    let count = git(
-        &dir,
-        &["rev-list", "--count", &format!("HEAD..origin/{BRANCH}")],
-    )?;
-    count
-        .trim()
-        .parse()
-        .map_err(|e| format!("git rev-list returned {count:?}: {e}"))
+    let remote = version_at_ref(&dir, &format!("origin/{BRANCH}"))?;
+    Ok(is_newer(&remote, version()).then_some(remote))
 }
 
 fn run(args: &[String]) -> Result<(), String> {
@@ -76,8 +76,26 @@ fn run(args: &[String]) -> Result<(), String> {
     git(&dir, &["fetch", "--quiet", "origin", BRANCH])
         .map_err(|e| format!("{e}\n  check the network and try again"))?;
     let target = git(&dir, &["rev-parse", &remote])?;
+    let remote_version = version_at_ref(&dir, &remote)?;
+    let newer = is_newer(&remote_version, version());
 
-    if local == target && !force {
+    if check {
+        if newer {
+            println!(
+                "· ytui {remote_version} is available (running {}), run `ytui update` to install",
+                version()
+            );
+        } else {
+            println!(
+                "✔ already up to date ({} · ytui {})",
+                short(&local),
+                version()
+            );
+        }
+        return Ok(());
+    }
+
+    if !newer && !force {
         println!(
             "✔ already up to date ({} · ytui {})",
             short(&local),
@@ -86,9 +104,9 @@ fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let rebuild_only = local == target;
-    if rebuild_only {
-        // --force with nothing to pull: just rebuild what is there.
+    if local == target {
+        // The checkout already carries the new version, or --force asked for a
+        // rebuild: only the binary has to be replaced.
         return build_and_install(&dir, &local, None);
     }
 
@@ -121,28 +139,10 @@ fn run(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    let log = git(
-        &dir,
-        &[
-            "log",
-            "--oneline",
-            "--no-decorate",
-            &format!("HEAD..{remote}"),
-        ],
-    )?;
-    println!("· newer commits on github:");
-    for line in log.lines() {
-        println!("    {line}");
-    }
-
-    if check {
-        println!(
-            "· {} is {} behind {remote}, run `ytui update` to install",
-            short(&local),
-            log.lines().count()
-        );
-        return Ok(());
-    }
+    println!(
+        "· ytui {remote_version} is available (running {})",
+        version()
+    );
 
     if !git(&dir, &["status", "--porcelain"])?.is_empty() {
         return Err(format!(
@@ -295,7 +295,20 @@ fn short(sha: &str) -> &str {
 /// Version in the checkout that was just built; the running binary may be
 /// older than the commit it installed.
 fn version_at(dir: &Path) -> Option<String> {
-    let txt = fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    parse_package_version(&fs::read_to_string(dir.join("Cargo.toml")).ok()?)
+}
+
+/// Version in `rev`'s `Cargo.toml`, read through git so the working tree is
+/// never touched. `rev` is `origin/main` here, already fetched.
+fn version_at_ref(dir: &Path, rev: &str) -> Result<String, String> {
+    let txt = git(dir, &["show", &format!("{rev}:Cargo.toml")])
+        .map_err(|e| format!("cannot read Cargo.toml from {rev}\n  {e}"))?;
+    parse_package_version(&txt)
+        .ok_or_else(|| format!("{rev} has no [package] version in Cargo.toml"))
+}
+
+/// The `[package] version`, ignoring dependency versions.
+fn parse_package_version(txt: &str) -> Option<String> {
     let mut package = false;
     for line in txt.lines() {
         let line = line.trim();
@@ -313,6 +326,54 @@ fn version_at(dir: &Path) -> Option<String> {
     None
 }
 
+/// Compare dotted numeric versions, so `0.3.10` is newer than `0.3.9` rather
+/// than sorting as text. An unparsable version only counts as newer when it
+/// differs, so a hand-written tag still reaches the user.
+fn is_newer(candidate: &str, current: &str) -> bool {
+    match (parse_version(candidate), parse_version(current)) {
+        (Some(a), Some(b)) => a > b,
+        _ => candidate.trim() != current.trim(),
+    }
+}
+
+fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+    let core = v.trim().split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versions_compare_by_number_not_text() {
+        assert!(is_newer("0.3.10", "0.3.9"));
+        assert!(is_newer("0.4.0", "0.3.99"));
+        assert!(is_newer("1.0.0", "0.99.99"));
+        assert!(!is_newer("0.3.18", "0.3.18"));
+        assert!(!is_newer("0.3.17", "0.3.18"));
+        assert!(!is_newer("0.3.9", "0.3.10"));
+    }
+
+    #[test]
+    fn the_package_version_is_read_from_cargo_toml() {
+        let toml = "[package]\nname = \"ytui\"\nversion = \"1.2.3\"\n\n\
+                    [dependencies.serde]\nversion = \"9.9.9\"\n";
+        assert_eq!(parse_package_version(toml).as_deref(), Some("1.2.3"));
+        assert_eq!(
+            parse_package_version("[dependencies.serde]\nversion = \"9.9.9\"\n"),
+            None
+        );
+    }
 }
