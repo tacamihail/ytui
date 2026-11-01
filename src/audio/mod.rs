@@ -147,9 +147,14 @@ struct Engine {
     /// Where the output should resume once the ring has enough audio, in
     /// seconds. `Some` while the sink is held after a start or a seek.
     holding: Option<f64>,
-    /// Resolves the next track while the current one plays. `yt-dlp` takes a
-    /// few seconds per track, which is most of the pause between songs.
+    /// Resolves the next track in the last seconds of the current one.
+    /// `yt-dlp` takes a few seconds per track, which is most of the pause
+    /// between songs.
     prefetch: Arc<Prefetch>,
+    /// URL of the next track already handed to the resolver for this song.
+    /// Keyed by URL so a queue edit or a repeat-mode change still triggers a
+    /// resolve for the new next track.
+    prefetched: Option<String>,
     tmp: Vec<f32>,
     rng: u64,
 }
@@ -170,15 +175,13 @@ struct Prefetch {
 
 /// Resolved links kept for replays. Sixteen googlevideo URLs are ~25 KiB.
 const URL_CACHE_MAX: usize = 16;
-/// Upcoming tracks to resolve while the current one plays.
-const PREFETCH_AHEAD: usize = 3;
+/// Resolve the next track only in the last seconds of the current one. yt-dlp
+/// needs about four seconds, so ten leaves a margin for the handover without
+/// holding a link (or running yt-dlp) for the whole song.
+const PREFETCH_WINDOW_SECS: f64 = 10.0;
 /// Stop using a link this long before YouTube's own expiry, so there is time
 /// to re-resolve when a track is played from an old cache entry.
 const URL_EXPIRY_MARGIN_SECS: u64 = 5 * 60;
-/// Space between background resolves. The first one still starts immediately,
-/// the way the old single-track prefetch did; the extra ones are not urgent
-/// and should not compete with the decoder in one burst.
-const PREFETCH_GAP: Duration = Duration::from_millis(1200);
 /// Gap before retrying a failed background resolve.
 const PREFETCH_RETRY_GAP: Duration = Duration::from_millis(1500);
 
@@ -252,32 +255,28 @@ impl Prefetch {
             }
             drop(g);
             self.cv.notify_all();
-            // Resolving three tracks back to back would keep one core busy
-            // for several seconds right after playback starts. One job is
-            // enough of a head start; give the decoder a clear run before the
-            // next, so the extra prefetch cannot cause underruns.
-            thread::sleep(PREFETCH_GAP);
         }
     }
 
-    /// Replace the background queue with the tracks after the one that just
-    /// started. Replacing instead of appending matters after a jump: guesses
-    /// made for the old position would otherwise sit in front of the list for
-    /// the new one.
+    /// Replace the background queue with `urls`. Replacing instead of
+    /// appending matters after a jump: guesses made for the old position would
+    /// otherwise sit in front of the list for the new one.
     fn request(&self, urls: Vec<String>) {
         let mut g = self.lock();
         g.generation = g.generation.wrapping_add(1);
         let mut queue = VecDeque::new();
         for url in urls {
-            let known = g.cache.iter().any(|(u, _)| u == &url)
+            // An expired cache entry is not a reason to skip the resolve: it
+            // would be dropped at the handover anyway.
+            let known = g
+                .cache
+                .iter()
+                .any(|(u, s)| u == &url && !link_expired(&s.url))
                 || g.running.as_deref() == Some(url.as_str())
                 || queue.contains(&url);
             if !known {
                 queue.push_back(url);
             }
-        }
-        while queue.len() > PREFETCH_AHEAD {
-            queue.pop_back();
         }
         let changed = g.queue != queue;
         g.queue = queue;
@@ -388,6 +387,7 @@ impl Engine {
             fails: 0,
             holding: None,
             prefetch,
+            prefetched: None,
             tmp: Vec::with_capacity(16384),
             rng: seed(),
         };
@@ -478,43 +478,57 @@ impl Engine {
         res
     }
 
-    /// Ask for the next few tracks' URLs once the current one is known to
-    /// play. The worker runs them one at a time; the queue is only as deep as
-    /// a few skips so links do not expire before they are used.
-    fn prefetch_after(&self, index: usize) {
+    /// Ask for the next track's URL once the current one is about to end.
+    ///
+    /// Resolving during the last ten seconds keeps the wait for the handover
+    /// short without running yt-dlp (and holding a link) for the whole song.
+    /// Only one track is solved ahead: a link that is not used soon would
+    /// expire and have to be resolved again anyway.
+    fn prefetch_next_near_end(&mut self) {
         // Escape hatch for slow machines (or for A/B testing a stutter):
         // `YTUI_PREFETCH=0 ytui` resolves every track on demand only.
         if std::env::var("YTUI_PREFETCH").ok().as_deref() == Some("0") {
             return;
         }
-        let urls = {
-            let st = self.lock();
-            let len = st.queue.len();
-            let mut urls = Vec::new();
-            if st.repeat == Repeat::One {
-                if let Some(t) = st.queue.get(index) {
-                    urls.push(t.url.clone());
-                }
-            } else if !st.shuffle {
-                for step in 1..=PREFETCH_AHEAD {
-                    let next = index + step;
-                    let next = if next < len {
-                        Some(next)
-                    } else if st.repeat == Repeat::All && len > 0 {
-                        Some(next % len)
-                    } else {
-                        None
-                    };
-                    if let Some(t) = next.and_then(|i| st.queue.get(i)) {
-                        urls.push(t.url.clone());
-                    }
-                }
-            }
-            urls
-        };
-        if !urls.is_empty() {
-            self.prefetch.request(urls);
+        if self.loaded.is_none() {
+            return;
         }
+        let Some(sink) = &self.sink else { return };
+        // While paused the end may be hours away, and a link solved now could
+        // expire before it is used.
+        if sink.is_paused() {
+            return;
+        }
+        let pos = sink.played_frames() as f64 / f64::from(sink.rate());
+        let (index, len, repeat, shuffle, state_dur) = {
+            let st = self.lock();
+            (st.index, st.queue.len(), st.repeat, st.shuffle, st.dur)
+        };
+        let dur = self
+            .loaded
+            .as_ref()
+            .map(|l| l.duration)
+            .filter(|d| *d > 0.0)
+            .unwrap_or(state_dur);
+        if dur <= 0.0 || pos >= dur || dur - pos > PREFETCH_WINDOW_SECS {
+            return;
+        }
+        // Repeat-one rewinds the same stream; shuffle picks its next track
+        // only when the current one ends.
+        if repeat == Repeat::One || shuffle {
+            return;
+        }
+        let next = next_index(index, len, repeat);
+        let url = {
+            let st = self.lock();
+            next.and_then(|i| st.queue.get(i)).map(|t| t.url.clone())
+        };
+        let Some(url) = url else { return };
+        if self.prefetched.as_deref() == Some(url.as_str()) {
+            return;
+        }
+        self.prefetched = Some(url.clone());
+        self.prefetch.request(vec![url]);
     }
 
     /// Reopens the output stream at `want` when the track's rate differs from
@@ -549,16 +563,9 @@ impl Engine {
                 self.start(index);
             }
             Cmd::Append(track) => {
-                let (index, new_is_next) = {
-                    let mut st = self.lock();
-                    st.queue.push(track);
-                    st.version = st.version.wrapping_add(1);
-                    let len = st.queue.len();
-                    (st.index, len >= 2 && st.index + 1 == len - 1)
-                };
-                if new_is_next {
-                    self.prefetch_after(index);
-                }
+                let mut st = self.lock();
+                st.queue.push(track);
+                st.version = st.version.wrapping_add(1);
             }
             Cmd::Toggle => {
                 let (status, index) = {
@@ -572,6 +579,12 @@ impl Engine {
                 } else if let Some(s) = &self.sink {
                     let paused = !s.is_paused();
                     s.set_paused(paused);
+                    if paused {
+                        // The end may now be hours away, so a link solved
+                        // before the pause could expire. Let the next tick
+                        // request it again after resuming.
+                        self.prefetched = None;
+                    }
                     let mut st = self.lock();
                     if matches!(st.status, Status::Playing | Status::Paused) {
                         st.status = if paused {
@@ -696,6 +709,7 @@ impl Engine {
 
         self.loaded = None;
         self.eof = false;
+        self.prefetched = None;
         if let Some(s) = &self.sink {
             s.set_paused(false);
         }
@@ -763,7 +777,6 @@ impl Engine {
                 }
                 drop(st);
                 self.loaded = Some(l);
-                self.prefetch_after(index);
             }
             Err(e) => {
                 // One dead upload should not end the evening. Walk past
@@ -864,6 +877,11 @@ impl Engine {
                 }
             }
         }
+
+        // Near the end of the track, solve the next URL so the handover is
+        // short. This runs every tick; the function itself is a no-op until
+        // the last seconds and only requests each next track once.
+        self.prefetch_next_near_end();
 
         // Track finished?
         let drained = self
@@ -970,6 +988,18 @@ pub fn output_rate() -> u32 {
     sink::Sink::default_rate().unwrap_or(OUT_RATE)
 }
 
+/// Index of the track that plays after `index`, or `None` when playback stops
+/// at the end of the queue. Used to pick the one URL worth resolving ahead.
+fn next_index(index: usize, len: usize, repeat: Repeat) -> Option<usize> {
+    if index + 1 < len {
+        Some(index + 1)
+    } else if repeat == Repeat::All && len > 0 {
+        Some(0)
+    } else {
+        None
+    }
+}
+
 /// True when the failure means "this track is gone", as opposed to a broken
 /// setup (cookies, old yt-dlp, missing network) that would fail every track.
 fn track_is_gone(err: &str) -> bool {
@@ -1072,6 +1102,16 @@ mod tests {
         assert!(take_cached(&mut g, &newest).is_some());
         // A hit stays cached, so skipping back is instant too.
         assert!(take_cached(&mut g, &newest).is_some());
+    }
+
+    #[test]
+    fn only_the_following_track_is_solved_ahead() {
+        assert_eq!(next_index(0, 3, Repeat::Off), Some(1));
+        assert_eq!(next_index(1, 3, Repeat::Off), Some(2));
+        // The last track: stop, or wrap only when the queue repeats.
+        assert_eq!(next_index(2, 3, Repeat::Off), None);
+        assert_eq!(next_index(2, 3, Repeat::All), Some(0));
+        assert_eq!(next_index(0, 0, Repeat::All), None);
     }
 
     #[test]

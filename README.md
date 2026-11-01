@@ -41,11 +41,12 @@ The output stream is opened at the track's own sample rate. YouTube AAC is
 that rate, ytui falls back to 48 kHz and resamples.
 
 Working out a stream URL takes `yt-dlp` about four seconds, which used to be
-dead air between songs. The next track is resolved while the current one plays
-and only its URL is kept (a few hundred bytes, no audio), so the handover
-costs about 0.2 s. A resolve that hangs is killed after 30 seconds, and a
-failed one is retried once: otherwise a transient error would leave the next
-track to be resolved at the handover, which is heard as a three-second pause.
+dead air between songs. The next track is resolved in the last ten seconds of
+the current one and only its URL is kept (a few hundred bytes, no audio), so
+the handover costs about 0.2 s without holding links for songs that are still
+far away. A resolve that hangs is killed after 30 seconds, and a failed one is
+retried once: otherwise a transient error would leave the next track to be
+resolved at the handover, which is heard as a three-second pause.
 
 The audio is pulled in 256 KiB HTTP ranges by a background thread that keeps
 about a minute of encoded sound ready ahead of the decoder. The decoded ring is
@@ -254,12 +255,11 @@ that index, memory is a roughly 1 MB audio ring, up to six 256 KiB range chunks
 (four queued ahead of the decoder and two in flight, about 1.5 MB), the packet
 being decoded and up to 16 resolved URLs (about 25 KiB).
 
-The next three tracks' URLs are resolved while the current one plays, one at a
-time, so the resolver peak below does not grow. The first extra resolve starts
-right away; the rest are spaced 1.2 s apart and run at `nice 10`, so they do not
-compete with the decoder. A track you choose yourself is resolved immediately
-and never waits behind that queue. On a machine where audio still crackles
-during playback, `YTUI_PREFETCH=0 ytui` disables background resolution.
+Only the next track's URL is resolved, and only once the current one has about
+ten seconds left. Resolving runs at `nice 10`, so it does not compete with the
+decoder. A track you choose yourself is resolved immediately and never waits
+behind that queue. On a machine where audio still crackles during playback,
+`YTUI_PREFETCH=0 ytui` disables background resolution.
 
 These are ytui's own numbers. Resolving a track also runs `yt-dlp`, which
 starts deno to solve YouTube's JavaScript challenge: about 110 MB plus 300 MB
