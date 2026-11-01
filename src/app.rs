@@ -6,6 +6,7 @@ use crate::config::{self, Config};
 use crate::entry::{fmt_f64, Entry};
 use crate::listcache;
 use crate::ui;
+use crate::update;
 use crate::ytdl::{self, Kind, Msg};
 use crossterm::event::{
     poll, read, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -16,7 +17,8 @@ use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use ratatui::Terminal;
 use std::io;
-use std::sync::mpsc::{Receiver, Sender};
+use std::process::Command;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -46,6 +48,57 @@ pub enum PlayerBtn {
     Prev,
     PlayPause,
     Next,
+}
+
+/// Latest known state of the source checkout compared with github. The check
+/// is lazy (help or `u` starts it) and runs in the background; the tabs row and
+/// the help overlay read the result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateState {
+    /// Not checked yet: the check is lazy and starts when help is first opened,
+    /// so neither launch nor the help overlay ever waits on the network.
+    Idle,
+    Checking,
+    Current,
+    Behind(usize),
+    Updating,
+    Installed,
+    Failed(String),
+}
+
+impl UpdateState {
+    /// One short phrase for the help overlay's `updates` heading.
+    pub fn label(&self) -> String {
+        match self {
+            UpdateState::Idle => "not checked".into(),
+            UpdateState::Checking => "checking…".into(),
+            UpdateState::Current => "up to date".into(),
+            UpdateState::Behind(1) => "1 commit behind".into(),
+            UpdateState::Behind(n) => format!("{n} commits behind"),
+            UpdateState::Updating => "updating…".into(),
+            UpdateState::Installed => "installed, restart ytui".into(),
+            UpdateState::Failed(e) => {
+                let why = e.lines().next().unwrap_or("").trim();
+                if why.is_empty() {
+                    "check failed".into()
+                } else {
+                    format!("check failed: {why}")
+                }
+            }
+        }
+    }
+
+    /// Something the redraw loop has to animate.
+    pub fn animating(&self) -> bool {
+        matches!(self, UpdateState::Checking | UpdateState::Updating)
+    }
+}
+
+/// Results from the background update worker.
+enum UpdMsg {
+    /// `announce` marks a check the user asked for, whose outcome is toasted.
+    Checked(Result<usize, String>, bool),
+    Installed(Result<String, String>),
 }
 
 pub struct App {
@@ -90,6 +143,14 @@ pub struct App {
     /// Which row is scrolling (tab, index, playlist detail) and since when.
     pub marquee_key: (usize, usize, bool),
     pub marquee_since: Instant,
+    pub update: UpdateState,
+    /// Clickable update chip in the tabs row, while one is drawn.
+    pub update_hit: Option<(u16, u16)>,
+    /// `u` pressed while the check was still running: install as soon as it
+    /// reports commits to pull, so one press still updates.
+    update_wanted: bool,
+    upd_tx: Sender<UpdMsg>,
+    upd_rx: Receiver<UpdMsg>,
     pub cmd_tx: Sender<Cmd>,
     pub fetch_tx: Sender<Msg>,
     pub account: Option<String>,
@@ -116,6 +177,7 @@ impl App {
     pub fn new(cfg: Config, player: audio::Player, fetch_tx: Sender<Msg>) -> Self {
         let history = config::load_json(&config::history_path()).unwrap_or_default();
         let account = auth::account().map(|a| a.name);
+        let (upd_tx, upd_rx) = mpsc::channel();
         let mut app = Self {
             cfg,
             tab: TAB_LIKED,
@@ -146,6 +208,11 @@ impl App {
             focused: true,
             marquee_key: (usize::MAX, usize::MAX, false),
             marquee_since: Instant::now(),
+            update: UpdateState::Idle,
+            update_hit: None,
+            update_wanted: false,
+            upd_tx: upd_tx.clone(),
+            upd_rx,
             cmd_tx: player.tx_clone(),
             fetch_tx,
             account,
@@ -188,7 +255,11 @@ impl App {
                 .unwrap_or_else(|e| e.into_inner())
                 .status
                 == Status::Loading;
-            let wait = if app.loading.is_some() || resolving || app.marquee {
+            let wait = if app.loading.is_some()
+                || resolving
+                || app.marquee
+                || app.update.animating()
+            {
                 Duration::from_millis(33)
             } else {
                 Duration::from_millis(120)
@@ -209,6 +280,9 @@ impl App {
             while let Ok(m) = fetch_rx.try_recv() {
                 app.on_fetch(m);
             }
+            while let Ok(m) = app.upd_rx.try_recv() {
+                app.on_update(m);
+            }
             app.expire_toasts();
             if app.should_quit {
                 return Ok(());
@@ -225,7 +299,17 @@ impl App {
                     st.queue
                         .iter()
                         .enumerate()
-                        .map(|(i, t)| (t.title.clone(), i == st.index))
+                        .map(|(i, t)| {
+                            // A pasted link is still unnamed until yt-dlp
+                            // resolves it; show the same placeholder the player
+                            // uses instead of a blank line in the queue.
+                            let title = if t.title.trim().is_empty() {
+                                "…".to_string()
+                            } else {
+                                t.title.clone()
+                            };
+                            (title, i == st.index)
+                        })
                         .collect::<Vec<_>>(),
                 )
             } else {
@@ -340,6 +424,104 @@ impl App {
         }
     }
 
+    // ---------------- updates ----------------
+
+    /// One key for the whole flow: install a pending update, otherwise check.
+    /// Bound to `u`, in the main view and inside the help overlay alike.
+    pub fn update_now(&mut self) {
+        match self.update {
+            UpdateState::Behind(_) => self.install_update(),
+            UpdateState::Checking => self.update_wanted = true,
+            UpdateState::Idle | UpdateState::Current | UpdateState::Failed(_) => {
+                self.check_updates(true)
+            }
+            UpdateState::Updating | UpdateState::Installed => {}
+        }
+    }
+
+    /// Compare the checkout with github on a worker thread. Opening help starts
+    /// a check every time, and `u` refreshes it when there is nothing to install.
+    pub fn check_updates(&mut self, announce: bool) {
+        if matches!(self.update, UpdateState::Updating | UpdateState::Checking) {
+            return;
+        }
+        self.update = UpdateState::Checking;
+        if announce {
+            self.set_toast("checking github for updates…", false);
+        }
+        let tx = self.upd_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(UpdMsg::Checked(update::pending(), announce));
+        });
+    }
+
+    /// Run `ytui update` in a child process: its cargo output must not land in
+    /// the alternate screen, and a failed build leaves the running binary be.
+    pub fn install_update(&mut self) {
+        if matches!(self.update, UpdateState::Updating | UpdateState::Checking) {
+            return;
+        }
+        self.update = UpdateState::Updating;
+        self.set_toast("updating: pulling and building, this takes a minute…", false);
+        let tx = self.upd_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(UpdMsg::Installed(run_update()));
+        });
+    }
+
+    fn on_update(&mut self, msg: UpdMsg) {
+        match msg {
+            UpdMsg::Checked(result, announce) => {
+                // A `u` pressed while the check ran still updates in one go.
+                let wanted = std::mem::take(&mut self.update_wanted);
+                let announce = announce || wanted;
+                match result {
+                    Ok(0) => {
+                        self.update = UpdateState::Current;
+                        if announce {
+                            self.set_toast("✔ already up to date", false);
+                        }
+                    }
+                    Ok(n) => {
+                        self.update = UpdateState::Behind(n);
+                        if wanted {
+                            self.install_update();
+                        } else if announce {
+                            self.set_toast(
+                                format!(
+                                    "{n} new commit{} on github, press u to update",
+                                    plural(n)
+                                ),
+                                false,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        self.update = UpdateState::Failed(e.clone());
+                        if announce {
+                            self.set_toast(e, true);
+                        }
+                    }
+                }
+            }
+            UpdMsg::Installed(Ok(msg)) => {
+                // The CLI also reports "already up to date" or "nothing to
+                // pull" with a success status; only an actual install needs a
+                // restart.
+                self.update = if msg.contains("✔ updated") {
+                    UpdateState::Installed
+                } else {
+                    UpdateState::Current
+                };
+                self.set_toast(msg, false);
+            }
+            UpdMsg::Installed(Err(e)) => {
+                self.update = UpdateState::Failed(e.clone());
+                self.set_toast(e, true);
+            }
+        }
+    }
+
     /// The engine cannot reach the toast directly, so it bumps a counter when
     /// it walks past a track YouTube would not serve.
     fn pick_up_notice(&mut self) {
@@ -369,13 +551,25 @@ impl App {
             return;
         }
         if self.help_open {
-            self.help_open = false;
+            // `u` works from inside the overlay so the update can be started
+            // while the status is being watched; everything else closes it.
+            if matches!(k.code, KeyCode::Char('u')) {
+                self.update_now();
+            } else {
+                self.help_open = false;
+            }
             return;
         }
 
         match k.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => self.should_quit = true,
-            KeyCode::Char('?') => self.help_open = true,
+            KeyCode::Char('?') => {
+                self.help_open = true;
+                // Every look at the help refreshes the status; the overlay
+                // opens at once and the heading spins until github answers.
+                self.check_updates(false);
+            }
+            KeyCode::Char('u') => self.update_now(),
             KeyCode::Char('/') => {
                 self.search_open = true;
                 self.search_input.clear();
@@ -480,6 +674,14 @@ impl App {
                     return;
                 }
                 if m.row == 0 {
+                    if let Some((x0, x1)) = self.update_hit {
+                        if m.column >= x0 && m.column <= x1 {
+                            // Behind installs, updating/installed has nothing
+                            // left to do; update_now guards those.
+                            self.update_now();
+                            return;
+                        }
+                    }
                     for (i, &(x0, x1)) in self.tab_hits.iter().enumerate() {
                         if m.column >= x0 && m.column <= x1 {
                             self.set_tab(i);
@@ -1006,6 +1208,42 @@ fn lock(p: &Arc<Mutex<PlayerState>>) -> std::sync::MutexGuard<'_, PlayerState> {
     p.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Runs the `ytui update` CLI and distills its output into one line for the
+/// toast: the `✔` result on success, the `✗` reason on failure.
+fn run_update() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot find the ytui binary: {e}"))?;
+    let out = Command::new(exe)
+        .arg("update")
+        .output()
+        .map_err(|e| format!("cannot run ytui update: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() {
+        Ok(marked_line(&stdout, '✔').unwrap_or_else(|| "✔ update finished".into()))
+    } else {
+        Err(marked_line(&stderr, '✗')
+            .or_else(|| marked_line(&stdout, '✗'))
+            .unwrap_or_else(|| "update failed".into()))
+    }
+}
+
+/// First line of `text` starting with `mark`, trimmed. The update CLI prefixes
+/// its result and error lines with ✔ and ✗.
+fn marked_line(text: &str, mark: char) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with(mark))
+        .map(str::to_string)
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
 fn which(bin: &str) -> bool {
     if let Ok(paths) = std::env::var("PATH") {
         for dir in paths.split(':') {
@@ -1015,4 +1253,37 @@ fn which(bin: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_cli_result_is_the_marked_line() {
+        let out = "· fetching github.com/tacamihail/ytui ...\n\
+                   · fast-forwarding 992bb7c -> 108d1f0\n\
+                   ✔ updated to 108d1f0 · ytui 0.3.17\n\
+                     restart ytui to use the new binary\n";
+        assert_eq!(
+            marked_line(out, '✔').as_deref(),
+            Some("✔ updated to 108d1f0 · ytui 0.3.17")
+        );
+        assert_eq!(marked_line(out, '✗'), None);
+        assert_eq!(
+            marked_line("✗ build failed, the installed binary was left alone", '✗').as_deref(),
+            Some("✗ build failed, the installed binary was left alone")
+        );
+    }
+
+    #[test]
+    fn update_labels_and_animation_agree() {
+        assert_eq!(UpdateState::Behind(1).label(), "1 commit behind");
+        assert_eq!(UpdateState::Behind(3).label(), "3 commits behind");
+        assert_eq!(UpdateState::Current.label(), "up to date");
+        assert!(UpdateState::Checking.animating());
+        assert!(UpdateState::Updating.animating());
+        assert!(!UpdateState::Idle.animating());
+        assert!(!UpdateState::Behind(2).animating());
+    }
 }

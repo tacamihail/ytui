@@ -1,6 +1,8 @@
 //! ratatui drawing. Catppuccin-ish palette that fits Omarchy/Hyprland setups.
 
-use crate::app::{App, PlayerBtn, TABS, TAB_LIKED, TAB_PLAYLISTS, TAB_QUEUE, TAB_SEARCH, TAB_SUBS};
+use crate::app::{
+    App, PlayerBtn, TABS, TAB_LIKED, TAB_PLAYLISTS, TAB_QUEUE, TAB_SEARCH, TAB_SUBS, UpdateState,
+};
 use crate::audio::{Repeat, Status};
 use crate::entry::{fmt_duration, fmt_f64, Entry};
 use crate::ytdl;
@@ -80,8 +82,26 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     app.tab_hits.clear();
+    app.update_hit = None;
+
+    // The account and the update chip own the right corner. The tabs get what
+    // is left and end in an ellipsis when they do not all fit, instead of
+    // running under the account or being cut mid-label at the screen edge.
+    let (account, account_color) = match &app.account {
+        Some(name) => (format!("◉ {name} "), GREEN),
+        None => ("○ not connected ".to_string(), DIM),
+    };
+    let chip = update_chip(app);
+    let account_w = account.width();
+    let chip_w = chip.as_ref().map_or(0, |(text, _)| text.width());
+    let show_account = account_w + 4 <= area.width as usize;
+    let show_chip = show_account && account_w + chip_w + 4 <= area.width as usize;
+    let right_w = (if show_account { account_w } else { 0 })
+        + (if show_chip { chip_w } else { 0 });
+    let tab_room = (area.width as usize).saturating_sub(right_w);
+
     let mut spans: Vec<Span> = vec![Span::raw(" ")];
-    let mut x: u16 = 1;
+    let mut x: usize = 1;
     for (i, name) in TABS.iter().enumerate() {
         let n = app.tab_count(i);
         let label = if n > 0 {
@@ -89,6 +109,22 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             format!(" {} {} ", i + 1, name)
         };
+        let w = label.width();
+        if x + w > tab_room {
+            // Keep one cell for the ellipsis; a zero-width tail needs none.
+            if x < tab_room {
+                spans.push(Span::styled("…", Style::new().fg(DIM)));
+            } else if let Some(last) = spans.last_mut() {
+                // The row is exactly full and the last cell is the gap after
+                // the previous tab: use it for the marker instead of dropping
+                // the fact that more tabs are hidden.
+                if last.content.as_ref() == " " {
+                    last.content = "…".into();
+                    last.style = Style::new().fg(DIM);
+                }
+            }
+            break;
+        }
         let style = if i == app.tab {
             Style::new()
                 .fg(Color::Rgb(30, 32, 48))
@@ -97,30 +133,73 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             Style::new().fg(DIM)
         };
-        let w = label.chars().count() as u16;
+        if x + w == tab_room && i + 1 < TABS.len() {
+            // The label fills the row exactly, but there are more tabs: trade
+            // the label's trailing padding cell for the ellipsis.
+            let cut = format!("{}…", label.trim_end());
+            let cw = cut.width();
+            spans.push(Span::styled(cut, style));
+            app.tab_hits.push((x as u16, (x + cw - 1) as u16));
+            break;
+        }
         spans.push(Span::styled(label, style));
-        app.tab_hits.push((x, x + w - 1));
+        app.tab_hits.push((x as u16, (x + w - 1) as u16));
         x += w + 1;
         spans.push(Span::raw(" "));
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
-
-    let (text, color) = match &app.account {
-        Some(name) => (format!("◉ {name} "), GREEN),
-        None => ("○ not connected ".to_string(), DIM),
+    let tab_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: tab_room.min(area.width as usize) as u16,
+        height: 1,
     };
-    let w = text.chars().count() as u16;
-    if area.width > w + x + 1 {
-        let r = Rect {
-            x: area.x + area.width - w,
-            y: area.y,
-            width: w,
-            height: 1,
-        };
+    f.render_widget(Paragraph::new(Line::from(spans)), tab_area);
+
+    let mut right = area.x + area.width;
+    if show_account {
+        right -= account_w as u16;
         f.render_widget(
-            Paragraph::new(Span::styled(text, Style::new().fg(color))),
-            r,
+            Paragraph::new(Span::styled(account, Style::new().fg(account_color))),
+            Rect {
+                x: right,
+                y: area.y,
+                width: account_w as u16,
+                height: 1,
+            },
         );
+    }
+    if show_chip {
+        if let Some((text, color)) = chip {
+            right -= text.width() as u16;
+            let w = text.width() as u16;
+            f.render_widget(
+                Paragraph::new(Span::styled(text, Style::new().fg(color))),
+                Rect {
+                    x: right,
+                    y: area.y,
+                    width: w,
+                    height: 1,
+                },
+            );
+            app.update_hit = Some((right, right + w - 1));
+        }
+    }
+}
+
+/// The update chip on the tabs row, when there is something to do or watch.
+/// Checking is silent here; it only takes space once hidden tabs would move.
+fn update_chip(app: &App) -> Option<(String, Color)> {
+    match &app.update {
+        UpdateState::Behind(n) => {
+            let commits = if *n == 1 { "commit" } else { "commits" };
+            Some((format!(" ↑ {n} {commits} "), YELLOW))
+        }
+        UpdateState::Updating => Some((
+            format!(" {} updating ", spinner(app.anim.elapsed())),
+            ACCENT,
+        )),
+        UpdateState::Installed => Some((" ↻ restart ytui ".into(), GREEN)),
+        _ => None,
     }
 }
 
@@ -171,7 +250,10 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
             ))
         } else {
             Line::from(Span::styled(
-                " stopped. / to search, enter plays the whole list, ? for help",
+                truncate(
+                    " stopped. / to search, enter plays the whole list, ? for help",
+                    w,
+                ),
                 Style::new().fg(DIM),
             ))
         };
@@ -182,7 +264,10 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
             ))
         } else {
             Line::from(Span::styled(
-                " not connected. Run ytui auth <cookies.txt> for liked music, playlists and subscriptions",
+                truncate(
+                    " not connected. Run ytui auth <cookies.txt> for liked music, playlists and subscriptions",
+                    w,
+                ),
                 Style::new().fg(YELLOW),
             ))
         };
@@ -344,6 +429,8 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!(" {} ", TABS[app.tab])
     };
+    // A long playlist name would otherwise be cut by the border without a mark.
+    let title = truncate(&title, area.width.saturating_sub(4) as usize);
     let block = Block::bordered()
         .border_style(Style::new().fg(BORDER))
         .title(Span::styled(&title, Style::new().fg(ACCENT)));
@@ -375,9 +462,12 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     ("  ", Style::new().fg(DIM))
                 };
+                // The queue has no artist/time columns, so clamp the title to
+                // the row and mark the cut instead of letting the border crop it.
+                let title = truncate(title, inner.width.saturating_sub(2) as usize);
                 ListItem::new(Line::from(vec![
                     Span::styled(marker, mstyle),
-                    Span::styled(title.clone(), Style::new().fg(FG)),
+                    Span::styled(title, Style::new().fg(FG)),
                 ]))
             })
             .collect();
@@ -631,6 +721,9 @@ fn render_items(f: &mut Frame, app: &mut App, items: Vec<ListItem>, selidx: usiz
 }
 
 fn empty_hint(f: &mut Frame, inner: Rect, line: Line) {
+    // The hint is centred, so a long one would be cut on both sides; clamp it
+    // to the width and mark the cut instead.
+    let line = clamp_line(line, inner.width as usize);
     f.render_widget(Paragraph::new(line).alignment(Alignment::Center), inner);
 }
 
@@ -650,10 +743,12 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             format!(" {spin} fetching {what}…")
         };
+        let detail = truncate(&detail, area.width as usize);
         Line::from(Span::styled(detail, Style::new().fg(ACCENT)))
     } else if let Some((msg, err)) = toast {
+        let msg = truncate(&format!(" {msg}"), area.width as usize);
         Line::from(Span::styled(
-            format!(" {msg}"),
+            msg,
             Style::new().fg(if err { RED } else { GREEN }),
         ))
     } else {
@@ -664,17 +759,18 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
             fmt_duration(st.dur.max(0.0) as u64)
         };
         let count = app.tab_count(app.tab);
-        Line::from(Span::styled(
-            format!(" ytui · {} · {} tracks · {}", TABS[app.tab], count, dur),
-            Style::new().fg(DIM),
-        ))
+        let text = truncate(
+            &format!(" ytui · {} · {} tracks · {}", TABS[app.tab], count, dur),
+            area.width as usize,
+        );
+        Line::from(Span::styled(text, Style::new().fg(DIM)))
     };
     f.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_hints(f: &mut Frame, _app: &App, area: Rect) {
     let hints = " 1-6 tabs · / search · enter play list · a queue · space pause · ←→/h l seek · , . 30s · [ ] vol · <> track · s shuffle · R repeat · m mute · x stop · r refresh · ? help · q quit";
-    let s: String = hints.chars().take(area.width as usize).collect();
+    let s = truncate(hints, area.width as usize);
     f.render_widget(Paragraph::new(Span::styled(s, Style::new().fg(DIM))), area);
 }
 
@@ -700,20 +796,41 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
-    let (w, h) = (68u16, 28u16);
+fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
+    // The updates section (heading plus one key row) sits under the 26 key-map
+    // rows, plus the border, so it still fits a 30-row terminal.
+    let (w, h) = (68u16, 30u16);
     let r = centered_rect(w.min(area.width), h.min(area.height), area);
     f.render_widget(Clear, r);
     let b = Block::bordered()
         .border_style(Style::new().fg(ACCENT))
         .title(Span::styled(
-            " ytui help, press any key to close ",
+            truncate(
+                &format!(
+                    " ytui {} help · u updates · any other key closes ",
+                    env!("CARGO_PKG_VERSION")
+                ),
+                w.saturating_sub(4) as usize,
+            ),
             Style::new().fg(ACCENT),
         ));
     let inner = b.inner(r);
     f.render_widget(b, r);
 
-    let rows: [(&str, &str); 26] = [
+    // The check is lazy and runs while the help is open, so the heading shows
+    // the same wheel the status line uses instead of freezing on "checking".
+    let update_label = match &app.update {
+        UpdateState::Checking => format!("{} checking…", spinner(app.anim.elapsed())),
+        UpdateState::Updating => format!("{} updating…", spinner(app.anim.elapsed())),
+        other => other.label(),
+    };
+    let upd_header = format!("updates · {update_label}");
+
+    let rows: Vec<(&str, &str)> = vec![
+        // Updates first: the box is clamped on short terminals, and the version
+        // and update state are what the overlay is asked about most often.
+        (upd_header.as_str(), ""),
+        ("u", "install update or check again"),
         ("navigation", ""),
         ("1-6 / Tab / Shift+Tab", "switch tabs"),
         ("↑↓ / j k / wheel", "move selection"),
@@ -756,6 +873,8 @@ fn draw_help(f: &mut Frame, _app: &mut App, area: Rect) {
                 ])
             }
         })
+        // The box is clamped to a narrow terminal too; mark a clipped row.
+        .map(|line| clamp_line(line, inner.width as usize))
         .collect();
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -769,17 +888,49 @@ fn truncate(s: &str, max: usize) -> String {
     }
     // Leave one cell for the ellipsis and measure in cells rather than chars,
     // so a wide glyph in a title does not push the rest of the line along.
+    let mut out = take_cells(s, max - 1);
+    out.push('…');
+    out
+}
+
+/// Clamp a styled line to `max` cells, appending an ellipsis when anything had
+/// to be dropped. Keeps each surviving span's style, so a loading hint keeps
+/// its coloured wheel.
+fn clamp_line(line: Line, max: usize) -> Line {
+    if line.width() <= max {
+        return line;
+    }
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for span in line.spans {
+        let w = span.content.width();
+        if used + w <= max.saturating_sub(1) {
+            used += w;
+            spans.push(span);
+            continue;
+        }
+        let room = max.saturating_sub(used + 1);
+        if room > 0 {
+            spans.push(Span::styled(take_cells(&span.content, room), span.style));
+        }
+        break;
+    }
+    spans.push(Span::styled("…", Style::new().fg(DIM)));
+    Line::from(spans)
+}
+
+/// The longest prefix of `s` that fits in `max` cells.
+fn take_cells(s: &str, max: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     for ch in s.chars() {
         let w = UnicodeWidthChar::width(ch).unwrap_or(1);
-        if used + w + 1 > max {
+        if used + w > max {
             break;
         }
         out.push(ch);
         used += w;
     }
-    out.push('…');
     out
 }
 
@@ -962,6 +1113,22 @@ mod tests {
         assert_eq!(window(480, 499, 20, 500), (480, 500));
         assert_eq!(window(0, 0, 20, 5), (0, 5));
         assert_eq!(window(0, 0, 0, 0), (0, 0));
+    }
+
+    /// A row that does not fit must end in an ellipsis, not be cut mid-word,
+    /// and it must keep the styles of the spans that survive.
+    #[test]
+    fn overlong_lines_end_in_an_ellipsis() {
+        let line = Line::from(vec![
+            Span::styled("abc", Style::new().fg(ACCENT)),
+            Span::styled("defgh", Style::new().fg(FG)),
+        ]);
+        let out = clamp_line(line, 6);
+        let text: String = out.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "abcde…");
+        assert_eq!(out.width(), 6);
+        assert_eq!(out.spans[0].style.fg, Some(ACCENT));
+        assert_eq!(clamp_line(Line::from("short"), 10).width(), 5);
     }
 }
 

@@ -84,7 +84,10 @@ To update later, run `ytui update`: it fetches the checkout, fast-forwards it
 and rebuilds `ytui.bin`. It refuses to touch a checkout with uncommitted
 changes or local commits, and `ytui update --check` only says whether newer
 commits exist. The checkout is the one `install.sh` ran from; set `YTUI_SRC` to
-point elsewhere.
+point elsewhere. Inside the player, `?` opens help and checks github; `u`
+installs the pending update (or checks again when there is none), and it works
+from inside the help overlay too. When commits are waiting, a clickable
+`↑ n commits` chip appears next to the account name.
 
 To build it yourself:
 
@@ -202,7 +205,8 @@ URL) and `r` refreshes.
 `space` or `p` pauses, `left`/`right` seek 5 seconds, `,` and `.` seek 30,
 `[` `]` change the volume, `m` mutes, `s` shuffles, `R` cycles repeat, `<` `>`
 skip tracks, `x` stops, `d` deletes an entry, `c` copies the link, `?` shows
-the help and `q` quits.
+the help (with the version and an update check), `u` installs an update (or
+checks when there is none), and `q` quits.
 
 The mouse works as well: click a tab, click a row to select it, double-click
 to play, click the progress bar to seek, and click the buttons in the player.

@@ -36,6 +36,22 @@ pub fn cli(args: &[String]) -> i32 {
     }
 }
 
+/// Commits on github `main` that the checkout does not have yet; `0` means up
+/// to date. Fetches first, so call it from a worker thread: it needs the
+/// network. `Err` when there is no checkout to compare or git fails.
+pub fn pending() -> Result<usize, String> {
+    let dir = checkout()?;
+    git(&dir, &["fetch", "--quiet", "origin", BRANCH])?;
+    let count = git(
+        &dir,
+        &["rev-list", "--count", &format!("HEAD..origin/{BRANCH}")],
+    )?;
+    count
+        .trim()
+        .parse()
+        .map_err(|e| format!("git rev-list returned {count:?}: {e}"))
+}
+
 fn run(args: &[String]) -> Result<(), String> {
     let mut check = false;
     let mut force = false;
@@ -51,17 +67,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
 
-    let dir = source_dir().ok_or(
-        "no source checkout recorded\n  \
-         run ./install.sh from the ytui checkout once, or set YTUI_SRC",
-    )?;
-    if !dir.join("Cargo.toml").is_file() || !dir.join(".git").exists() {
-        return Err(format!(
-            "{} is not the ytui checkout\n  expected Cargo.toml and .git there, \
-             set YTUI_SRC or rerun install.sh",
-            dir.display()
-        ));
-    }
+    let dir = checkout()?;
     println!("· checkout {}", dir.display());
 
     let remote = format!("origin/{BRANCH}");
@@ -200,6 +206,22 @@ fn build_and_install(dir: &Path, sha: &str, installer_changed: Option<bool>) -> 
     }
     println!("  restart ytui to use the new binary");
     Ok(())
+}
+
+/// The recorded source checkout, validated as the ytui repo.
+fn checkout() -> Result<PathBuf, String> {
+    let dir = source_dir().ok_or(
+        "no source checkout recorded\n  \
+         run ./install.sh from the ytui checkout once, or set YTUI_SRC",
+    )?;
+    if !dir.join("Cargo.toml").is_file() || !dir.join(".git").exists() {
+        return Err(format!(
+            "{} is not the ytui checkout\n  expected Cargo.toml and .git there, \
+             set YTUI_SRC or rerun install.sh",
+            dir.display()
+        ));
+    }
+    Ok(dir)
 }
 
 /// `$YTUI_SRC`, then the path `install.sh` saved, then the current directory.
