@@ -5,6 +5,7 @@ use crate::auth;
 use crate::config::{self, Config};
 use crate::entry::{fmt_f64, Entry};
 use crate::listcache;
+use crate::media;
 use crate::remote;
 use crate::ui;
 use crate::update;
@@ -170,6 +171,8 @@ pub struct App {
     upd_rx: Receiver<UpdMsg>,
     pub cmd_tx: Sender<Cmd>,
     pub fetch_tx: Sender<Msg>,
+    /// macOS Now Playing / media keys; a no-op elsewhere.
+    media: media::Media,
     pub account: Option<String>,
     pub last_click: Option<(Instant, usize)>,
     // Geometry captured while drawing, used for mouse hit-testing.
@@ -237,6 +240,7 @@ impl App {
             upd_rx,
             cmd_tx: player.tx_clone(),
             fetch_tx,
+            media: media::Media::new(player.tx_clone()),
             account,
             last_click: None,
             tab_hits: Vec::new(),
@@ -268,6 +272,7 @@ impl App {
             app.sync_queue_cache();
             app.pick_up_notice();
             app.poll_scan();
+            app.sync_media();
             terminal.draw(|f| ui::draw(f, app))?;
             // While a list is streaming in, a track is being resolved or the
             // selected row is scrolling its title, redraw often enough that
@@ -312,6 +317,19 @@ impl App {
                 return Ok(());
             }
         }
+    }
+
+    /// Keep the system Now Playing entry in step with the player, and let
+    /// macOS deliver any pending media-key events. Publishing only happens
+    /// when a field changed, so calling this every frame is cheap.
+    fn sync_media(&mut self) {
+        let st = lock(&self.player);
+        self.media.sync(&st);
+    }
+
+    /// Remove the Now Playing entry before the terminal is restored.
+    pub fn shutdown(&mut self) {
+        self.media.shutdown();
     }
 
     fn sync_queue_cache(&mut self) {

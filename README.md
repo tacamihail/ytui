@@ -259,6 +259,17 @@ New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.local\bin"
 Copy-Item target\release\ytui.exe "$env:USERPROFILE\.local\bin\"
 ```
 
+### macOS
+
+ytui publishes the current track to the system Now Playing panel, so the media
+keys, Control Center, the Touch Bar and headphone buttons control it like any
+other player. Title, channel, artwork and progress come from the track ytui is
+playing; play/pause, seek, next and previous work in both directions. No Dock
+icon or menu bar item appears.
+
+If the keys still go to Music.app, allow the terminal that launched ytui under
+**System Settings → Privacy & Security → Media & Apple Music**.
+
 ### WSL
 
 WSL cannot discover a resolver on your LAN: it only sees the WSL virtual

@@ -42,6 +42,15 @@ members = ["crates/resolve", "crates/resolver"]
 default-members = ["."]
 resolver = "2"
 
+# macOS Now Playing / media keys. Kept out of the Linux and WSL builds: cpal
+# talks to CoreAudio there, so nothing else is Apple-specific.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-media-player = "0.3"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSImage"] }
+block2 = "0.6"
+
 [profile.release]
 opt-level = 3
 lto = true

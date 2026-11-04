@@ -9,6 +9,7 @@ mod auth;
 mod config;
 mod entry;
 mod listcache;
+mod media;
 mod remote;
 mod ui;
 mod update;
@@ -90,6 +91,7 @@ fn run_tui() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let res = app::App::run(&mut terminal, &mut app, fetch_rx);
+    app.shutdown();
 
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, DisableFocusChange);
