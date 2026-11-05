@@ -209,6 +209,19 @@ fn build_and_install(dir: &Path, sha: &str, installer_changed: Option<bool>) -> 
     let version = version_at(dir).unwrap_or_else(|| version().to_string());
     println!("✔ updated to {} · ytui {version}", short(sha));
     println!("  installed -> {}", dst.display());
+    #[cfg(target_os = "macos")]
+    {
+        // The app bundle is what carries the name and icon into Now Playing and
+        // the code signature is what gives the process its identity; refresh
+        // both after replacing the executable.
+        match app_bundle_of(&dst) {
+            Some(app) => sign_and_register(app),
+            None => println!(
+                "  ! the macOS app bundle is missing; rerun ./install.sh to get \
+                 the Now Playing panel and icon"
+            ),
+        }
+    }
     if installer_changed == Some(true) {
         println!(
             "  the installer changed too, rerun {INSTALLER} to refresh yt-dlp, deno and the launcher"
@@ -216,6 +229,77 @@ fn build_and_install(dir: &Path, sha: &str, installer_changed: Option<bool>) -> 
     }
     println!("  restart ytui to use the new binary");
     Ok(())
+}
+
+/// Where the installer puts the real binary; `$YTUI_BIN` overrides it.
+fn bin_path() -> PathBuf {
+    if let Ok(v) = std::env::var("YTUI_BIN") {
+        let v = v.trim();
+        if !v.is_empty() {
+            return PathBuf::from(v);
+        }
+    }
+    platform_bin_path()
+}
+
+/// macOS runs the copy inside the app bundle, so Now Playing, Control Center
+/// and the Touch Bar can show the ytui name and icon. Installs made before the
+/// bundle existed keep their plain binary and get a warning after updating.
+#[cfg(target_os = "macos")]
+fn platform_bin_path() -> PathBuf {
+    let app = app_bundle_path();
+    if app.join("Contents/Info.plist").is_file() {
+        app.join("Contents/MacOS/ytui")
+    } else {
+        config::home().join(".local/bin/ytui.bin")
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_bin_path() -> PathBuf {
+    // install.ps1 puts `ytui.exe` in `%USERPROFILE%\.local\bin`; install.sh
+    // puts `ytui.bin` next to the launcher.
+    #[cfg(windows)]
+    return config::home().join(format!(".local/bin/ytui{}", std::env::consts::EXE_SUFFIX));
+    #[cfg(not(windows))]
+    config::home().join(".local/bin/ytui.bin")
+}
+
+#[cfg(target_os = "macos")]
+fn app_bundle_path() -> PathBuf {
+    config::home().join(".local/lib/ytui/ytui.app")
+}
+
+/// `.../ytui.app/Contents/MacOS/ytui` -> `.../ytui.app`.
+#[cfg(target_os = "macos")]
+fn app_bundle_of(exe: &Path) -> Option<&Path> {
+    let macos = exe.parent()?;
+    if macos.file_name()?.to_str()? != "MacOS" {
+        return None;
+    }
+    let contents = macos.parent()?;
+    if contents.file_name()?.to_str()? != "Contents" {
+        return None;
+    }
+    let app = contents.parent()?;
+    (app.extension()?.to_str()? == "app").then_some(app)
+}
+
+#[cfg(target_os = "macos")]
+fn sign_and_register(app: &Path) {
+    let signed = Command::new("codesign")
+        .args(["-f", "-s", "-", "-i", "dev.tacamihail.ytui"])
+        .arg(app)
+        .status();
+    match signed {
+        Ok(status) if status.success() => {}
+        _ => println!(
+            "  ! could not re-sign {}; Now Playing may show an old name",
+            app.display()
+        ),
+    }
+    const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+    let _ = Command::new(LSREGISTER).arg("-f").arg(app).status();
 }
 
 /// The recorded source checkout, validated as the ytui repo.
@@ -281,20 +365,6 @@ fn replace_binary(tmp: &Path, dst: &Path) -> std::io::Result<()> {
     {
         fs::rename(tmp, dst)
     }
-}
-
-/// Where the installer puts the real binary; `$YTUI_BIN` overrides it.
-fn bin_path() -> PathBuf {
-    if let Ok(v) = std::env::var("YTUI_BIN") {
-        let v = v.trim();
-        if !v.is_empty() {
-            return PathBuf::from(v);
-        }
-    }
-    #[cfg(windows)]
-    return config::home().join(format!(".local/bin/ytui{}", std::env::consts::EXE_SUFFIX));
-    #[cfg(not(windows))]
-    config::home().join(".local/bin/ytui.bin")
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -416,5 +486,16 @@ mod tests {
             parse_package_version("[dependencies.serde]\nversion = \"9.9.9\"\n"),
             None
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_app_bundle_is_found_from_the_executable_path() {
+        let exe = Path::new("/Users/me/.local/lib/ytui/ytui.app/Contents/MacOS/ytui");
+        assert_eq!(
+            app_bundle_of(exe),
+            Some(Path::new("/Users/me/.local/lib/ytui/ytui.app"))
+        );
+        assert!(app_bundle_of(Path::new("/Users/me/.local/bin/ytui.bin")).is_none());
     }
 }

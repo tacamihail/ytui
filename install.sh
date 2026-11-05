@@ -8,6 +8,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DST="$HOME/.local/bin/ytui"
 BIN_REAL="$HOME/.local/bin/ytui.bin"
+APP_BUNDLE="$HOME/.local/lib/ytui/ytui.app"
 CFG_DIR="$HOME/.config/ytui"
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -274,17 +275,70 @@ ok "rustc $(rustc --version | cut -d' ' -f2) · cargo $(cargo --version | cut -d
 # --- build -------------------------------------------------------------------
 info "building ytui (the first build downloads crates, 1-3 min)"
 (cd "$DIR" && cargo build --release)
-# `install -D` is GNU-only, and the release build has to land next to the
-# launcher on macOS too.
-mkdir -p "$(dirname "$BIN_REAL")"
-cp "$DIR/target/release/ytui" "$BIN_REAL"
-chmod 755 "$BIN_REAL"
+
+if [[ "$OS" == Darwin ]]; then
+  # macOS takes the app name and icon shown in Now Playing, Control Center and
+  # the Touch Bar from an app bundle, and the process identity from the code
+  # signature. A bare binary is an unnamed process with a generic icon, so wrap
+  # it in a minimal agent bundle and ad-hoc sign it (no certificate needed).
+  VERSION="$(awk -F'"' '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version *=/{print $2; exit}' \
+    "$DIR/Cargo.toml")"
+  info "creating the ytui app bundle"
+  rm -rf "$APP_BUNDLE"
+  mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+  cp "$DIR/target/release/ytui" "$APP_BUNDLE/Contents/MacOS/ytui"
+  chmod 755 "$APP_BUNDLE/Contents/MacOS/ytui"
+  cp "$DIR/assets/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+  cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleDisplayName</key><string>ytui</string>
+  <key>CFBundleExecutable</key><string>ytui</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIdentifier</key><string>dev.tacamihail.ytui</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>ytui</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION:-0.0.0}</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+  if codesign -f -s - -i dev.tacamihail.ytui "$APP_BUNDLE" >/dev/null 2>&1; then
+    ok "signed the bundle (ad-hoc, dev.tacamihail.ytui)"
+  else
+    warn "could not ad-hoc sign the bundle; Now Playing may show a generic name"
+  fi
+  # Let LaunchServices pick up the new name and icon.
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -f "$APP_BUNDLE" >/dev/null 2>&1 || true
+else
+  # `install -D` is GNU-only, and the release build has to land next to the
+  # launcher on Linux too.
+  mkdir -p "$(dirname "$BIN_REAL")"
+  cp "$DIR/target/release/ytui" "$BIN_REAL"
+  chmod 755 "$BIN_REAL"
+fi
 
 # Launcher, not the binary: on WSL the ALSA pulse plugin may only exist as an
 # extracted copy under ~/.local/alsa, so point ALSA_PLUGIN_DIR at it before
 # exec. No-op on normal Linux, where the system plugin is found anyway.
 cat > "$BIN_DST" <<'LAUNCHER'
 #!/bin/sh
+# macOS: run the copy inside ytui.app. The bundle supplies the name and icon
+# that Now Playing, Control Center and the Touch Bar show, and its ad-hoc
+# signature gives the process a stable identity.
+if [ "$(uname -s)" = Darwin ]; then
+    app="$HOME/.local/lib/ytui/ytui.app/Contents/MacOS/ytui"
+    if [ -x "$app" ]; then
+        exec "$app" "$@"
+    fi
+fi
+
 # ytui launcher: locate the WSL ALSA pulse plugin if it was extracted locally.
 if [ -z "${ALSA_PLUGIN_DIR:-}" ]; then
     for d in \
@@ -318,7 +372,11 @@ dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd)
 exec "$dir/ytui.bin" "$@"
 LAUNCHER
 chmod 755 "$BIN_DST"
-ok "installed -> $BIN_DST (+ $BIN_REAL)"
+if [[ "$OS" == Darwin ]]; then
+  ok "installed -> $BIN_DST (runs $APP_BUNDLE)"
+else
+  ok "installed -> $BIN_DST (+ $BIN_REAL)"
+fi
 
 # --- config ------------------------------------------------------------------
 mkdir -p "$CFG_DIR"

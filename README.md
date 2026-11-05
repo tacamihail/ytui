@@ -86,6 +86,9 @@ installs `~/.local/bin/ytui`. Verify it:
 ytui doctor
 ```
 
+On macOS the launcher runs the binary from a minimal agent bundle at
+`~/.local/lib/ytui/ytui.app` instead (see [macOS](#macos)).
+
 Windows runs the player natively, without WSL, so resolver discovery can see
 the LAN and audio goes through WASAPI. In PowerShell:
 
@@ -239,7 +242,9 @@ ytui update --check  # only report whether one exists
 The version is the `[package] version` in `Cargo.toml`; commits that do not
 change it are not installed. `ytui update` refuses to touch a checkout with
 uncommitted changes or local commits. It updates the checkout the installer ran
-from; set `YTUI_SRC` to point elsewhere. Inside the player, `?` checks github
+from; set `YTUI_SRC` to point elsewhere. On macOS the updater replaces the
+binary inside the `ytui.app` bundle and re-signs it, so Now Playing keeps its
+name and icon. Inside the player, `?` checks github
 and `u` installs a newer version; a clickable `↑ 0.4.0` chip appears when one
 is waiting.
 
@@ -250,6 +255,10 @@ cargo build --release
 mkdir -p ~/.local/bin
 cp target/release/ytui ~/.local/bin/ytui
 ```
+
+On macOS prefer `./install.sh`: it also creates the app bundle described in
+[macOS](#macos). A binary copied out of the bundle works, but the system shows
+it as an unnamed process with a generic icon.
 
 On Windows the same manual build is:
 
@@ -266,6 +275,19 @@ keys, Control Center, the Touch Bar and headphone buttons control it like any
 other player. Title, channel, artwork and progress come from the track ytui is
 playing; play/pause, seek, next and previous work in both directions. No Dock
 icon or menu bar item appears.
+
+The macOS build runs from a minimal agent bundle, `~/.local/lib/ytui/ytui.app`
+(`LSUIElement`, ad-hoc signed as `dev.tacamihail.ytui`). The bundle is what
+gives the process its name and YouTube Music-style icon in Now Playing, Control
+Center, the Touch Bar and the app lists; the signature gives it a stable
+identity that persists across launches. `install.sh` creates the bundle and
+registers it with LaunchServices, and `ytui update` re-signs it after replacing
+the binary. If the Touch Bar keeps showing a cached icon, restart its agent (it
+relaunches the next time media plays):
+
+```bash
+killall NowPlayingTouchUI
+```
 
 If the keys still go to Music.app, allow the terminal that launched ytui under
 **System Settings → Privacy & Security → Media & Apple Music**.

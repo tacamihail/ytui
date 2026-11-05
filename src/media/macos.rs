@@ -21,9 +21,11 @@ use objc2_foundation::{
     NSSize,
 };
 use objc2_media_player::{
-    MPMediaItemArtwork, MPMediaItemPropertyAlbumTitle, MPMediaItemPropertyArtist,
-    MPMediaItemPropertyArtwork, MPMediaItemPropertyPlaybackDuration, MPMediaItemPropertyTitle,
-    MPNowPlayingInfoCenter, MPNowPlayingInfoPropertyElapsedPlaybackTime,
+    MPMediaItemArtwork, MPMediaItemPropertyAlbumArtist, MPMediaItemPropertyAlbumTitle,
+    MPMediaItemPropertyArtist, MPMediaItemPropertyArtwork, MPMediaItemPropertyPlaybackDuration,
+    MPMediaItemPropertyTitle, MPNowPlayingInfoCenter, MPNowPlayingInfoMediaType,
+    MPNowPlayingInfoPropertyElapsedPlaybackTime, MPNowPlayingInfoPropertyExternalContentIdentifier,
+    MPNowPlayingInfoPropertyIsLiveStream, MPNowPlayingInfoPropertyMediaType,
     MPNowPlayingInfoPropertyPlaybackRate, MPNowPlayingPlaybackState, MPRemoteCommandCenter,
     MPRemoteCommandEvent, MPRemoteCommandHandlerStatus,
 };
@@ -134,17 +136,26 @@ impl Session {
             let title = NSString::from_str(&now.title);
             let artist = NSString::from_str(&now.channel);
             let album = NSString::from_str(ALBUM);
+            let external = NSString::from_str(&now.url);
             let duration = NSNumber::new_f64(now.dur);
             let elapsed = NSNumber::new_f64(now.pos);
             let playing = now.status == Status::Playing;
             let rate = NSNumber::new_f64(if playing { 1.0 } else { 0.0 });
+            let media_type = NSNumber::new_u64(MPNowPlayingInfoMediaType::Audio.0 as u64);
+            let live = NSNumber::new_bool(false);
 
             let _: () = msg_send![&*dict, setObject: &*title, forKey: MPMediaItemPropertyTitle];
             let _: () = msg_send![&*dict, setObject: &*artist, forKey: MPMediaItemPropertyArtist];
+            let _: () = msg_send![&*dict, setObject: &*artist, forKey: MPMediaItemPropertyAlbumArtist];
             let _: () = msg_send![&*dict, setObject: &*album, forKey: MPMediaItemPropertyAlbumTitle];
             let _: () = msg_send![&*dict, setObject: &*duration, forKey: MPMediaItemPropertyPlaybackDuration];
             let _: () = msg_send![&*dict, setObject: &*elapsed, forKey: MPNowPlayingInfoPropertyElapsedPlaybackTime];
             let _: () = msg_send![&*dict, setObject: &*rate, forKey: MPNowPlayingInfoPropertyPlaybackRate];
+            let _: () = msg_send![&*dict, setObject: &*media_type, forKey: MPNowPlayingInfoPropertyMediaType];
+            let _: () = msg_send![&*dict, setObject: &*live, forKey: MPNowPlayingInfoPropertyIsLiveStream];
+            // The Touch Bar/Control Center use this to associate artwork and
+            // metadata with the same remote content item.
+            let _: () = msg_send![&*dict, setObject: &*external, forKey: MPNowPlayingInfoPropertyExternalContentIdentifier];
             if let Some(art) = &self.artwork {
                 let _: () = msg_send![&*dict, setObject: &**art, forKey: MPMediaItemPropertyArtwork];
             }
@@ -255,7 +266,7 @@ fn artwork_from(data: &[u8]) -> Option<Retained<MPMediaItemArtwork>> {
         // The block owns the image for as long as the artwork object lives,
         // which is what lets the request handler hand out a bare pointer.
         let image = image.clone();
-        let handler = RcBlock::new(move |_size: NSSize| -> NonNull<NSImage> {
+        let handler = RcBlock::new(move |_requested: NSSize| -> NonNull<NSImage> {
             NonNull::from(image.as_ref())
         });
         Some(MPMediaItemArtwork::initWithBoundsSize_requestHandler(
