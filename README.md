@@ -111,6 +111,9 @@ curl -fsSLO https://raw.githubusercontent.com/tacamihail/ytui/main/install-resol
 bash install-resolver.sh --from-git
 ```
 
+Both options need `yt-dlp` and `deno` on the server. The script installs them;
+`cargo install` does not.
+
 Launch it on a trusted LAN or tailnet without a token:
 
 ```bash
