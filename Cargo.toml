@@ -25,6 +25,11 @@ libc = "0.2"
 # when a title contains wide characters.
 unicode-width = "0.2"
 
+# Standalone crate. Without this, cargo walks up the directory tree looking for
+# a workspace root and trips over any Cargo.toml in a parent directory (for
+# example an unrelated or half-finished one in ~/Downloads).
+[workspace]
+
 [profile.release]
 opt-level = 3
 lto = true
