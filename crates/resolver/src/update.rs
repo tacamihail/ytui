@@ -12,8 +12,8 @@ use std::process::Command;
 use crate::service;
 
 const REPO: &str = "https://github.com/tacamihail/ytui";
-const VERSION_URL: &str =
-    "https://raw.githubusercontent.com/tacamihail/ytui/main/crates/resolver/Cargo.toml";
+const COMMITS_URL: &str = "https://api.github.com/repos/tacamihail/ytui/commits/main";
+const MANIFEST_PATH: &str = "crates/resolver/Cargo.toml";
 
 const USAGE: &str = "\
 ytui-resolver update - reinstall from github
@@ -106,17 +106,37 @@ fn install_root(exe: &Path) -> Result<PathBuf, String> {
 }
 
 /// Reads the resolver version from github. Uses curl so the server binary does
-/// not carry an HTTP/TLS stack just for update checks.
+/// not carry an HTTP/TLS stack just for update checks. The commit sha comes
+/// from the API first: raw URLs for a branch are cached for minutes after a
+/// push, but a raw URL pinned to a sha is immutable.
 fn remote_version() -> Result<String, String> {
+    let sha = head_sha()?;
+    let url = format!("https://raw.githubusercontent.com/tacamihail/ytui/{sha}/{MANIFEST_PATH}");
+    let text = curl(&url)?;
+    parse_version(&text).ok_or_else(|| "cannot parse the version from github".into())
+}
+
+fn head_sha() -> Result<String, String> {
+    let body = curl(COMMITS_URL)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("bad github response: {e}"))?;
+    value
+        .get("sha")
+        .and_then(|s| s.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "github did not report a commit for main".into())
+}
+
+fn curl(url: &str) -> Result<String, String> {
     let out = Command::new("curl")
-        .args(["-fsSL", "--max-time", "15", VERSION_URL])
+        .args(["-fsSL", "--max-time", "15"])
+        .arg(url)
         .output()
         .map_err(|e| format!("cannot run curl: {e}\n  check for updates with: cargo install --git {REPO} ytui-resolver --force"))?;
     if !out.status.success() {
         return Err("cannot read the version from github (no network?)".into());
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    parse_version(&text).ok_or_else(|| "cannot parse the version from github".into())
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// First `version = "x.y.z"` line of a Cargo.toml: the package one comes
