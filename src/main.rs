@@ -255,11 +255,24 @@ fn discover(args: &[String]) -> i32 {
     let mut save = false;
     let mut quiet = false;
     let mut timeout = 10u64;
+    let mut url: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--save" => save = true,
             "-q" | "--quiet" => quiet = true,
+            "--url" => {
+                i += 1;
+                match args.get(i) {
+                    Some(u) if u.starts_with("http://") || u.starts_with("https://") => {
+                        url = Some(u.clone());
+                    }
+                    _ => {
+                        eprintln!("--url needs an http:// or https:// address");
+                        return 2;
+                    }
+                }
+            }
             "--timeout" => {
                 i += 1;
                 match args.get(i).and_then(|s| s.parse::<u64>().ok()) {
@@ -276,6 +289,10 @@ fn discover(args: &[String]) -> i32 {
             }
         }
         i += 1;
+    }
+
+    if let Some(url) = url {
+        return use_url(&url, save, quiet);
     }
 
     if !quiet {
@@ -338,6 +355,47 @@ fn discover(args: &[String]) -> i32 {
     0
 }
 
+/// Checks a resolver URL given by hand. The scan only sees directly attached
+/// private /24s, so a tailnet, VPN or another subnet needs this or `--url`.
+fn use_url(url: &str, save: bool, quiet: bool) -> i32 {
+    let mut cfg = config::load();
+    let s = remote::settings_at(url, &cfg);
+    let (health, ms) = match remote::health(&s) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("✗ {}: {e}", s.base);
+            return 1;
+        }
+    };
+    if !health.ok {
+        eprintln!("✗ {}: resolver is not healthy", s.base);
+        return 1;
+    }
+    if health.auth && !remote::has_token(&cfg) {
+        eprintln!(
+            "resolver {} needs a token; set resolver_token_file or YTUI_RESOLVER_TOKEN first",
+            s.base
+        );
+        return 1;
+    }
+    if save {
+        cfg.resolver_url = s.base.clone();
+        config::save(&cfg);
+        println!("resolver: {} (v{}, {} ms)", s.base, health.version, ms);
+    } else if quiet {
+        println!("{}", s.base);
+    } else {
+        println!(
+            "resolver: {} v{} ({} ms){}",
+            s.base,
+            health.version,
+            ms,
+            if health.auth { " · token required" } else { "" }
+        );
+    }
+    0
+}
+
 fn help() {
     println!(
         "\
@@ -351,6 +409,7 @@ usage:
   ytui logout             forget cookies and account
   ytui doctor             check yt-dlp, audio device and config
   ytui discover [--save]  scan the LAN for an optional resolver
+  ytui discover --url U   check a resolver by address, e.g. over a VPN
   ytui update             pull the latest source and rebuild
   ytui update --check     only report whether newer commits exist
   ytui --version          print version

@@ -8,7 +8,6 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -23,12 +22,9 @@ use ytui_resolve::{Resolved, UA};
 pub const SCAN_PORT: u16 = 8787;
 /// How long a `?`-menu or install-time scan may take.
 pub const SCAN_BUDGET: Duration = Duration::from_secs(10);
-/// Per-host connect/read timeout during a scan. Loopback and LAN hosts answer
-/// in milliseconds, so a silent one should not stretch the sweep.
+/// Per-host connect/read timeout during a scan. A resolver on the local
+/// network answers in milliseconds; a silent host should not hold the sweep.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(600);
-/// Timeout for tailnet peers. Reaching one through WSL's NAT and the Tailscale
-/// tunnel takes about a second even for a tiny health request.
-const TAILNET_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Parallel probes; a /24 then finishes in about three seconds when every host
 /// is silent, which fits the scan budget.
 const SCAN_WORKERS: usize = 64;
@@ -95,6 +91,17 @@ pub fn settings(cfg: &Config) -> Option<Settings> {
         timeout: Duration::from_secs(cfg.resolver_timeout_secs.max(1)),
         fallback: cfg.resolver_fallback,
     })
+}
+
+/// Settings for a resolver URL given on the command line (`ytui discover
+/// --url`), which ignores `$YTUI_RESOLVER` but still uses the configured token.
+pub fn settings_at(base: &str, cfg: &Config) -> Settings {
+    Settings {
+        base: base.trim().trim_end_matches('/').to_string(),
+        token: token_from(cfg),
+        timeout: Duration::from_secs(cfg.resolver_timeout_secs.max(1)),
+        fallback: cfg.resolver_fallback,
+    }
 }
 
 /// Whether a token is configured, even when no resolver URL is set yet. The
@@ -185,8 +192,8 @@ pub fn resolve(s: &Settings, url: &str, refresh: bool) -> Result<Resolved, Strin
     serde_json::from_str::<Resolved>(&body).map_err(|e| format!("bad resolver json: {e}"))
 }
 
-/// Scans localhost, each private IPv4 `/24` and Tailscale peers on the default
-/// resolver port. The caller gets at most `SCAN_BUDGET` of wall-clock time.
+/// Scans localhost and each private IPv4 `/24` on the default resolver port.
+/// The caller gets at most `SCAN_BUDGET` of wall-clock time.
 /// Results are ordered by "token not needed" first, then by response time.
 pub fn scan_for(budget: Duration) -> Vec<Found> {
     scan_port(SCAN_PORT, budget)
@@ -219,7 +226,7 @@ fn scan_port(port: u16, budget: Duration) -> Vec<Found> {
                 let Some(&ip) = targets.get(i) else {
                     break;
                 };
-                if let Some(hit) = probe(ip, port, probe_timeout(ip).min(left)) {
+                if let Some(hit) = probe(ip, port, PROBE_TIMEOUT.min(left)) {
                     if !hit.auth {
                         tokenless.store(true, Ordering::Relaxed);
                     }
@@ -249,10 +256,6 @@ fn scan_targets() -> Vec<IpAddr> {
             targets.push(ip);
         }
     };
-
-    // Tailscale peers answer quickly when they exist but are the likeliest
-    // remote resolvers, so probe them before the /24 sweep.
-    add_tailscale_peers(&mut push);
 
     if let Ok(interfaces) = get_if_addrs() {
         for iface in interfaces {
@@ -286,80 +289,6 @@ fn add_v4_range(push: &mut impl FnMut(IpAddr), ip: Ipv4Addr, prefixlen: u8) {
     let range = if size <= 4 { 0..size } else { 1..size - 1 };
     for n in range {
         push(IpAddr::V4(Ipv4Addr::from(base + n)));
-    }
-}
-
-/// Tailscale peers are usually `/32`s outside the interface's /24. Ask the CLI
-/// for the list when it is available; ignore anything else.
-fn add_tailscale_peers(push: &mut impl FnMut(IpAddr)) {
-    let Some(value) = tailscale_status() else {
-        return;
-    };
-    if let Some(node) = value.get("Self") {
-        add_tailscale_node(node, push);
-    }
-    if let Some(peers) = value.get("Peer").and_then(|v| v.as_object()) {
-        for node in peers.values() {
-            add_tailscale_node(node, push);
-        }
-    }
-}
-
-/// Runs `tailscale status --json`, also trying the Windows executable name so
-/// a WSL install can see the host's tailnet, and the macOS app bundle path
-/// when the CLI is not on `PATH`. A missing CLI is not an error.
-fn tailscale_status() -> Option<serde_json::Value> {
-    const COMMANDS: [&str; 3] = [
-        // Linux, Windows and the macOS CLI symlink.
-        "tailscale",
-        // WSL interop: the host's Windows install.
-        "tailscale.exe",
-        // macOS app bundle.
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    ];
-    for cmd in COMMANDS {
-        let Ok(out) = Command::new(cmd).args(["status", "--json"]).output() else {
-            continue;
-        };
-        if !out.status.success() {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn add_tailscale_node(node: &serde_json::Value, push: &mut impl FnMut(IpAddr)) {
-    if !node.get("Online").and_then(|v| v.as_bool()).unwrap_or(true) {
-        return;
-    }
-    let Some(ips) = node.get("TailscaleIPs").and_then(|v| v.as_array()) else {
-        return;
-    };
-    for ip in ips {
-        if let Some(addr) = ip.as_str().and_then(|s| s.parse::<IpAddr>().ok()) {
-            push(addr);
-        }
-    }
-}
-
-/// Tailscale peers live in `100.64.0.0/10`, outside the machine's own private
-/// `/24`, and are the targets normally reached through a tunnel. IPv6 targets
-/// are only ever a local ULA/link-local address or a peer's tailnet address.
-fn probe_timeout(ip: IpAddr) -> Duration {
-    let tailnet = match ip {
-        IpAddr::V4(v4) => {
-            let range = u32::from(v4) & 0xffc0_0000;
-            range == u32::from(Ipv4Addr::new(100, 64, 0, 0))
-        }
-        IpAddr::V6(_) => true,
-    };
-    if tailnet {
-        TAILNET_PROBE_TIMEOUT
-    } else {
-        PROBE_TIMEOUT
     }
 }
 
@@ -599,20 +528,6 @@ mod tests {
         let mut ips = Vec::new();
         add_v4_range(&mut |ip| ips.push(ip), Ipv4Addr::new(100, 64, 0, 7), 32);
         assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 7))]);
-    }
-
-    #[test]
-    fn tailnet_targets_get_the_longer_probe_timeout() {
-        let tailnet = IpAddr::V4(Ipv4Addr::new(100, 126, 49, 124));
-        assert_eq!(probe_timeout(tailnet), TAILNET_PROBE_TIMEOUT);
-        assert_eq!(
-            probe_timeout(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5))),
-            PROBE_TIMEOUT
-        );
-        assert_eq!(
-            probe_timeout(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
-            TAILNET_PROBE_TIMEOUT
-        );
     }
 
     #[test]

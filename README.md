@@ -403,11 +403,19 @@ listed one and `esc` cancels. From a shell:
 ytui discover --save --timeout 10
 ```
 
-The scan checks localhost, each private IPv4 `/24`, and Tailscale peers from
-`tailscale status --json` (or `tailscale.exe`, so a client in WSL sees the
-Windows tailnet). It only probes port 8787, it stops as soon as a tokenless
-resolver answers, and it never overwrites a `resolver_url` that is already
-configured.
+The scan checks localhost and each private IPv4 `/24` the machine is attached
+to, so it finds a resolver on a plain LAN without any extra tooling. It only
+probes port 8787, it stops as soon as a tokenless resolver answers, and it never
+overwrites a `resolver_url` that is already configured.
+
+Overlay networks are not a local `/24`, so the scan cannot see them: that
+covers Tailscale's `100.64.0.0/10`, WireGuard and other VPNs, a resolver on
+another subnet, and a client inside WSL (which only sees the WSL virtual
+network). Point ytui at the address once instead:
+
+```bash
+ytui discover --url http://100.126.49.124:8787 --save
+```
 
 ### Tokenless LAN or tailnet
 

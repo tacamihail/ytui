@@ -147,17 +147,23 @@ and the help overlay does the same with `?` then `s`. From a shell:
 ytui discover --save --timeout 10
 ```
 
-The scan probes port 8787 on localhost, each private IPv4 `/24`, and Tailscale
-peers obtained from `tailscale status --json`. The CLI is looked up as
-`tailscale`, `tailscale.exe` (WSL) and the macOS app bundle. Every probe has a
-short connect timeout, so a silent host cannot stretch the scan past its
-deadline. A tokenless result is preferred and applied automatically, and the
-scan stops as soon as one answers; a token-protected result is only applied
-when `resolver_token_file` already points at a token.
+The scan probes port 8787 on localhost and each private IPv4 `/24` the machine
+is attached to. Every probe has a short connect timeout, so a silent host
+cannot stretch the scan past its deadline. A tokenless result is preferred and
+applied automatically, and the scan stops as soon as one answers; a
+token-protected result is only applied when `resolver_token_file` already
+points at a token.
 
-WSL note: a client inside WSL sees the WSL virtual network, not the Windows
-LAN, so a resolver in another physical `/24` is invisible from inside WSL. A
-resolver on the same tailnet is found through the host's `tailscale.exe`.
+Discovery stays provider-neutral on purpose: it does not shell out to
+Tailscale, ZeroTier or any other overlay CLI. Those networks are not a local
+`/24`, so point ytui at the resolver once instead:
+
+```bash
+ytui discover --url http://100.64.0.5:8787 --save
+```
+
+The same applies to a resolver on another subnet, over a VPN, or to a WSL
+client, which only sees the WSL virtual network rather than the Windows LAN.
 
 ## Client config
 
