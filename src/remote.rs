@@ -24,10 +24,12 @@ pub const SCAN_PORT: u16 = 8787;
 pub const SCAN_BUDGET: Duration = Duration::from_secs(10);
 /// Per-host connect/read timeout during a scan. A resolver on the local
 /// network answers in milliseconds; a silent host should not hold the sweep.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(600);
-/// Parallel probes; a /24 then finishes in about three seconds when every host
+/// Kept generous because `/v1/health` on an older server can take about a
+/// second while it shells out to `yt-dlp --version` and `deno --version`.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(2500);
+/// Parallel probes; a /24 then finishes in about five seconds when every host
 /// is silent, which fits the scan budget.
-const SCAN_WORKERS: usize = 64;
+const SCAN_WORKERS: usize = 128;
 /// Hard cap on addresses so a strange interface cannot turn a scan into a
 /// minute-long crawl.
 const MAX_TARGETS: usize = 1024;
@@ -251,11 +253,11 @@ fn scan_targets() -> Vec<IpAddr> {
     let mut seen = HashSet::new();
     seen.insert(targets[0]);
 
-    let mut push = |ip: IpAddr| {
-        if targets.len() < MAX_TARGETS && seen.insert(ip) {
-            targets.push(ip);
-        }
-    };
+    // The real LAN goes before virtual switches: Windows machines often carry
+    // VMware, Hyper-V, WSL and VirtualBox adapters, each with its own /24, and
+    // they used to push the physical network out of the scan.
+    let mut primary: Vec<IpAddr> = Vec::new();
+    let mut virtual_switches: Vec<IpAddr> = Vec::new();
 
     if let Ok(interfaces) = get_if_addrs() {
         for iface in interfaces {
@@ -264,18 +266,39 @@ fn scan_targets() -> Vec<IpAddr> {
                 // loopback /24 never hosts a resolver.
                 IfAddr::V4(v4) if v4.ip.is_loopback() => {}
                 IfAddr::V4(v4) if ytui_resolve::is_private_ip(IpAddr::V4(v4.ip)) => {
-                    add_v4_range(&mut push, v4.ip, v4.prefixlen);
+                    let out = if host_only_switch(v4.ip) {
+                        &mut virtual_switches
+                    } else {
+                        &mut primary
+                    };
+                    add_v4_range(&mut |ip| out.push(ip), v4.ip, v4.prefixlen);
                 }
                 IfAddr::V6(v6) if ytui_resolve::is_private_ip(IpAddr::V6(v6.ip)) => {
                     // Scanning an IPv6 prefix is not practical; probe the
                     // machine's own ULA/link-local address only.
-                    push(IpAddr::V6(v6.ip));
+                    primary.push(IpAddr::V6(v6.ip));
                 }
                 _ => {}
             }
         }
     }
+
+    for ip in primary.into_iter().chain(virtual_switches) {
+        if targets.len() >= MAX_TARGETS {
+            break;
+        }
+        if seen.insert(ip) {
+            targets.push(ip);
+        }
+    }
     targets
+}
+
+/// VMware, Hyper-V, WSL and VirtualBox give the host the first address of
+/// their own /24. A resolver almost never lives on one, so probe them last
+/// instead of dropping them.
+fn host_only_switch(ip: Ipv4Addr) -> bool {
+    ip.octets()[3] == 1
 }
 
 /// Adds the hosts around `ip` in the smallest useful prefix: never wider than
@@ -528,6 +551,15 @@ mod tests {
         let mut ips = Vec::new();
         add_v4_range(&mut |ip| ips.push(ip), Ipv4Addr::new(100, 64, 0, 7), 32);
         assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 7))]);
+    }
+
+    #[test]
+    fn host_only_switches_are_recognized() {
+        assert!(host_only_switch(Ipv4Addr::new(172, 27, 240, 1)));
+        assert!(host_only_switch(Ipv4Addr::new(192, 168, 56, 1)));
+        assert!(!host_only_switch(Ipv4Addr::new(192, 168, 1, 137)));
+        // A real LAN host can be .1 too; the flag only changes scan order.
+        assert!(host_only_switch(Ipv4Addr::new(192, 168, 1, 1)));
     }
 
     #[test]

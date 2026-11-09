@@ -97,6 +97,7 @@ fn run() -> Result<(), String> {
         cookies: args.cookies,
         cache: Mutex::new(Cache::new(args.cache_cap, args.cache_ttl)),
         rate: Mutex::new(RateLimit::new(RATE_MAX, RATE_WINDOW)),
+        tools: Mutex::new(None),
     });
     let gate = Arc::new(Gate::new(args.max_concurrency));
     let server =
@@ -408,6 +409,7 @@ struct Ctx {
     cookies: Option<PathBuf>,
     cache: Mutex<Cache>,
     rate: Mutex<RateLimit>,
+    tools: Mutex<Option<(Instant, Option<String>, Option<String>)>>,
 }
 
 fn handle(request: Request, ctx: &Ctx) {
@@ -548,14 +550,31 @@ fn health_json(ctx: &Ctx, request: &Request) -> String {
         .map(|a| ytui_resolve::is_private_ip(a.ip()))
         .unwrap_or(true);
     let auth = token_needed(ctx.token.is_some(), ctx.allow_private, private);
+    let (ytdlp, deno) = tool_versions(ctx);
     serde_json::json!({
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
-        "ytdlp": version_of("yt-dlp"),
-        "deno": version_of("deno"),
+        "ytdlp": ytdlp,
+        "deno": deno,
         "auth": auth,
     })
     .to_string()
+}
+
+/// Tool versions for `/v1/health`, cached for five minutes. Spawning `yt-dlp`
+/// and `deno` takes about a second on a Raspberry Pi, which used to make the
+/// health probe slow enough for a client scan to give up on it.
+fn tool_versions(ctx: &Ctx) -> (Option<String>, Option<String>) {
+    const TTL: Duration = Duration::from_secs(5 * 60);
+    let mut cache = ctx.tools.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, ytdlp, deno)) = cache.as_ref() {
+        if at.elapsed() < TTL {
+            return (ytdlp.clone(), deno.clone());
+        }
+    }
+    let fresh = (version_of("yt-dlp"), version_of("deno"));
+    *cache = Some((Instant::now(), fresh.0.clone(), fresh.1.clone()));
+    fresh
 }
 
 /// Whether `authorized` would reject a request from this peer without a token.
