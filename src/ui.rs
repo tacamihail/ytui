@@ -2,9 +2,11 @@
 
 use crate::app::{
     App, PlayerBtn, TABS, TAB_LIKED, TAB_PLAYLISTS, TAB_QUEUE, TAB_SEARCH, TAB_SUBS, UpdateState,
+    ScanState,
 };
 use crate::audio::{Repeat, Status};
 use crate::entry::{fmt_duration, fmt_f64, Entry};
+use crate::remote;
 use crate::ytdl;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::prelude::{Color, Line, Modifier, Span, Style};
@@ -77,6 +79,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.help_open {
         draw_help(f, app, area);
+    }
+    if app.scan_open {
+        draw_scan(f, app, area);
     }
 }
 
@@ -804,7 +809,7 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
         .title(Span::styled(
             truncate(
                 &format!(
-                    " ytui {} help · u updates · any other key closes ",
+                    " ytui {} · s scan · u updates · other keys close ",
                     env!("CARGO_PKG_VERSION")
                 ),
                 w.saturating_sub(4) as usize,
@@ -828,10 +833,10 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
         // and update state are what the overlay is asked about most often.
         (upd_header.as_str(), ""),
         ("u", "install update or check again"),
+        ("s", "scan the LAN for a resolver"),
         ("navigation", ""),
         ("1-6 / Tab / Shift+Tab", "switch tabs"),
         ("↑↓ / j k / wheel", "move selection"),
-        ("click tab", "switch to that tab"),
         ("click / double-click", "select / play item"),
         ("enter", "play the whole list from here"),
         ("a", "append selection to queue"),
@@ -871,6 +876,103 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
             }
         })
         // The box is clamped to a narrow terminal too; mark a clipped row.
+        .map(|line| clamp_line(line, inner.width as usize))
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_scan(f: &mut Frame, app: &mut App, area: Rect) {
+    let (w, h) = (76u16, 22u16);
+    let r = centered_rect(w.min(area.width), h.min(area.height), area);
+    f.render_widget(Clear, r);
+
+    let title = match &app.scan {
+        ScanState::Running => " resolver scan · scanning… ".to_string(),
+        _ => " resolver scan · s rescan · enter use · esc close ".to_string(),
+    };
+    let b = Block::bordered()
+        .border_style(Style::new().fg(ACCENT))
+        .title(Span::styled(
+            truncate(&title, w.saturating_sub(4) as usize),
+            Style::new().fg(ACCENT),
+        ));
+    let inner = b.inner(r);
+    f.render_widget(b, r);
+
+    let current = if app.cfg.resolver_url.trim().is_empty() {
+        "current: local yt-dlp".to_string()
+    } else {
+        format!("current: {}", app.cfg.resolver_url)
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(format!(" {current}"), Style::new().fg(DIM))),
+        Line::from(""),
+    ];
+
+    match &app.scan {
+        ScanState::Idle => lines.push(Line::from(Span::styled(
+            " press s to scan",
+            Style::new().fg(FG),
+        ))),
+        ScanState::Running => lines.push(Line::from(Span::styled(
+            format!(
+                " {} scanning localhost and private networks on port {} (up to {}s)…",
+                spinner(app.anim.elapsed()),
+                remote::SCAN_PORT,
+                remote::SCAN_BUDGET.as_secs()
+            ),
+            Style::new().fg(ACCENT),
+        ))),
+        ScanState::Done(found) => {
+            if found.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        " no resolver answered on port {}; still using local yt-dlp",
+                        remote::SCAN_PORT
+                    ),
+                    Style::new().fg(YELLOW),
+                )));
+                lines.push(Line::from(Span::styled(
+                    " start ytui-resolver on a LAN/tailnet machine, or check the firewall",
+                    Style::new().fg(DIM),
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!(" found {} resolver(s):", found.len()),
+                    Style::new().fg(GREEN),
+                )));
+                for (i, hit) in found.iter().enumerate() {
+                    let selected = i == app.scan_sel;
+                    let marker = if selected { "▶" } else { " " };
+                    let mut text =
+                        format!(" {marker} {:<30} v{}  {} ms", hit.url, hit.version, hit.ms);
+                    if hit.auth {
+                        text.push_str("  token required");
+                    }
+                    let style = if selected {
+                        Style::new().fg(YELLOW).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::new().fg(FG)
+                    };
+                    lines.push(Line::from(Span::styled(text, style)));
+                }
+                if found.iter().any(|f| f.auth) && !remote::has_token(&app.cfg) {
+                    lines.push(Line::from(Span::styled(
+                        " token-protected results need resolver_token_file",
+                        Style::new().fg(DIM),
+                    )));
+                }
+            }
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " esc cancels · a tokenless private resolver is used automatically",
+        Style::new().fg(DIM),
+    )));
+    let lines: Vec<Line> = lines
+        .into_iter()
         .map(|line| clamp_line(line, inner.width as usize))
         .collect();
     f.render_widget(Paragraph::new(lines), inner);

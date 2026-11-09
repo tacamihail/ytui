@@ -28,7 +28,8 @@ the audio crates.
 
 ## Token
 
-Non-loopback binds refuse to start without a token.
+Non-loopback binds refuse to start without a token, unless `--allow-private`
+is passed to trust private peers.
 
 ```bash
 ytui-resolver --gen-token
@@ -62,6 +63,7 @@ Options:
 | `--bind` | `127.0.0.1:8787` | listen address |
 | `--token` / `--token-file` | auto | bearer token |
 | `--gen-token` | - | write a random token and exit |
+| `--allow-private` | off | trust LAN/Tailscale peers without a token |
 | `--cookies PATH` | none | cookies for age-restricted/members-only tracks |
 | `--cache-ttl-secs` | `14400` | how long a resolved URL is reused |
 | `--cache-cap` | `512` | cached videos |
@@ -71,7 +73,68 @@ The cookie file is optional. Without it the server resolves what YouTube
 serves to an anonymous client. With it, the server can use its own account
 instead of forwarding the client's cookies per request.
 
+## Tokenless private network
+
+For a LAN or tailnet, `--allow-private` trusts peers in private ranges without
+a token:
+
+```bash
+ytui-resolver --bind 0.0.0.0:8787 --allow-private
+```
+
+The ranges are loopback, RFC1918 (`10/8`, `172.16/12`, `192.168/16`),
+link-local, IPv6 ULA/link-local, and Tailscale/CGNAT (`100.64.0.0/10`).
+Public peers still need a token; with no token configured they get `401`.
+
+Without `--allow-private` a non-loopback bind still refuses to start unless a
+token is configured, which is the safe default. The flag only affects peers
+that are already on a private network.
+
+## Public address with a token
+
+Binding a public address is supported with a token:
+
+```bash
+ytui-resolver --bind 0.0.0.0:8787 --token-file ~/.config/ytui/resolver.token
+```
+
+The server speaks plain HTTP, so terminate TLS in Caddy/nginx and forward to
+the resolver on loopback. The client only needs the public URL and the same
+token:
+
+```json
+"resolver_url": "https://resolver.example.net",
+"resolver_token_file": "~/.config/ytui/resolver.token"
+```
+
+The automatic scan does not probe public addresses; it is only for discovery
+on the local network. A public resolver is configured by hand (or by editing
+`config.json` with `ytui` closed) and is never overwritten by `install.sh`.
+
+## Automatic discovery
+
+`install.sh` scans for up to 10 seconds when `resolver_url` is still empty,
+and the help overlay does the same with `?` then `s`. From a shell:
+
+```bash
+ytui discover --save --timeout 10
+```
+
+The scan probes port 8787 on localhost, each private IPv4 `/24`, and Tailscale
+peers obtained from `tailscale status --json` when the CLI is installed. It
+uses a hard deadline, so several interfaces cannot turn it into a minute-long
+crawl. A tokenless result is preferred and applied automatically; a
+token-protected result is only applied when `resolver_token_file` already
+points at a token.
+
+WSL note: a client inside WSL sees the WSL virtual network, not the Windows
+LAN. Tailscale peers are still found when the `tailscale` CLI is available in
+the same environment; otherwise configure the resolver URL by hand.
+
 ## Client config
+
+Leave `resolver_token_file` empty for a tokenless private resolver; point it
+at the token file for a public or token-protected one.
 
 ```json
 "resolver_url": "http://100.64.0.5:8787",
@@ -119,7 +182,8 @@ default location.
 ```text
 GET /v1/health
   -> 200 { "ok": true, "version": "0.4.0",
-           "ytdlp": "2026.10.26", "deno": "deno 2.9.8" }
+           "ytdlp": "2026.10.26", "deno": "deno 2.9.8",
+           "auth": false }
 
 GET /v1/resolve?url=<watch-url>[&refresh=1]
   Authorization: Bearer <token>
@@ -138,6 +202,9 @@ GET /v1/resolve?url=<watch-url>[&refresh=1]
   so nothing from the wire reaches yt-dlp verbatim.
 - Candidates are ordered 141 (256 kbps) -> 140 (128 kbps) -> 139 (48 kbps
   HE-AAC), higher bitrate first.
+- `auth` says whether this particular peer would need a token for
+  `/v1/resolve`. A private peer of a server started with `--allow-private`
+  sees `false`.
 - The client probes each candidate with a 1 KiB HTTP Range request. That probe
   stays local because googlevideo URLs can be bound to the requesting IP.
 - If every candidate is refused, the client calls `/v1/resolve?...&refresh=1`
@@ -158,9 +225,12 @@ already encrypt and authenticate the path, and a private network is the
 intended deployment.
 
 - Bind a private address and keep the port firewalled from the internet.
-- Always use a token off loopback; the server refuses to start otherwise.
+- On loopback no token is needed. For a LAN/tailnet, either use a token or
+  pass `--allow-private`, which trusts only private peer addresses.
+- Never expose a tokenless resolver to the internet: public peers are denied,
+  but the resolver itself still has no TLS.
 - If it must be public, put Caddy/nginx in front for TLS and rate limiting,
-  and keep the resolver itself on loopback.
+  keep the resolver itself on loopback or behind the proxy, and use a token.
 - The server sees every video you resolve. Treat its logs and cookie file
   like the YouTube account they belong to.
 
@@ -168,6 +238,16 @@ intended deployment.
 
 `401 bad token`: the client token and server token differ. Re-run
 `ytui-resolver --gen-token` and point `resolver_token_file` at the file.
+
+`scan found nothing`: the resolver is on another subnet, port 8787 is
+firewalled, or the client is inside WSL and sees only the WSL virtual network.
+Configure `resolver_url` by hand, or run the server on the host/another
+machine with a route to the client. Check with `curl http://HOST:8787/v1/health`.
+
+`token required` next to a scan result: that server is not using
+`--allow-private`, so it expects the bearer token. Put the token in
+`resolver_token_file`, or start the server with `--allow-private` on a trusted
+network.
 
 `unreachable (...)`: the client cannot connect. Check `ytui doctor`, the bind
 address and the firewall. With fallback on, playback continues locally.

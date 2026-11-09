@@ -5,15 +5,31 @@
 //! to the IP that requested them, so the machine that plays should be the
 //! machine that checks them.
 
+use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use if_addrs::{get_if_addrs, IfAddr};
 use serde::Deserialize;
 
 use crate::config::{self, Config};
 use ytui_resolve::{Resolved, UA};
+
+/// Port `ytui-resolver` listens on by default.
+pub const SCAN_PORT: u16 = 8787;
+/// How long a `?`-menu or install-time scan may take.
+pub const SCAN_BUDGET: Duration = Duration::from_secs(10);
+/// Per-host connect/read timeout during a scan.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(400);
+/// Parallel probes; 254 hosts then finish in about two seconds.
+const SCAN_WORKERS: usize = 64;
+/// Hard cap on addresses so a strange interface cannot turn a scan into a
+/// minute-long crawl.
+const MAX_TARGETS: usize = 1024;
 
 /// Resolver settings with the env overrides already applied.
 pub struct Settings {
@@ -44,6 +60,20 @@ pub struct Health {
     pub ytdlp: Option<String>,
     #[serde(default)]
     pub deno: Option<String>,
+    /// Whether this peer would need a bearer token for `/v1/resolve`.
+    #[serde(default)]
+    pub auth: bool,
+}
+
+/// A resolver found by [`scan_for`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub url: String,
+    pub version: String,
+    /// `true` when this peer would need a token (the server is not set to
+    /// trust private peers, or no token is configured locally).
+    pub auth: bool,
+    pub ms: u64,
 }
 
 /// `None` when no resolver is configured, so callers keep using local yt-dlp.
@@ -53,7 +83,23 @@ pub fn settings(cfg: &Config) -> Option<Settings> {
     if base.is_empty() {
         return None;
     }
-    let token = env_nonempty("YTUI_RESOLVER_TOKEN")
+    let token = token_from(cfg);
+    Some(Settings {
+        base,
+        token,
+        timeout: Duration::from_secs(cfg.resolver_timeout_secs.max(1)),
+        fallback: cfg.resolver_fallback,
+    })
+}
+
+/// Whether a token is configured, even when no resolver URL is set yet. The
+/// scan uses this to decide if a token-protected server is usable.
+pub fn has_token(cfg: &Config) -> bool {
+    token_from(cfg).is_some()
+}
+
+fn token_from(cfg: &Config) -> Option<String> {
+    env_nonempty("YTUI_RESOLVER_TOKEN")
         .or_else(|| {
             let t = cfg.resolver_token.trim();
             (!t.is_empty()).then(|| t.to_string())
@@ -69,13 +115,7 @@ pub fn settings(cfg: &Config) -> Option<Settings> {
             path.and_then(|p| std::fs::read_to_string(p).ok())
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty())
-        });
-    Some(Settings {
-        base,
-        token,
-        timeout: Duration::from_secs(cfg.resolver_timeout_secs.max(1)),
-        fallback: cfg.resolver_fallback,
-    })
+        })
 }
 
 fn env_nonempty(key: &str) -> Option<String> {
@@ -127,6 +167,162 @@ pub fn resolve(s: &Settings, url: &str, refresh: bool) -> Result<Resolved, Strin
         .into_string()
         .map_err(|e| format!("cannot read resolver response: {e}"))?;
     serde_json::from_str::<Resolved>(&body).map_err(|e| format!("bad resolver json: {e}"))
+}
+
+/// Scans localhost, each private IPv4 `/24` and Tailscale peers on the default
+/// resolver port. The caller gets at most `SCAN_BUDGET` of wall-clock time.
+/// Results are ordered by "token not needed" first, then by response time.
+pub fn scan_for(budget: Duration) -> Vec<Found> {
+    scan_port(SCAN_PORT, budget)
+}
+
+fn scan_port(port: u16, budget: Duration) -> Vec<Found> {
+    let targets = scan_targets();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let deadline = Instant::now() + budget;
+    let next = AtomicUsize::new(0);
+    let found = Mutex::new(Vec::new());
+    let workers = SCAN_WORKERS.min(targets.len()).max(1);
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(&ip) = targets.get(i) else {
+                    break;
+                };
+                if let Some(hit) = probe(ip, port, PROBE_TIMEOUT.min(left)) {
+                    found.lock().unwrap_or_else(|e| e.into_inner()).push(hit);
+                }
+            });
+        }
+    });
+
+    let mut found = found.into_inner().unwrap_or_else(|e| e.into_inner());
+    found.sort_by(|a, b| {
+        a.auth
+            .cmp(&b.auth)
+            .then(a.ms.cmp(&b.ms))
+            .then(a.url.cmp(&b.url))
+    });
+    found
+}
+
+fn scan_targets() -> Vec<IpAddr> {
+    let mut targets = vec![IpAddr::V4(Ipv4Addr::LOCALHOST)];
+    let mut seen = HashSet::new();
+    seen.insert(targets[0]);
+
+    let mut push = |ip: IpAddr| {
+        if targets.len() < MAX_TARGETS && seen.insert(ip) {
+            targets.push(ip);
+        }
+    };
+
+    if let Ok(interfaces) = get_if_addrs() {
+        for iface in interfaces {
+            match iface.addr {
+                IfAddr::V4(v4) if ytui_resolve::is_private_ip(IpAddr::V4(v4.ip)) => {
+                    add_v4_range(&mut push, v4.ip, v4.prefixlen);
+                }
+                IfAddr::V6(v6) if ytui_resolve::is_private_ip(IpAddr::V6(v6.ip)) => {
+                    // Scanning an IPv6 prefix is not practical; probe the
+                    // machine's own ULA/link-local address only.
+                    push(IpAddr::V6(v6.ip));
+                }
+                _ => {}
+            }
+        }
+    }
+    add_tailscale_peers(&mut push);
+    targets
+}
+
+/// Adds the hosts around `ip` in the smallest useful prefix: never wider than
+/// a `/24`, so a `10.0.0.0/8` interface still costs 254 probes, and a `/32`
+/// only probes that address.
+fn add_v4_range(push: &mut impl FnMut(IpAddr), ip: Ipv4Addr, prefixlen: u8) {
+    let bits = prefixlen.clamp(24, 32);
+    let size = 1u32 << (32 - bits);
+    let mask = u32::MAX << (32 - bits);
+    let base = u32::from(ip) & mask;
+    let range = if size <= 4 { 0..size } else { 1..size - 1 };
+    for n in range {
+        push(IpAddr::V4(Ipv4Addr::from(base + n)));
+    }
+}
+
+/// Tailscale peers are usually `/32`s outside the interface's /24. Ask the CLI
+/// for the list when it is available; ignore anything else.
+fn add_tailscale_peers(push: &mut impl FnMut(IpAddr)) {
+    let Ok(out) = Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return;
+    };
+    if let Some(node) = value.get("Self") {
+        add_tailscale_node(node, push);
+    }
+    if let Some(peers) = value.get("Peer").and_then(|v| v.as_object()) {
+        for node in peers.values() {
+            add_tailscale_node(node, push);
+        }
+    }
+}
+
+fn add_tailscale_node(node: &serde_json::Value, push: &mut impl FnMut(IpAddr)) {
+    if !node.get("Online").and_then(|v| v.as_bool()).unwrap_or(true) {
+        return;
+    }
+    let Some(ips) = node.get("TailscaleIPs").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for ip in ips {
+        if let Some(addr) = ip.as_str().and_then(|s| s.parse::<IpAddr>().ok()) {
+            push(addr);
+        }
+    }
+}
+
+fn probe(ip: IpAddr, port: u16, timeout: Duration) -> Option<Found> {
+    let host = match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => format!("[{v6}]"),
+    };
+    let base = format!("http://{host}:{port}");
+    let started = Instant::now();
+    let resp = ureq::get(&format!("{base}/v1/health"))
+        .set("User-Agent", UA)
+        .timeout(timeout)
+        .call()
+        .ok()?;
+    if resp.status() != 200 {
+        return None;
+    }
+    let body = resp.into_string().ok()?;
+    let health: Health = serde_json::from_str(&body).ok()?;
+    if !health.ok || health.version.is_empty() {
+        return None;
+    }
+    Some(Found {
+        url: base,
+        version: health.version,
+        auth: health.auth,
+        ms: started.elapsed().as_millis() as u64,
+    })
 }
 
 fn http_error(e: ureq::Error) -> String {
@@ -320,5 +516,48 @@ mod tests {
             urlencode("https://www.youtube.com/watch?v=dQw4w9WgXcQ&x=1"),
             "https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DdQw4w9WgXcQ%26x%3D1"
         );
+    }
+
+    #[test]
+    fn a_24_scans_hosts_but_not_network_or_broadcast() {
+        let mut ips = Vec::new();
+        add_v4_range(&mut |ip| ips.push(ip), Ipv4Addr::new(192, 168, 1, 42), 24);
+        assert_eq!(ips.len(), 254);
+        assert!(ips.contains(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        assert!(!ips.contains(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0))));
+        assert!(!ips.contains(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 255))));
+    }
+
+    #[test]
+    fn a_32_scans_only_that_address() {
+        let mut ips = Vec::new();
+        add_v4_range(&mut |ip| ips.push(ip), Ipv4Addr::new(100, 64, 0, 7), 32);
+        assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 7))]);
+    }
+
+    #[test]
+    fn finds_a_resolver_health_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf);
+            let body = r#"{"ok":true,"version":"0.4.0","auth":false}"#;
+            let _ = write!(
+                sock,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        let found = probe(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(found.version, "0.4.0");
+        assert!(!found.auth);
+        handle.join().unwrap();
     }
 }

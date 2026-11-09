@@ -26,6 +26,8 @@ libc = "0.2"
 unicode-width = "0.2"
 # yt-dlp invocation and AAC candidate ranking, shared with the resolver server.
 ytui-resolve = { path = "crates/resolve" }
+# Local interface enumeration for the help-menu resolver scan.
+if-addrs = "0.15"
 
 # Standalone crate. Without this, cargo walks up the directory tree looking for
 # a workspace root and trips over any Cargo.toml in a parent directory (for

@@ -6,6 +6,7 @@
 //! googlevideo URLs can be bound to the requesting IP.
 
 use std::io::{self, Read};
+use std::net::{IpAddr, Ipv4Addr};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,6 +16,33 @@ use serde::{Deserialize, Serialize};
 /// Browser-ish UA; googlevideo accepts any modern string.
 pub const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
                       Chrome/126.0.0.0 Safari/537.36";
+
+/// True for addresses that only make sense on the local machine or a private
+/// network: loopback, RFC1918, link-local, Tailscale/CGNAT (`100.64.0.0/10`)
+/// and IPv6 ULA/link-local. The resolver uses this to decide whether a peer
+/// may skip the bearer token, and the client uses it to pick scan targets.
+pub fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => private_v4(v4),
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            v6.is_loopback()
+                || (s[0] & 0xfe00) == 0xfc00 // fc00::/7, unique local
+                || (s[0] & 0xffc0) == 0xfe80 // fe80::/10, link-local
+                || v6.to_ipv4_mapped().is_some_and(private_v4)
+        }
+    }
+}
+
+fn private_v4(v4: Ipv4Addr) -> bool {
+    // 100.64.0.0/10 is where Tailscale and carrier NAT put peers; it is not
+    // `Ipv4Addr::is_private`, so it needs its own check.
+    let o = v4.octets();
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || (o[0] == 100 && (64..=127).contains(&o[1]))
+}
 
 /// One playable audio URL, ordered by [`Resolved::candidates`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -339,6 +367,28 @@ mod tests {
             resolved_from_json(&info).unwrap_err(),
             "no AAC stream for this track (opus only)"
         );
+    }
+
+    #[test]
+    fn recognises_private_and_cgnat_addresses() {
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.5.4",
+            "192.168.1.20",
+            "169.254.3.4",
+            "100.64.0.5",
+            "100.127.255.254",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:192.168.1.9",
+        ] {
+            assert!(is_private_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["8.8.8.8", "100.63.0.1", "100.128.0.1", "2606:4700::1111"] {
+            assert!(!is_private_ip(ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[test]

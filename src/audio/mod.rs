@@ -116,6 +116,8 @@ pub enum Cmd {
     Stop,
     Shuffle(bool),
     Repeat(Repeat),
+    /// Replace the resolver/audio config after the `?` menu found a resolver.
+    SetConfig(Config),
 }
 
 pub struct Player {
@@ -173,7 +175,7 @@ struct Engine {
 struct Prefetch {
     inner: Mutex<Job>,
     cv: Condvar,
-    cfg: Config,
+    cfg: Mutex<Config>,
 }
 
 /// Resolved links kept for replays. Sixteen googlevideo URLs are ~25 KiB.
@@ -206,7 +208,7 @@ impl Prefetch {
         let p = Arc::new(Self {
             inner: Mutex::new(Job::default()),
             cv: Condvar::new(),
-            cfg,
+            cfg: Mutex::new(cfg),
         });
         let worker = Arc::clone(&p);
         let _ = thread::Builder::new()
@@ -218,6 +220,10 @@ impl Prefetch {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Job> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_config(&self, cfg: Config) {
+        *self.cfg.lock().unwrap_or_else(|e| e.into_inner()) = cfg;
     }
 
     fn run(&self) {
@@ -238,7 +244,8 @@ impl Prefetch {
                 }
             };
 
-            let mut res = ytdl::stream_url(&url, &self.cfg);
+            let cfg = self.cfg.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let mut res = ytdl::stream_url(&url, &cfg);
             if let Err(e) = &res {
                 // A transient 403 or a killed yt-dlp should not leave the next
                 // handover to resolve the track on the audio thread, which is
@@ -247,7 +254,7 @@ impl Prefetch {
                 // offset is no longer the one being listened to.
                 if !e.contains("timed out") && self.lock().generation == generation {
                     thread::sleep(PREFETCH_RETRY_GAP);
-                    res = ytdl::stream_url(&url, &self.cfg);
+                    res = ytdl::stream_url(&url, &cfg);
                 }
             }
 
@@ -568,6 +575,10 @@ impl Engine {
 
     fn handle(&mut self, cmd: Cmd) {
         match cmd {
+            Cmd::SetConfig(cfg) => {
+                self.cfg = cfg.clone();
+                self.prefetch.set_config(cfg);
+            }
             Cmd::Play(tracks, index) => {
                 let index = index.min(tracks.len().saturating_sub(1));
                 {
@@ -1137,7 +1148,7 @@ mod tests {
         let p = Prefetch {
             inner: Mutex::new(Job::default()),
             cv: Condvar::new(),
-            cfg: Config::default(),
+            cfg: Mutex::new(Config::default()),
         };
         p.request(vec!["a".into(), "b".into(), "c".into()]);
         assert_eq!(

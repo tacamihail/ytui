@@ -10,6 +10,8 @@ Type=simple
 # tailnet/LAN address for direct clients. Never expose it to the internet.
 # Add `--cookies %h/.config/ytui/cookies.txt` if you want the server to use
 # its own account for age-restricted tracks.
+# For a trusted LAN/tailnet without tokens, append `--allow-private` and do
+# not create a token file.
 ExecStart=%h/.local/bin/ytui-resolver --bind 0.0.0.0:8787
 Restart=on-failure
 RestartSec=3

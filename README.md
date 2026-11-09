@@ -79,6 +79,10 @@ The script puts a recent `yt-dlp` and `deno` in `~/.local/bin` and `~/.deno/bin`
 if they're missing, builds the release binary and installs `~/.local/bin/ytui`.
 That last file is a small launcher around `ytui.bin`; on WSL it points
 `ALSA_PLUGIN_DIR` at the PulseAudio plugin when that lives in `~/.local/alsa`.
+When no resolver is configured yet, the script also scans the local network
+for an optional `ytui-resolver` for up to 10 seconds. If a tokenless one
+answers, its URL is saved; otherwise nothing changes and ytui resolves
+locally. Set `YTUI_SKIP_DISCOVER=1` to skip that scan.
 
 To update later, run `ytui update`: it fetches the checkout and, when the
 `version` in github's `Cargo.toml` is newer than the running binary,
@@ -209,7 +213,8 @@ URL) and `r` refreshes.
 `[` `]` change the volume, `m` mutes, `s` shuffles, `R` cycles repeat, `<` `>`
 skip tracks, `x` stops, `d` deletes an entry, `c` copies the link, `?` shows
 the help (with the version and an update check), `u` installs a newer version
-(or checks when there is none), and `q` quits.
+(or checks when there is none), and `q` quits. Inside the help overlay, `s`
+scans the local network for a resolver (see [Remote resolver](#remote-resolver)).
 
 The mouse works as well: click a tab, click a row to select it, double-click
 to play, click the progress bar to seek, and click the buttons in the player.
@@ -260,15 +265,61 @@ Build and install it on the server:
 ```bash
 cargo build --release -p ytui-resolver
 install -Dm755 target/release/ytui-resolver ~/.local/bin/ytui-resolver
-ytui-resolver --gen-token          # writes ~/.config/ytui/resolver.token
-ytui-resolver --bind 0.0.0.0:8787  # the token is picked up automatically
 ```
 
-Then point the client at it in `~/.config/ytui/config.json`:
+### Automatic discovery
+
+When `install.sh` runs and `resolver_url` is still empty, the client scans
+localhost and the private networks for up to 10 seconds. If a tokenless
+resolver answers on port 8787, its URL is saved to `config.json` and ytui uses
+it from then on. If nothing answers, the config is left alone and ytui keeps
+resolving locally with its own yt-dlp.
+
+The same scan is in the help overlay: press `?`, then `s`. A tokenless
+private resolver is selected, saved and used immediately; `enter` picks a
+listed one and `esc` cancels. From a shell:
+
+```bash
+ytui discover --save --timeout 10
+```
+
+The scan checks localhost, each private IPv4 `/24`, and Tailscale peers from
+`tailscale status --json` when the CLI is installed. It only probes port 8787,
+and it never overwrites a `resolver_url` that is already configured.
+
+### Tokenless LAN or tailnet
+
+Start the server with `--allow-private` to trust peers in private ranges
+without a token. That covers RFC1918, link-local, IPv6 ULA and Tailscale's
+`100.64.0.0/10` range:
+
+```bash
+ytui-resolver --bind 0.0.0.0:8787 --allow-private
+```
+
+Public peers still need a token, and are refused when no token is configured.
+Without `--allow-private`, a non-loopback bind still refuses to start without
+a token, as before.
+
+### Public address with a token
+
+For a resolver on a public address, keep the token requirement and configure
+the same token on the client:
+
+```bash
+ytui-resolver --bind 0.0.0.0:8787 --token-file ~/.config/ytui/resolver.token
+```
+
+The server has no TLS of its own, so put Caddy or nginx in front when the
+address is public. The automatic scan only finds private resolvers; a public
+resolver is added by editing the config and is never overwritten by
+`install.sh` or a later scan.
+
+### Client config
 
 ```json
 "resolver_url": "http://100.64.0.5:8787",
-"resolver_token_file": "~/.config/ytui/resolver.token",
+"resolver_token_file": "",
 "resolver_timeout_secs": 20,
 "resolver_fallback": true
 ```

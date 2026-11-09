@@ -43,6 +43,7 @@ fn main() {
             "auth" => std::process::exit(auth::cli(&args[1..])),
             "logout" => std::process::exit(auth::logout()),
             "doctor" => std::process::exit(doctor()),
+            "discover" => std::process::exit(discover(&args[1..])),
             "update" => std::process::exit(update::cli(&args[1..])),
             other => {
                 eprintln!("unknown command: {other}\n");
@@ -250,6 +251,93 @@ fn doctor() -> i32 {
     }
 }
 
+fn discover(args: &[String]) -> i32 {
+    let mut save = false;
+    let mut quiet = false;
+    let mut timeout = 10u64;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--save" => save = true,
+            "-q" | "--quiet" => quiet = true,
+            "--timeout" => {
+                i += 1;
+                match args.get(i).and_then(|s| s.parse::<u64>().ok()) {
+                    Some(n) => timeout = n.max(1),
+                    None => {
+                        eprintln!("--timeout needs a number of seconds");
+                        return 2;
+                    }
+                }
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+
+    if !quiet {
+        println!("scanning localhost and private networks for ytui-resolver (up to {timeout}s)…");
+    }
+    let found = remote::scan_for(std::time::Duration::from_secs(timeout));
+    if found.is_empty() {
+        if quiet {
+            println!("no resolver found; using local yt-dlp");
+        } else {
+            println!(
+                "no resolver found on port {}; ytui will keep using local yt-dlp",
+                remote::SCAN_PORT
+            );
+        }
+        return 0;
+    }
+
+    if save {
+        let mut cfg = config::load();
+        // Prefer a tokenless private resolver; fall back to a token-protected
+        // one only when a token is already configured.
+        let chosen = found.iter().find(|f| !f.auth).or_else(|| {
+            if remote::has_token(&cfg) {
+                found.first()
+            } else {
+                None
+            }
+        });
+        match chosen {
+            Some(f) => {
+                cfg.resolver_url = f.url.clone();
+                config::save(&cfg);
+                println!("resolver: {} (v{})", f.url, f.version);
+            }
+            None => {
+                println!("resolver found but needs a token; set resolver_token_file");
+                for f in &found {
+                    println!("  {} v{}", f.url, f.version);
+                }
+            }
+        }
+        return 0;
+    }
+
+    if quiet {
+        println!("{}", found[0].url);
+    } else {
+        println!("found {} resolver(s):", found.len());
+        for f in &found {
+            println!(
+                "  {} v{} ({} ms){}",
+                f.url,
+                f.version,
+                f.ms,
+                if f.auth { " · token required" } else { "" }
+            );
+        }
+    }
+    0
+}
+
 fn help() {
     println!(
         "\
@@ -262,6 +350,7 @@ usage:
   ytui auth --status      show connection status
   ytui logout             forget cookies and account
   ytui doctor             check yt-dlp, audio device and config
+  ytui discover [--save]  scan the LAN for an optional resolver
   ytui update             pull the latest source and rebuild
   ytui update --check     only report whether newer commits exist
   ytui --version          print version

@@ -62,10 +62,11 @@ fn run() -> Result<(), String> {
     }
 
     let token = load_token(&args)?;
-    if !bind_is_loopback(&args.bind) && token.is_none() {
+    if !bind_is_loopback(&args.bind) && token.is_none() && !args.allow_private {
         return Err(
             "refusing to listen on a non-loopback address without a token\n\
-             generate one with --gen-token, or pass --token/--token-file"
+             pass --allow-private to trust LAN/Tailscale peers without one, or\n\
+             generate a token with --gen-token"
                 .into(),
         );
     }
@@ -75,11 +76,19 @@ fn run() -> Result<(), String> {
         }
     }
     if token.is_none() {
-        eprintln!("no token configured (fine for loopback only)");
+        if args.allow_private {
+            eprintln!("no token configured; only private LAN/Tailscale peers are accepted");
+        } else {
+            eprintln!("no token configured (loopback only)");
+        }
+    }
+    if args.allow_private {
+        eprintln!("private LAN/Tailscale peers do not need a token");
     }
 
     let ctx = Arc::new(Ctx {
         token,
+        allow_private: args.allow_private,
         cookies: args.cookies,
         cache: Mutex::new(Cache::new(args.cache_cap, args.cache_ttl)),
         rate: Mutex::new(RateLimit::new(RATE_MAX, RATE_WINDOW)),
@@ -130,6 +139,7 @@ struct Args {
     cache_ttl: Duration,
     cache_cap: usize,
     max_concurrency: usize,
+    allow_private: bool,
     gen_token: bool,
 }
 
@@ -143,6 +153,7 @@ impl Args {
             cache_ttl: DEFAULT_TTL,
             cache_cap: DEFAULT_CACHE_CAP,
             max_concurrency: DEFAULT_CONCURRENCY,
+            allow_private: false,
             gen_token: false,
         };
         let mut i = 1;
@@ -177,6 +188,7 @@ impl Args {
                         .max(1);
                 }
                 "--gen-token" => a.gen_token = true,
+                "--allow-private" => a.allow_private = true,
                 other => return Err(format!("unknown option {other} (try --help)")),
             }
             i += 1;
@@ -200,6 +212,7 @@ options:
   --token TOKEN           bearer token clients must send
   --token-file PATH       read the token from PATH
   --gen-token             create a random token and exit
+  --allow-private         trust LAN/Tailscale peers without a token
   --cookies PATH          pass cookies.txt to yt-dlp (age-restricted tracks)
   --cache-ttl-secs N      how long resolved URLs are reused (default 14400)
   --cache-cap N           cached videos kept (default 512)
@@ -208,7 +221,8 @@ options:
   -h, --help              this text
 
 The default bind is loopback. Bind a tailnet/LAN address for remote clients,
-and always use a token there. TLS is left to Tailscale/WireGuard or a proxy.",
+and either use --allow-private (trust private ranges) or a token. Public
+peers always need the token. TLS is left to Tailscale/WireGuard or a proxy.",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -286,6 +300,7 @@ fn bind_is_loopback(bind: &str) -> bool {
 
 struct Ctx {
     token: Option<String>,
+    allow_private: bool,
     cookies: Option<PathBuf>,
     cache: Mutex<Cache>,
     rate: Mutex<RateLimit>,
@@ -300,7 +315,8 @@ fn handle(request: Request, ctx: &Ctx) {
                 send_text(request, 405, "method not allowed");
                 return;
             }
-            send_json(request, 200, health_json());
+            let body = health_json(ctx, &request);
+            send_json(request, 200, body);
         }
         "/v1/resolve" => resolve_request(request, &url, ctx),
         _ => send_text(request, 404, "not found"),
@@ -312,7 +328,7 @@ fn resolve_request(request: Request, url: &str, ctx: &Ctx) {
         send_text(request, 405, "method not allowed");
         return;
     }
-    if !authorized(&request, &ctx.token) {
+    if !authorized(&request, &ctx.token, ctx.allow_private) {
         send_json(request, 401, r#"{"error":"bad token"}"#.into());
         return;
     }
@@ -383,9 +399,18 @@ fn resolve_request(request: Request, url: &str, ctx: &Ctx) {
     }
 }
 
-fn authorized(request: &Request, token: &Option<String>) -> bool {
-    let Some(expected) = token else {
+fn authorized(request: &Request, token: &Option<String>, allow_private: bool) -> bool {
+    let private = request
+        .remote_addr()
+        .map(|a| ytui_resolve::is_private_ip(a.ip()))
+        .unwrap_or(true);
+    // Explicitly trusted private ranges skip the token. A loopback-only bind
+    // never sees a public peer, so no token is needed there either.
+    if private && allow_private {
         return true;
+    }
+    let Some(expected) = token else {
+        return private;
     };
     let got = request
         .headers()
@@ -413,14 +438,32 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn health_json() -> String {
+fn health_json(ctx: &Ctx, request: &Request) -> String {
+    let private = request
+        .remote_addr()
+        .map(|a| ytui_resolve::is_private_ip(a.ip()))
+        .unwrap_or(true);
+    let auth = token_needed(ctx.token.is_some(), ctx.allow_private, private);
     serde_json::json!({
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
         "ytdlp": version_of("yt-dlp"),
         "deno": version_of("deno"),
+        "auth": auth,
     })
     .to_string()
+}
+
+/// Whether `authorized` would reject a request from this peer without a token.
+/// Kept separate from the request so the rule can be tested directly.
+fn token_needed(has_token: bool, allow_private: bool, private: bool) -> bool {
+    if allow_private && private {
+        false
+    } else if has_token {
+        true
+    } else {
+        !private
+    }
 }
 
 fn version_of(bin: &str) -> Option<String> {
@@ -786,6 +829,20 @@ mod tests {
         assert!(!rate.allow("peer"));
         thread::sleep(Duration::from_millis(30));
         assert!(rate.allow("peer"));
+    }
+
+    #[test]
+    fn token_requirements_follow_the_private_trust_rule() {
+        // No token, private trust: private peers are fine, public ones are not.
+        assert!(!token_needed(false, true, true));
+        assert!(token_needed(false, true, false));
+        // Loopback-only server: the peer is private and no token exists.
+        assert!(!token_needed(false, false, true));
+        // A token protects everyone unless the peer is explicitly trusted.
+        assert!(token_needed(true, false, true));
+        assert!(token_needed(true, false, false));
+        assert!(!token_needed(true, true, true));
+        assert!(token_needed(true, true, false));
     }
 
     #[test]

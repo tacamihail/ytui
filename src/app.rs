@@ -5,6 +5,7 @@ use crate::auth;
 use crate::config::{self, Config};
 use crate::entry::{fmt_f64, Entry};
 use crate::listcache;
+use crate::remote;
 use crate::ui;
 use crate::update;
 use crate::ytdl::{self, Kind, Msg};
@@ -102,6 +103,14 @@ enum UpdMsg {
     Installed(Result<String, String>),
 }
 
+#[derive(Default)]
+pub enum ScanState {
+    #[default]
+    Idle,
+    Running,
+    Done(Vec<remote::Found>),
+}
+
 pub struct App {
     pub cfg: Config,
     pub tab: usize,
@@ -128,6 +137,10 @@ pub struct App {
     pub search_open: bool,
     pub search_input: String,
     pub help_open: bool,
+    pub scan_open: bool,
+    pub scan: ScanState,
+    pub scan_sel: usize,
+    scan_rx: Option<Receiver<Vec<remote::Found>>>,
     pub last_query: String,
     pub should_quit: bool,
     pub player: Arc<Mutex<PlayerState>>,
@@ -201,6 +214,10 @@ impl App {
             search_open: false,
             search_input: String::new(),
             help_open: false,
+            scan_open: false,
+            scan: ScanState::Idle,
+            scan_sel: 0,
+            scan_rx: None,
             last_query: String::new(),
             should_quit: false,
             player: Arc::clone(&player.state),
@@ -246,6 +263,7 @@ impl App {
         loop {
             app.sync_queue_cache();
             app.pick_up_notice();
+            app.poll_scan();
             terminal.draw(|f| ui::draw(f, app))?;
             // While a list is streaming in, a track is being resolved or the
             // selected row is scrolling its title, redraw often enough that
@@ -259,6 +277,7 @@ impl App {
             let wait = if app.loading.is_some()
                 || resolving
                 || app.marquee
+                || app.scan_running()
                 || app.update.animating()
             {
                 Duration::from_millis(33)
@@ -536,6 +555,89 @@ impl App {
         }
     }
 
+    // ---------------- resolver scan ----------------
+
+    /// Scans localhost and the private networks on port 8787 in the
+    /// background. The result is applied automatically when it is a tokenless
+    /// private resolver (or when a token is already configured).
+    fn start_scan(&mut self) {
+        self.scan_open = true;
+        if self.scan_rx.is_some() {
+            return;
+        }
+        self.scan = ScanState::Running;
+        self.scan_sel = 0;
+        let (tx, rx) = mpsc::channel();
+        self.scan_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(remote::scan_for(remote::SCAN_BUDGET));
+        });
+    }
+
+    pub fn scan_running(&self) -> bool {
+        matches!(self.scan, ScanState::Running)
+    }
+
+    fn poll_scan(&mut self) {
+        let result = self.scan_rx.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(found) => Some(found),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(Vec::new()),
+        });
+        let Some(found) = result else {
+            return;
+        };
+        self.scan_rx = None;
+        self.scan_sel = 0;
+        self.scan = ScanState::Done(found);
+        if let Some(chosen) = pick_resolver(&self.scan, &self.cfg) {
+            self.apply_resolver(chosen);
+        } else if self.scan_open {
+            self.set_toast(
+                "no tokenless resolver found; still using local yt-dlp",
+                false,
+            );
+        }
+    }
+
+    fn scan_move(&mut self, delta: isize) {
+        let ScanState::Done(found) = &self.scan else {
+            return;
+        };
+        if found.is_empty() {
+            return;
+        }
+        self.scan_sel = if delta < 0 {
+            self.scan_sel.saturating_sub(1)
+        } else {
+            (self.scan_sel + 1).min(found.len() - 1)
+        };
+    }
+
+    fn use_scan_result(&mut self) {
+        let ScanState::Done(found) = &self.scan else {
+            return;
+        };
+        let Some(chosen) = found.get(self.scan_sel).cloned() else {
+            return;
+        };
+        if chosen.auth && !remote::has_token(&self.cfg) {
+            self.set_toast("that resolver needs a token; set resolver_token_file", true);
+            return;
+        }
+        self.apply_resolver(chosen);
+    }
+
+    fn apply_resolver(&mut self, chosen: remote::Found) {
+        self.cfg.resolver_url = chosen.url.clone();
+        config::save(&self.cfg);
+        self.cmd(Cmd::SetConfig(self.cfg.clone()));
+        self.scan_open = false;
+        self.help_open = false;
+        self.scan = ScanState::Idle;
+        self.set_toast(format!("resolver: {}", chosen.url), false);
+    }
+
     // ---------------- keys ----------------
 
     pub fn on_key(&mut self, k: KeyEvent) {
@@ -545,17 +647,38 @@ impl App {
             }
             return;
         }
+        if self.scan_open {
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    // Dropping the receiver stops this scan from changing the
+                    // config after the overlay was dismissed.
+                    self.scan_open = false;
+                    self.scan_rx = None;
+                    self.scan = ScanState::Idle;
+                }
+                KeyCode::Char('s') => self.start_scan(),
+                KeyCode::Up | KeyCode::Char('k') => self.scan_move(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.scan_move(1),
+                KeyCode::Enter => self.use_scan_result(),
+                _ => {}
+            }
+            return;
+        }
         if self.search_open {
             self.on_key_search(k);
             return;
         }
         if self.help_open {
             // `u` works from inside the overlay so the update can be started
-            // while the status is being watched; everything else closes it.
-            if matches!(k.code, KeyCode::Char('u')) {
-                self.update_now();
-            } else {
-                self.help_open = false;
+            // while the status is being watched; `s` starts a resolver scan.
+            match k.code {
+                KeyCode::Char('u') => self.update_now(),
+                KeyCode::Char('s') => {
+                    self.help_open = false;
+                    self.scan_open = true;
+                    self.start_scan();
+                }
+                _ => self.help_open = false,
             }
             return;
         }
@@ -1207,6 +1330,22 @@ fn lock(p: &Arc<Mutex<PlayerState>>) -> std::sync::MutexGuard<'_, PlayerState> {
     p.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The scan is already sorted tokenless-first/fastest-first. Use a tokenless
+/// result directly; a token-protected one only when the client already has a
+/// token to send.
+fn pick_resolver(scan: &ScanState, cfg: &Config) -> Option<remote::Found> {
+    let ScanState::Done(found) = scan else {
+        return None;
+    };
+    found.iter().find(|f| !f.auth).cloned().or_else(|| {
+        if remote::has_token(cfg) {
+            found.first().cloned()
+        } else {
+            None
+        }
+    })
+}
+
 /// Runs the `ytui update` CLI and distills its output into one line for the
 /// toast: the `✔` result on success, the `✗` reason on failure.
 fn run_update() -> Result<String, String> {
@@ -1265,6 +1404,52 @@ mod tests {
             marked_line("✗ build failed, the installed binary was left alone", '✗').as_deref(),
             Some("✗ build failed, the installed binary was left alone")
         );
+    }
+
+    #[test]
+    fn tokenless_scan_result_wins() {
+        let found = vec![
+            remote::Found {
+                url: "http://10.0.0.2:8787".into(),
+                version: "0.4.0".into(),
+                auth: true,
+                ms: 1,
+            },
+            remote::Found {
+                url: "http://10.0.0.3:8787".into(),
+                version: "0.4.0".into(),
+                auth: false,
+                ms: 50,
+            },
+        ];
+        let chosen = pick_resolver(&ScanState::Done(found), &Config::default()).unwrap();
+        assert_eq!(chosen.url, "http://10.0.0.3:8787");
+    }
+
+    #[test]
+    fn token_protected_results_are_ignored_without_a_token() {
+        let found = vec![remote::Found {
+            url: "http://10.0.0.2:8787".into(),
+            version: "0.4.0".into(),
+            auth: true,
+            ms: 1,
+        }];
+        assert!(pick_resolver(&ScanState::Done(found), &Config::default()).is_none());
+    }
+
+    #[test]
+    fn token_protected_results_are_used_when_a_token_exists() {
+        let cfg = Config {
+            resolver_token: "secret".into(),
+            ..Config::default()
+        };
+        let found = vec![remote::Found {
+            url: "http://10.0.0.2:8787".into(),
+            version: "0.4.0".into(),
+            auth: true,
+            ms: 1,
+        }];
+        assert!(pick_resolver(&ScanState::Done(found), &cfg).is_some());
     }
 
     #[test]

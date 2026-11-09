@@ -297,6 +297,16 @@ else
   ok "config already present"
 fi
 
+# --- resolver discovery ------------------------------------------------------
+# Optional: a resolver on the LAN/tailnet removes the yt-dlp/deno spike from
+# this machine. Keep it short (10 s) and never overwrite a resolver the user
+# already configured, including a public one with a token.
+if [[ "${YTUI_SKIP_DISCOVER:-0}" != "1" ]] \
+   && ! grep -Eq '"resolver_url"[[:space:]]*:[[:space:]]*"[^"]+"' "$CFG_DIR/config.json" 2>/dev/null; then
+  info "looking for a resolver on the local network (optional, up to 10s)"
+  "$BIN_REAL" discover --save --timeout 10 --quiet || true
+fi
+
 # A locally extracted plugin is invisible to ALSA's normal configuration
 # search, so the launcher needs a config file that includes its PCM
 # definition and makes it the default. Scoped to ytui through ALSA_CONFIG_PATH;
