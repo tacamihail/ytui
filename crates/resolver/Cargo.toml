@@ -1,0 +1,17 @@
+[package]
+name = "ytui-resolver"
+version = "0.4.0"
+edition = "2021"
+description = "Remote yt-dlp resolver for ytui"
+license = "MIT"
+
+[[bin]]
+name = "ytui-resolver"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = { version = "0.12", default-features = false }
+getrandom = "0.2"
+ytui-resolve = { path = "../resolve" }

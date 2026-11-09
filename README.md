@@ -89,7 +89,7 @@ refuses to touch a checkout with uncommitted changes or local commits, and
 the one `install.sh` ran from; set `YTUI_SRC` to point elsewhere. Inside the
 player, `?` opens help and checks github; `u` installs the newer version (or
 checks again when there is none), and it works from inside the help overlay
-too. When a newer version is waiting, a clickable `↑ 0.3.20` chip appears next
+too. When a newer version is waiting, a clickable `↑ 0.4.0` chip appears next
 to the account name.
 
 To build it yourself:
@@ -240,6 +240,53 @@ rather than the list; `space` retries.
 | `volume` | `35` | starting volume |
 | `buffer_ms` | `2000` | audio ring buffer |
 | `cache_kib` | `256` | HTTP Range chunk size |
+| `resolver_url` | `""` | remote resolver base URL; empty = resolve locally |
+| `resolver_token` | `""` | bearer token (prefer the file) |
+| `resolver_token_file` | `""` | token file; empty = `~/.config/ytui/resolver.token` when it exists |
+| `resolver_timeout_secs` | `20` | how long to wait for the resolver |
+| `resolver_fallback` | `true` | use local yt-dlp when the resolver fails |
+
+## Remote resolver
+
+Resolving a track starts `yt-dlp`, which starts deno to solve YouTube's JS
+challenge: about 110 MB plus a 300 MB peak for a few seconds, once per track.
+If that spike is unwelcome on the machine that plays music, run the small
+`ytui-resolver` binary on another box (a NAS, a Raspberry Pi, a tailnet VPS).
+The client then asks it for stream candidates and keeps audio playback and
+the 1 KiB probes local.
+
+Build and install it on the server:
+
+```bash
+cargo build --release -p ytui-resolver
+install -Dm755 target/release/ytui-resolver ~/.local/bin/ytui-resolver
+ytui-resolver --gen-token          # writes ~/.config/ytui/resolver.token
+ytui-resolver --bind 0.0.0.0:8787  # the token is picked up automatically
+```
+
+Then point the client at it in `~/.config/ytui/config.json`:
+
+```json
+"resolver_url": "http://100.64.0.5:8787",
+"resolver_token_file": "~/.config/ytui/resolver.token",
+"resolver_timeout_secs": 20,
+"resolver_fallback": true
+```
+
+`YTUI_RESOLVER` and `YTUI_RESOLVER_TOKEN` override the URL and token.
+`ytui doctor` prints the resolver version and latency. With
+`resolver_fallback` on, a dead server falls back to local yt-dlp and shows
+one toast per session; with it off, playback fails with the resolver error.
+
+Only stream resolution moves. Search and playlists still use the local
+`yt-dlp`, and subscriptions keep their existing API path, so the client keeps
+its own yt-dlp and cookies.
+
+There is deliberately no TLS in the server: run it on a LAN or a
+Tailscale/WireGuard network, or put Caddy in front. The server learns which
+videos you resolve, so treat it like the YouTube account it uses. See
+[docs/resolver.md](docs/resolver.md) for the protocol, systemd unit and
+cache/rate-limit details.
 
 ## Files
 
@@ -247,6 +294,7 @@ rather than the list; `space` retries.
 - `~/.config/ytui/cookies.txt` - imported cookies, mode `600`
 - `~/.config/ytui/account.json` - channel name and id
 - `~/.config/ytui/cache/` - last listing per tab, ignored after logout
+- `~/.config/ytui/resolver.token` - token for the remote resolver, mode `600`
 - `~/.local/share/ytui/history.json` - play history
 
 ## Memory
@@ -281,6 +329,10 @@ for two or three seconds, once per track. That is the spike a system monitor
 shows when a track is resolved, and it belongs to those processes, not to the
 player. Skipping to the track that is already being resolved waits for that
 resolution instead of starting a second one.
+
+The [remote resolver](#remote-resolver) exists for that spike: with
+`resolver_url` set, those processes run on the server instead and the player
+numbers in the table do not change.
 
 The virtual size is bigger still (about 350 MB) because PulseAudio maps a few
 64 MB shared-memory pools and glibc reserves heap for each thread. Almost none
@@ -321,6 +373,12 @@ Search returns nothing or a 403: `yt-dlp` is too old.
 
 "Unable to extract uploader id": `yt-dlp` can't find `deno`. Make sure
 `~/.deno/bin` is on `PATH`.
+
+"resolver unavailable (...), using local yt-dlp": the configured resolver
+did not answer and the client fell back. `ytui doctor` shows the reason.
+
+"resolver: bad token": the client and server tokens differ. Regenerate with
+`ytui-resolver --gen-token` and point `resolver_token_file` at the result.
 
 Mouse does nothing: the terminal has to forward mouse events. Windows Terminal
 and most Linux terminals do; in tmux add `set -g mouse on` and restart ytui.

@@ -1,0 +1,181 @@
+# Remote resolver
+
+`ytui-resolver` is a small HTTP server that turns YouTube watch URLs into AAC
+stream candidates. The `ytui` client keeps search, playlists, subscriptions,
+cookies and audio playback. Only the `yt-dlp`/deno part moves, which is the
+part that costs about 110 MB plus a 300 MB peak for a few seconds per track.
+
+The server is optional. With `resolver_url` empty the client behaves exactly
+as before and resolves locally.
+
+## Requirements
+
+- `yt-dlp` and `deno` on the server, the same as for a local install
+- Rust to build it
+- a LAN, Tailscale or WireGuard path between the client and the server
+
+## Build and install
+
+From the repository root:
+
+```bash
+cargo build --release -p ytui-resolver
+install -Dm755 target/release/ytui-resolver ~/.local/bin/ytui-resolver
+```
+
+`install.sh` installs only the client, so a server box does not need ALSA or
+the audio crates.
+
+## Token
+
+Non-loopback binds refuse to start without a token.
+
+```bash
+ytui-resolver --gen-token
+# wrote token to /home/you/.config/ytui/resolver.token
+```
+
+The file is mode `600` on Unix. The server reads it automatically, and so does
+the client when `resolver_token_file` is empty. On a server that has no
+`~/.config/ytui` yet, `--gen-token` creates the directory.
+
+You can also pass `--token` or `--token-file PATH`. Compare tokens in constant
+time; there is no token in the URL or in the logs.
+
+## Run
+
+```bash
+# loopback only, no token needed
+ytui-resolver
+
+# a private network address
+ytui-resolver --bind 0.0.0.0:8787 --cookies ~/.config/ytui/cookies.txt
+
+# a specific tailnet address
+ytui-resolver --bind 100.64.0.5:8787
+```
+
+Options:
+
+| flag | default | meaning |
+|---|---|---|
+| `--bind` | `127.0.0.1:8787` | listen address |
+| `--token` / `--token-file` | auto | bearer token |
+| `--gen-token` | - | write a random token and exit |
+| `--cookies PATH` | none | cookies for age-restricted/members-only tracks |
+| `--cache-ttl-secs` | `14400` | how long a resolved URL is reused |
+| `--cache-cap` | `512` | cached videos |
+| `--max-concurrency` | `2` | simultaneous yt-dlp runs |
+
+The cookie file is optional. Without it the server resolves what YouTube
+serves to an anonymous client. With it, the server can use its own account
+instead of forwarding the client's cookies per request.
+
+## Client config
+
+```json
+"resolver_url": "http://100.64.0.5:8787",
+"resolver_token_file": "~/.config/ytui/resolver.token",
+"resolver_timeout_secs": 20,
+"resolver_fallback": true
+```
+
+Environment overrides:
+
+```bash
+YTUI_RESOLVER=http://100.64.0.5:8787
+YTUI_RESOLVER_TOKEN=...        # or use the token file
+```
+
+`ytui doctor` checks the resolver first:
+
+```text
+✔ resolver http://100.64.0.5:8787 (v0.4.0, 34 ms)
+· resolver yt-dlp 2026.10.26 · deno 2.9.8
+✔ yt-dlp 2026.10.26
+```
+
+If the resolver is down and `resolver_fallback` is true, doctor reports it and
+checks the local yt-dlp/deno path instead. With fallback off, a resolver
+failure is a hard error and local yt-dlp is not required for playback.
+
+## systemd (user unit)
+
+Install `tools/ytui-resolver.service` as
+`~/.config/systemd/user/ytui-resolver.service`, adjust the bind address, then:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now ytui-resolver
+journalctl --user -u ytui-resolver -f
+```
+
+Use `loginctl enable-linger "$USER"` if the server must run without a login
+session. The unit restarts on failure and reads the token file from the
+default location.
+
+## Protocol v1
+
+```text
+GET /v1/health
+  -> 200 { "ok": true, "version": "0.4.0",
+           "ytdlp": "2026.10.26", "deno": "deno 2.9.8" }
+
+GET /v1/resolve?url=<watch-url>[&refresh=1]
+  Authorization: Bearer <token>
+  -> 200 { "v": 1, "id": "...", "title": "...", "channel": "...",
+           "duration": 213.0, "ms": 812,
+           "candidates": [ { "url": "...", "itag": "141", "abr": 256 } ] }
+  -> 400 bad/missing url
+  -> 401 bad token
+  -> 429 rate limited
+  -> 502 yt-dlp failed ({"error": "<friendly text>"})
+```
+
+- The server accepts only `youtube.com/watch?v=`, `youtube.com/shorts/`,
+  `/live/`, `/embed/` and `youtu.be/` links, extracts the 11-character video
+  id and rebuilds a canonical watch URL. Extra query parameters are dropped,
+  so nothing from the wire reaches yt-dlp verbatim.
+- Candidates are ordered 141 (256 kbps) -> 140 (128 kbps) -> 139 (48 kbps
+  HE-AAC), higher bitrate first.
+- The client probes each candidate with a 1 KiB HTTP Range request. That probe
+  stays local because googlevideo URLs can be bound to the requesting IP.
+- If every candidate is refused, the client calls `/v1/resolve?...&refresh=1`
+  once to bypass the server cache and retries.
+
+## Cache and limits
+
+- 4 h TTL, 512 entries. googlevideo links normally stay valid for about 6 h.
+- `refresh=1` skips the cache but still stores the new answer.
+- At most `--max-concurrency` yt-dlp processes run at once; further requests
+  wait in the socket queue.
+- 60 requests per minute per peer IP, including cache hits. Health is exempt.
+
+## Security
+
+There is no TLS in the process. That is deliberate: Tailscale and WireGuard
+already encrypt and authenticate the path, and a private network is the
+intended deployment.
+
+- Bind a private address and keep the port firewalled from the internet.
+- Always use a token off loopback; the server refuses to start otherwise.
+- If it must be public, put Caddy/nginx in front for TLS and rate limiting,
+  and keep the resolver itself on loopback.
+- The server sees every video you resolve. Treat its logs and cookie file
+  like the YouTube account they belong to.
+
+## Troubleshooting
+
+`401 bad token`: the client token and server token differ. Re-run
+`ytui-resolver --gen-token` and point `resolver_token_file` at the file.
+
+`unreachable (...)`: the client cannot connect. Check `ytui doctor`, the bind
+address and the firewall. With fallback on, playback continues locally.
+
+`502 unavailable on youtube`: yt-dlp on the server rejected the video. Check
+the server's yt-dlp version and its cookie file, if it has one.
+
+Stale URL/403 loop: the client already retries once with `refresh=1`. If it
+keeps happening, the server's and client's public IPs may be far apart and the
+links are IP-bound; try running the resolver closer to the client or keep
+`resolver_fallback` on.

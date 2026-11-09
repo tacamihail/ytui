@@ -1,0 +1,799 @@
+//! `ytui-resolver`: a small HTTP server that runs yt-dlp on another machine.
+//!
+//! The client still finds tracks, lists playlists and plays audio; this server
+//! only turns a watch URL into AAC candidates. That moves yt-dlp's ~110 MB and
+//! deno's ~300 MB peak off the laptop.
+//!
+//! Protocol v1:
+//!   GET /v1/health                                   (no token)
+//!   GET /v1/resolve?url=<watch-url>[&refresh=1]      (bearer token)
+//!
+//! There is deliberately no TLS here. Run it on a LAN, Tailscale or WireGuard,
+//! or put a reverse proxy in front when it has to be exposed.
+
+use std::collections::{HashMap, VecDeque};
+use std::fs;
+use std::io::Write;
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+
+use ytui_resolve::{Candidate, Resolved};
+
+const DEFAULT_BIND: &str = "127.0.0.1:8787";
+const DEFAULT_TTL: Duration = Duration::from_secs(4 * 60 * 60);
+const DEFAULT_CACHE_CAP: usize = 512;
+const DEFAULT_CONCURRENCY: usize = 2;
+const RATE_MAX: usize = 60;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("ytui-resolver: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.iter().any(|a| a == "-h" || a == "--help") {
+        help();
+        return Ok(());
+    }
+    if argv.iter().any(|a| a == "-V" || a == "--version") {
+        println!("ytui-resolver {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    let args = Args::parse(&argv)?;
+
+    if args.gen_token {
+        let path = args.token_file.clone().unwrap_or_else(default_token_path);
+        write_secret(&path, &generate_token())?;
+        println!("wrote token to {}", path.display());
+        println!("point the client at it with resolver_token_file in config.json");
+        return Ok(());
+    }
+
+    let token = load_token(&args)?;
+    if !bind_is_loopback(&args.bind) && token.is_none() {
+        return Err(
+            "refusing to listen on a non-loopback address without a token\n\
+             generate one with --gen-token, or pass --token/--token-file"
+                .into(),
+        );
+    }
+    if let Some(p) = &args.cookies {
+        if !p.exists() {
+            eprintln!("warning: cookie file {} does not exist", p.display());
+        }
+    }
+    if token.is_none() {
+        eprintln!("no token configured (fine for loopback only)");
+    }
+
+    let ctx = Arc::new(Ctx {
+        token,
+        cookies: args.cookies,
+        cache: Mutex::new(Cache::new(args.cache_cap, args.cache_ttl)),
+        rate: Mutex::new(RateLimit::new(RATE_MAX, RATE_WINDOW)),
+    });
+    let gate = Arc::new(Gate::new(args.max_concurrency));
+    let server =
+        Arc::new(Server::http(&args.bind).map_err(|e| format!("cannot bind {}: {e}", args.bind))?);
+
+    eprintln!(
+        "ytui-resolver {} listening on http://{} (cache {} entries / {}s, {} concurrent resolves)",
+        env!("CARGO_PKG_VERSION"),
+        args.bind,
+        args.cache_cap,
+        args.cache_ttl.as_secs(),
+        args.max_concurrency
+    );
+
+    loop {
+        match server.recv() {
+            Ok(request) => {
+                // Health is cheap and never runs yt-dlp, so it must not wait
+                // behind a full resolve queue (doctor would look unreachable).
+                let health = request.url().starts_with("/v1/health");
+                if health {
+                    let ctx = Arc::clone(&ctx);
+                    thread::spawn(move || handle(request, &ctx));
+                    continue;
+                }
+                // Take the slot before spawning, so a burst queues in the
+                // socket instead of starting an unbounded number of threads.
+                let permit = gate.acquire();
+                let ctx = Arc::clone(&ctx);
+                thread::spawn(move || {
+                    handle(request, &ctx);
+                    drop(permit);
+                });
+            }
+            Err(e) => eprintln!("accept: {e}"),
+        }
+    }
+}
+
+struct Args {
+    bind: String,
+    token: Option<String>,
+    token_file: Option<PathBuf>,
+    cookies: Option<PathBuf>,
+    cache_ttl: Duration,
+    cache_cap: usize,
+    max_concurrency: usize,
+    gen_token: bool,
+}
+
+impl Args {
+    fn parse(argv: &[String]) -> Result<Self, String> {
+        let mut a = Self {
+            bind: DEFAULT_BIND.into(),
+            token: None,
+            token_file: None,
+            cookies: None,
+            cache_ttl: DEFAULT_TTL,
+            cache_cap: DEFAULT_CACHE_CAP,
+            max_concurrency: DEFAULT_CONCURRENCY,
+            gen_token: false,
+        };
+        let mut i = 1;
+        while i < argv.len() {
+            let arg = argv[i].as_str();
+            let mut value = |name: &str| -> Result<String, String> {
+                i += 1;
+                argv.get(i)
+                    .cloned()
+                    .ok_or_else(|| format!("{name} needs a value"))
+            };
+            match arg {
+                "--bind" => a.bind = value("--bind")?,
+                "--token" => a.token = Some(value("--token")?),
+                "--token-file" => a.token_file = Some(PathBuf::from(value("--token-file")?)),
+                "--cookies" => a.cookies = Some(PathBuf::from(value("--cookies")?)),
+                "--cache-ttl-secs" => {
+                    let n: u64 = value("--cache-ttl-secs")?
+                        .parse()
+                        .map_err(|_| "--cache-ttl-secs must be a number")?;
+                    a.cache_ttl = Duration::from_secs(n);
+                }
+                "--cache-cap" => {
+                    a.cache_cap = value("--cache-cap")?
+                        .parse()
+                        .map_err(|_| "--cache-cap must be a number")?;
+                }
+                "--max-concurrency" => {
+                    a.max_concurrency = value("--max-concurrency")?
+                        .parse::<usize>()
+                        .map_err(|_| "--max-concurrency must be a number")?
+                        .max(1);
+                }
+                "--gen-token" => a.gen_token = true,
+                other => return Err(format!("unknown option {other} (try --help)")),
+            }
+            i += 1;
+        }
+        Ok(a)
+    }
+}
+
+fn help() {
+    println!(
+        "\
+ytui-resolver {}
+
+Runs yt-dlp for ytui clients on another machine.
+
+usage:
+  ytui-resolver [options]
+
+options:
+  --bind ADDR             listen address (default {DEFAULT_BIND})
+  --token TOKEN           bearer token clients must send
+  --token-file PATH       read the token from PATH
+  --gen-token             create a random token and exit
+  --cookies PATH          pass cookies.txt to yt-dlp (age-restricted tracks)
+  --cache-ttl-secs N      how long resolved URLs are reused (default 14400)
+  --cache-cap N           cached videos kept (default 512)
+  --max-concurrency N     simultaneous yt-dlp runs (default 2)
+  -V, --version           print version
+  -h, --help              this text
+
+The default bind is loopback. Bind a tailnet/LAN address for remote clients,
+and always use a token there. TLS is left to Tailscale/WireGuard or a proxy.",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+fn load_token(args: &Args) -> Result<Option<String>, String> {
+    if let Some(t) = &args.token {
+        return Ok(Some(t.clone()));
+    }
+    let path = match &args.token_file {
+        Some(p) => Some(p.clone()),
+        None => {
+            let p = default_token_path();
+            p.exists().then_some(p)
+        }
+    };
+    match path {
+        Some(p) => {
+            let t = fs::read_to_string(&p)
+                .map_err(|e| format!("cannot read token file {}: {e}", p.display()))?
+                .trim()
+                .to_string();
+            if t.is_empty() {
+                return Err(format!("token file {} is empty", p.display()));
+            }
+            Ok(Some(t))
+        }
+        None => Ok(None),
+    }
+}
+
+fn default_token_path() -> PathBuf {
+    home().join(".config/ytui/resolver.token")
+}
+
+fn home() -> PathBuf {
+    PathBuf::from(
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".into()),
+    )
+}
+
+fn generate_token() -> String {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).expect("no system randomness");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn write_secret(path: &Path, value: &str) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    let mut file =
+        fs::File::create(path).map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+    file.write_all(value.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn bind_is_loopback(bind: &str) -> bool {
+    let host = bind.rsplit_once(':').map(|(h, _)| h).unwrap_or(bind);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+struct Ctx {
+    token: Option<String>,
+    cookies: Option<PathBuf>,
+    cache: Mutex<Cache>,
+    rate: Mutex<RateLimit>,
+}
+
+fn handle(request: Request, ctx: &Ctx) {
+    let url = request.url().to_string();
+    let path = url.split('?').next().unwrap_or("");
+    match path {
+        "/v1/health" => {
+            if request.method() != &Method::Get {
+                send_text(request, 405, "method not allowed");
+                return;
+            }
+            send_json(request, 200, health_json());
+        }
+        "/v1/resolve" => resolve_request(request, &url, ctx),
+        _ => send_text(request, 404, "not found"),
+    }
+}
+
+fn resolve_request(request: Request, url: &str, ctx: &Ctx) {
+    if request.method() != &Method::Get {
+        send_text(request, 405, "method not allowed");
+        return;
+    }
+    if !authorized(&request, &ctx.token) {
+        send_json(request, 401, r#"{"error":"bad token"}"#.into());
+        return;
+    }
+    let peer = request
+        .remote_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|| "local".into());
+    if !ctx
+        .rate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .allow(&peer)
+    {
+        send_json(request, 429, r#"{"error":"rate limited"}"#.into());
+        return;
+    }
+
+    let query = parse_query(url);
+    let Some(raw) = query.get("url") else {
+        send_json(request, 400, r#"{"error":"missing url parameter"}"#.into());
+        return;
+    };
+    let Some(id) = video_id(raw) else {
+        send_json(
+            request,
+            400,
+            r#"{"error":"url must be a YouTube watch or youtu.be link"}"#.into(),
+        );
+        return;
+    };
+    let refresh = matches!(query.get("refresh").map(String::as_str), Some("1" | "true"));
+
+    if !refresh {
+        let hit = ctx.cache.lock().unwrap_or_else(|e| e.into_inner()).get(&id);
+        if let Some(track) = hit {
+            send_json(request, 200, resolve_json(&track, 0));
+            return;
+        }
+    }
+
+    let canonical = format!("https://www.youtube.com/watch?v={id}");
+    let cookies = ctx
+        .cookies
+        .as_deref()
+        .and_then(Path::to_str)
+        .map(|p| ("--cookies", p));
+    let started = Instant::now();
+    let result = ytui_resolve::resolve(&canonical, cookies);
+    let ms = started.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(track) => {
+            ctx.cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .put(&id, track.clone());
+            eprintln!(
+                "resolve {id} ok ({ms} ms, {} candidates)",
+                track.candidates.len()
+            );
+            send_json(request, 200, resolve_json(&track, ms));
+        }
+        Err(e) => {
+            eprintln!("resolve {id} failed: {e}");
+            let body = serde_json::json!({ "error": e }).to_string();
+            send_json(request, 502, body);
+        }
+    }
+}
+
+fn authorized(request: &Request, token: &Option<String>) -> bool {
+    let Some(expected) = token else {
+        return true;
+    };
+    let got = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Authorization"))
+        .map(|h| h.value.as_str())
+        .unwrap_or("");
+    let got = got
+        .strip_prefix("Bearer ")
+        .or_else(|| got.strip_prefix("bearer "))
+        .unwrap_or("")
+        .trim();
+    constant_time_eq(got.as_bytes(), expected.as_bytes())
+}
+
+/// Compare without returning early on the first differing byte.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn health_json() -> String {
+    serde_json::json!({
+        "ok": true,
+        "version": env!("CARGO_PKG_VERSION"),
+        "ytdlp": version_of("yt-dlp"),
+        "deno": version_of("deno"),
+    })
+    .to_string()
+}
+
+fn version_of(bin: &str) -> Option<String> {
+    let out = Command::new(bin)
+        .env("PATH", ytui_resolve::tool_path())
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn resolve_json(track: &Resolved, ms: u64) -> String {
+    #[derive(Serialize)]
+    struct Body<'a> {
+        v: u8,
+        id: &'a str,
+        title: &'a str,
+        channel: &'a str,
+        duration: f64,
+        ms: u64,
+        candidates: &'a [Candidate],
+    }
+    serde_json::to_string(&Body {
+        v: 1,
+        id: &track.id,
+        title: &track.title,
+        channel: &track.channel,
+        duration: track.duration,
+        ms,
+        candidates: &track.candidates,
+    })
+    .unwrap_or_else(|_| r#"{"error":"cannot serialize response"}"#.into())
+}
+
+fn send_json(request: Request, code: u16, body: String) {
+    send(request, code, body, "application/json");
+}
+
+fn send_text(request: Request, code: u16, body: &str) {
+    send(request, code, body.to_string(), "text/plain; charset=utf-8");
+}
+
+fn send(request: Request, code: u16, body: String, content_type: &str) {
+    let header = Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes())
+        .expect("static content type");
+    let response = Response::from_string(body)
+        .with_status_code(StatusCode(code))
+        .with_header(header);
+    let _ = request.respond(response);
+}
+
+// ---------------- cache ----------------
+
+struct Cache {
+    entries: HashMap<String, (Instant, Resolved)>,
+    cap: usize,
+    ttl: Duration,
+}
+
+impl Cache {
+    fn new(cap: usize, ttl: Duration) -> Self {
+        Self {
+            entries: HashMap::new(),
+            cap: cap.max(1),
+            ttl,
+        }
+    }
+
+    fn get(&mut self, id: &str) -> Option<Resolved> {
+        let expired = self
+            .entries
+            .get(id)
+            .map(|(at, _)| at.elapsed() > self.ttl)
+            .unwrap_or(false);
+        if expired {
+            self.entries.remove(id);
+            return None;
+        }
+        self.entries.get(id).map(|(_, track)| track.clone())
+    }
+
+    fn put(&mut self, id: &str, track: Resolved) {
+        if self.entries.len() >= self.cap {
+            if let Some(old) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+            {
+                self.entries.remove(&old);
+            }
+        }
+        self.entries.insert(id.to_string(), (Instant::now(), track));
+    }
+}
+
+// ---------------- rate limit ----------------
+
+struct RateLimit {
+    hits: HashMap<String, VecDeque<Instant>>,
+    max: usize,
+    window: Duration,
+}
+
+impl RateLimit {
+    fn new(max: usize, window: Duration) -> Self {
+        Self {
+            hits: HashMap::new(),
+            max,
+            window,
+        }
+    }
+
+    fn allow(&mut self, key: &str) -> bool {
+        let now = Instant::now();
+        let hits = self.hits.entry(key.to_string()).or_default();
+        while hits
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) > self.window)
+        {
+            hits.pop_front();
+        }
+        if hits.len() >= self.max {
+            false
+        } else {
+            hits.push_back(now);
+            true
+        }
+    }
+}
+
+// ---------------- concurrency gate ----------------
+
+struct Gate {
+    limit: usize,
+    active: Mutex<usize>,
+    cv: Condvar,
+}
+
+impl Gate {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit: limit.max(1),
+            active: Mutex::new(0),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn acquire(self: &Arc<Self>) -> Permit {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        while *active >= self.limit {
+            active = self.cv.wait(active).unwrap_or_else(|e| e.into_inner());
+        }
+        *active += 1;
+        Permit(Arc::clone(self))
+    }
+}
+
+struct Permit(Arc<Gate>);
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let mut active = self.0.active.lock().unwrap_or_else(|e| e.into_inner());
+        *active = active.saturating_sub(1);
+        self.0.cv.notify_one();
+    }
+}
+
+// ---------------- URL parsing ----------------
+
+fn parse_query(url: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Some((_, query)) = url.split_once('?') {
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            out.insert(pct_decode(k), pct_decode(v));
+        }
+    }
+    out
+}
+
+fn pct_decode(s: &str) -> String {
+    fn hex(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => match (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                (Some(a), Some(b)) => {
+                    out.push(a * 16 + b);
+                    i += 3;
+                }
+                _ => {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            },
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Accepts a YouTube watch/shorts/live/embed URL or a youtu.be link and
+/// returns the 11-character video id. Everything else is refused, so the
+/// server never passes arbitrary text to yt-dlp.
+fn video_id(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let no_scheme = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+        .unwrap_or(raw);
+    let (authority, rest) = no_scheme.split_once('/').unwrap_or((no_scheme, ""));
+    let host = authority
+        .rsplit('@')
+        .next()
+        .unwrap_or(authority)
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let short = host == "youtu.be";
+    let youtube = matches!(host, "youtube.com" | "music.youtube.com" | "m.youtube.com");
+    if !short && !youtube {
+        return None;
+    }
+
+    let path = rest.split(['?', '#']).next().unwrap_or("");
+    let candidate = if short {
+        path.split('/').next().unwrap_or("").to_string()
+    } else if path == "watch" || path.is_empty() {
+        let (_, query) = rest.split_once('?')?;
+        parse_query(&format!("/?{query}")).get("v")?.clone()
+    } else {
+        let mut parts = path.split('/');
+        match parts.next()? {
+            "shorts" | "live" | "embed" => parts.next()?.to_string(),
+            _ => return None,
+        }
+    };
+
+    is_video_id(&candidate).then_some(candidate)
+}
+
+fn is_video_id(s: &str) -> bool {
+    s.len() == 11
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_watch_and_short_links() {
+        for url in [
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=LM",
+            "http://m.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ?t=42",
+            "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+            "https://www.youtube.com/live/dQw4w9WgXcQ",
+        ] {
+            assert_eq!(video_id(url).as_deref(), Some("dQw4w9WgXcQ"), "{url}");
+        }
+    }
+
+    #[test]
+    fn rejects_everything_else() {
+        for url in [
+            "https://example.com/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/playlist?list=PL123",
+            "https://www.youtube.com/watch?v=short",
+            "https://www.youtube.com/redirect?q=--exec",
+            "file:///etc/passwd",
+            "",
+        ] {
+            assert_eq!(video_id(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn drops_extra_query_parameters() {
+        assert_eq!(
+            video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&x=--exec").as_deref(),
+            Some("dQw4w9WgXcQ")
+        );
+    }
+
+    #[test]
+    fn decodes_query_values() {
+        let q = parse_query(
+            "/v1/resolve?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dabc&refresh=1",
+        );
+        assert_eq!(
+            q.get("url").map(String::as_str),
+            Some("https://www.youtube.com/watch?v=abc")
+        );
+        assert_eq!(q.get("refresh").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn constant_time_compare_is_correct() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secret "));
+    }
+
+    #[test]
+    fn cache_expires_and_evicts() {
+        let mut cache = Cache::new(1, Duration::from_millis(20));
+        let track = Resolved {
+            id: "a".into(),
+            title: "t".into(),
+            channel: "c".into(),
+            duration: 1.0,
+            candidates: Vec::new(),
+        };
+        cache.put("a", track.clone());
+        assert!(cache.get("a").is_some());
+        cache.put("b", track);
+        assert!(cache.get("a").is_none());
+        assert!(cache.get("b").is_some());
+        thread::sleep(Duration::from_millis(30));
+        assert!(cache.get("b").is_none());
+    }
+
+    #[test]
+    fn rate_limit_window() {
+        let mut rate = RateLimit::new(2, Duration::from_millis(20));
+        assert!(rate.allow("peer"));
+        assert!(rate.allow("peer"));
+        assert!(!rate.allow("peer"));
+        thread::sleep(Duration::from_millis(30));
+        assert!(rate.allow("peer"));
+    }
+
+    #[test]
+    fn loopback_bind_detection() {
+        assert!(bind_is_loopback("127.0.0.1:8787"));
+        assert!(bind_is_loopback("localhost:8787"));
+        assert!(bind_is_loopback("[::1]:8787"));
+        assert!(!bind_is_loopback("0.0.0.0:8787"));
+        assert!(!bind_is_loopback("100.64.0.5:8787"));
+    }
+}

@@ -5,22 +5,22 @@
 //! the full JSON, picks the best AAC format that actually answers and hands the
 //! URL to the decoder.
 
-use std::io::{self, BufRead, BufReader, Read};
-use std::process::{Command, Output, Stdio};
+use std::io::{BufRead, BufReader};
+use std::process::Stdio;
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::entry::Entry;
+use crate::remote;
+use ytui_resolve::friendly;
+
+pub(crate) use ytui_resolve::{command, tool_path, UA};
 
 pub const LIKED_MUSIC_URL: &str = "https://music.youtube.com/playlist?list=LM";
 /// System playlist owned by the account; unlike `LM` it exposes the owner.
 pub const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
-
-/// Browser-ish UA; googlevideo accepts any modern string.
-pub const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-                      Chrome/126.0.0.0 Safari/537.36";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -44,113 +44,6 @@ pub enum Msg {
 
 const SEP: char = '\u{1f}';
 const TEMPLATE: &str = "%(id)s\u{1f}%(title)s\u{1f}%(duration)s\u{1f}%(channel,uploader)s";
-
-/// `yt-dlp` plus the directories the installer uses, so a binary installed by
-/// `install.sh` is found even when the TUI was started from a shell that has
-/// not picked up the new PATH yet. The same PATH also lets yt-dlp find `deno`,
-/// which it needs to solve YouTube's JS challenges.
-pub(crate) fn tool_path() -> String {
-    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-    for var in ["HOME", "USERPROFILE"] {
-        if let Ok(home) = std::env::var(var) {
-            if !home.is_empty() {
-                let home = std::path::PathBuf::from(home);
-                dirs.push(home.join(".local/bin"));
-                dirs.push(home.join(".deno/bin"));
-                dirs.push(home.join(".cargo/bin"));
-                break;
-            }
-        }
-    }
-    if let Ok(path) = std::env::var("PATH") {
-        dirs.extend(std::env::split_paths(&path));
-    }
-    std::env::join_paths(dirs)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
-fn on_path(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|d| d.join(name).is_file()))
-        .unwrap_or(false)
-}
-
-pub(crate) fn command() -> Command {
-    // Resolving a track is background work, but yt-dlp + deno still burn a
-    // core for a couple of seconds. Running it below the audio thread's
-    // priority keeps a busy prefetch from turning into the occasional click.
-    let mut c = if on_path("nice") && on_path("yt-dlp") {
-        let mut c = Command::new("nice");
-        c.args(["-n", "10", "yt-dlp"]);
-        c
-    } else {
-        Command::new("yt-dlp")
-    };
-    c.env("PATH", tool_path());
-    c
-}
-
-/// How long a `yt-dlp -j` resolve may take before it is killed.
-///
-/// A normal answer takes a few seconds (the JS challenge is what costs most of
-/// it). Anything longer is a stuck challenge or network call: waiting forever
-/// would also freeze the background prefetch queue and leave a later handover
-/// to resolve the track on the audio thread.
-const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Runs `cmd` and collects its output, killing it at `timeout`.
-///
-/// Both pipes are drained on their own threads so a large JSON answer cannot
-/// fill a pipe and make the process look hung.
-fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let mut stdout = child.stdout.take().expect("stdout is piped");
-    let mut stderr = child.stderr.take().expect("stderr is piped");
-    let out = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
-        buf
-    });
-    let err = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf);
-        buf
-    });
-
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(40)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = out.join();
-                let _ = err.join();
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "yt-dlp timed out"));
-            }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = out.join();
-                let _ = err.join();
-                return Err(e);
-            }
-        }
-    };
-
-    Ok(Output {
-        status,
-        stdout: out.join().unwrap_or_default(),
-        stderr: err.join().unwrap_or_default(),
-    })
-}
 
 pub fn label(kind: Kind) -> &'static str {
     match kind {
@@ -289,88 +182,56 @@ pub struct Stream {
 
 /// Resolves a watch URL to a direct audio URL that our decoder can stream.
 ///
-/// YouTube is inconsistent about which AAC bitrates it serves: `itag=140`
-/// (128 kbps) works for most videos but returns 403 for others, while
-/// `itag=139` (HE-AAC, 48 kbps) almost always works. So instead of trusting
-/// the first URL `-g` prints, we ask for the whole JSON, order the AAC formats
-/// best-first and probe each with a 1 KiB Range request until one answers.
+/// With `resolver_url` configured the work happens on another machine and the
+/// candidates come back over HTTP. Either way the probes run locally, because
+/// googlevideo URLs can be bound to the requesting IP. On a resolver failure
+/// the client falls back to local yt-dlp unless `resolver_fallback` is off.
 pub fn stream_url(url: &str, cfg: &Config) -> Result<Stream, String> {
-    let mut c = command();
-    c.args(["--no-warnings", "-j", url]);
-    if let Some((flag, value)) = cfg.cookie_args() {
-        c.arg(flag).arg(value);
-    }
-    let out = output_with_timeout(&mut c, RESOLVE_TIMEOUT).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound => {
-            "yt-dlp not found, install it and run: ytui doctor".to_string()
+    if let Some(settings) = remote::settings(cfg) {
+        match remote_stream(url, &settings) {
+            Ok(stream) => return Ok(stream),
+            Err(e) if settings.fallback => remote::note_fallback(&e),
+            Err(e) => return Err(format!("resolver: {e}")),
         }
-        io::ErrorKind::TimedOut => "yt-dlp timed out while resolving the stream".to_string(),
-        _ => format!("yt-dlp: {e}"),
-    })?;
-    if !out.status.success() {
-        return Err(friendly(&String::from_utf8_lossy(&out.stderr)));
     }
-    let info: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("bad yt-dlp json: {e}"))?;
+    local_stream(url, cfg)
+}
 
-    let text = |key: &str| {
-        info.get(key)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-    let meta = Stream {
+fn remote_stream(url: &str, settings: &remote::Settings) -> Result<Stream, String> {
+    let first = remote::resolve(settings, url, false)?;
+    if let Ok(stream) = playable(first) {
+        return Ok(stream);
+    }
+    // A cached URL can expire while the client still has it. Ask once more
+    // with the server cache bypassed before giving up.
+    let refreshed = remote::resolve(settings, url, true)?;
+    playable(refreshed).map_err(|e| format!("refreshed URLs still failed ({e})"))
+}
+
+fn local_stream(url: &str, cfg: &Config) -> Result<Stream, String> {
+    let cookies = cfg.cookie_args();
+    let resolved = ytui_resolve::resolve(
+        url,
+        cookies
+            .as_ref()
+            .map(|(flag, value)| (*flag, value.as_str())),
+    )?;
+    playable(resolved)
+}
+
+/// Probes the candidates best-first and returns the first one the CDN serves.
+fn playable(resolved: ytui_resolve::Resolved) -> Result<Stream, String> {
+    let mut stream = Stream {
         url: String::new(),
-        title: text("title"),
-        channel: {
-            let channel = text("channel");
-            if channel.is_empty() {
-                text("uploader")
-            } else {
-                channel
-            }
-        },
-        duration: info.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        title: resolved.title,
+        channel: resolved.channel,
+        duration: resolved.duration,
     };
-
-    let formats = info
-        .get("formats")
-        .and_then(|f| f.as_array())
-        .ok_or_else(|| "yt-dlp returned no formats".to_string())?;
-
-    let mut candidates: Vec<(u8, u64, String)> = Vec::new();
-    for f in formats {
-        let Some(u) = f.get("url").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let ext = f.get("ext").and_then(|v| v.as_str()).unwrap_or("");
-        let codec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("");
-        if ext != "m4a" && !codec.starts_with("mp4a") {
-            continue;
-        }
-        let id = f.get("format_id").and_then(|v| v.as_str()).unwrap_or("");
-        // Lower rank = preferred. 141 is 256 kbps (Music Premium), 140 is
-        // 128 kbps, 139 is 48 kbps HE-AAC.
-        let rank = match id {
-            "141" => 0,
-            "140" => 1,
-            "139" => 2,
-            _ => 3,
-        };
-        let abr = f.get("abr").and_then(|v| v.as_f64()).unwrap_or(0.0) as u64;
-        candidates.push((rank, u64::MAX - abr.min(1_000_000) as u64, u.to_string()));
-    }
-    if candidates.is_empty() {
-        return Err("no AAC stream for this track (opus only)".into());
-    }
-    candidates.sort_by_key(|(rank, abr, _)| (*rank, *abr));
-
     let mut last = String::from("no candidate answered");
-    let mut stream = meta;
-    for (_, _, candidate) in candidates.iter().take(4) {
-        match probe(candidate) {
+    for candidate in resolved.candidates.iter().take(4) {
+        match probe(&candidate.url) {
             Ok(()) => {
-                stream.url = candidate.clone();
+                stream.url = candidate.url.clone();
                 return Ok(stream);
             }
             Err(e) => last = e,
@@ -459,83 +320,58 @@ pub fn account(cfg: &Config) -> Result<(String, String), String> {
     }
 }
 
-fn friendly(stderr: &str) -> String {
-    let low = stderr.to_lowercase();
-    if low.contains("in your country") {
-        "blocked in your country".into()
-    } else if low.contains("video unavailable") || low.contains("this video is not available") {
-        // YouTube answers this for removed uploads, region blocks and tracks
-        // that only exist in its catalogue. Nothing about it is fixable here.
-        "unavailable on youtube".into()
-    } else if low.contains("not a bot") {
-        "youtube wants a sign-in check, try again later".into()
-    } else if low.contains("confirm your age") || low.contains("age-restricted") {
-        "age-restricted, the cookies must be from an adult account".into()
-    } else if low.contains("members-only") || low.contains("join this channel") {
-        "members-only, this account cannot play it".into()
-    } else if low.contains("playlist does not exist") {
-        // YouTube answers this for Watch Later / Liked Music when the cookies
-        // are signed out or missing their HttpOnly half.
-        "playlist not found, cookies may have expired: run `ytui auth <cookies.txt>`".into()
-    } else if low.contains("private") || low.contains("sign in") || low.contains("login") {
-        "private: sign-in required, run `ytui auth <cookies.txt>`".into()
-    } else if low.contains("cookie") {
-        format!(
-            "cookies error, re-export cookies.txt ({})",
-            first_lines(stderr)
-        )
-    } else if low.contains("no such option") || low.contains("unknown option") {
-        format!("yt-dlp is too old, update it ({})", first_lines(stderr))
-    } else {
-        first_lines(stderr)
-    }
-}
-
-fn first_lines(s: &str) -> String {
-    s.lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .map(|l| l.strip_prefix("ERROR: ").unwrap_or(l))
-        .take(2)
-        .collect::<Vec<_>>()
-        .join(" · ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
-    /// A stuck resolve must not pin the prefetch queue forever.
-    #[test]
-    fn a_hung_resolver_is_killed() {
-        if !cfg!(unix) {
-            return;
-        }
-        let mut c = Command::new("sleep");
-        c.arg("5");
-        let start = Instant::now();
-        let err = output_with_timeout(&mut c, Duration::from_millis(200)).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        assert!(start.elapsed() < Duration::from_secs(2));
+    /// A resolver and a CDN in one: `/v1/resolve` returns a candidate, and the
+    /// candidate URL answers the 1 KiB probe with 206.
+    fn fake_resolver() -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let (status, body) = if request.starts_with("GET /v1/resolve") {
+                    let body = format!(
+                        r#"{{"v":1,"id":"dQw4w9WgXcQ","title":"Remote","channel":"Server","duration":1.0,"ms":3,"candidates":[{{"url":"http://127.0.0.1:{}/audio","itag":"140","abr":128}}]}}"#,
+                        addr.port()
+                    );
+                    ("200 OK", body)
+                } else if request.starts_with("GET /audio") {
+                    ("206 Partial Content", String::new())
+                } else {
+                    ("404 Not Found", String::new())
+                };
+                let _ = write!(
+                    sock,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (format!("http://{addr}"), handle)
     }
 
     #[test]
-    fn output_is_collected_while_the_process_runs() {
-        if !cfg!(unix) {
-            return;
-        }
-        let mut c = Command::new("sh");
-        c.args(["-c", "printf hello"]);
-        let out = output_with_timeout(&mut c, Duration::from_secs(5)).unwrap();
-        assert!(out.status.success());
-        assert_eq!(out.stdout, b"hello");
-    }
-
-    /// Watch Later and Liked Music answer this when the cookies do not sign
-    /// in; the raw yt-dlp line does not tell the user what to do.
-    #[test]
-    fn missing_playlists_point_at_the_cookies() {
-        let err = "ERROR: [youtube:tab] LM: YouTube said: The playlist does not exist.";
-        assert!(friendly(err).contains("ytui auth"));
+    fn remote_resolver_supplies_a_playable_candidate() {
+        let (base, server) = fake_resolver();
+        let cfg = Config {
+            resolver_url: base,
+            resolver_fallback: false,
+            ..Config::default()
+        };
+        let stream = stream_url("https://youtu.be/dQw4w9WgXcQ", &cfg).unwrap();
+        assert_eq!(stream.title, "Remote");
+        assert_eq!(stream.channel, "Server");
+        assert!(stream.url.ends_with("/audio"), "{}", stream.url);
+        server.join().unwrap();
     }
 }

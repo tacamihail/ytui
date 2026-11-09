@@ -1,0 +1,20 @@
+[Unit]
+Description=ytui remote resolver
+Documentation=https://github.com/tacamihail/ytui/blob/main/docs/resolver.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust the bind address: 127.0.0.1:8787 for a proxy in front, or a
+# tailnet/LAN address for direct clients. Never expose it to the internet.
+# Add `--cookies %h/.config/ytui/cookies.txt` if you want the server to use
+# its own account for age-restricted tracks.
+ExecStart=%h/.local/bin/ytui-resolver --bind 0.0.0.0:8787
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

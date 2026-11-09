@@ -8,5 +8,10 @@
   "volume_step": 5,
   "volume": 35,
   "buffer_ms": 2000,
-  "cache_kib": 256
+  "cache_kib": 256,
+  "resolver_url": "",
+  "resolver_token": "",
+  "resolver_token_file": "",
+  "resolver_timeout_secs": 20,
+  "resolver_fallback": true
 }

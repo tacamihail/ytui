@@ -524,14 +524,14 @@ impl App {
     /// The engine cannot reach the toast directly, so it bumps a counter when
     /// it walks past a track YouTube would not serve.
     fn pick_up_notice(&mut self) {
-        let (seq, msg) = {
+        let (seq, msg, err) = {
             let st = lock(&self.player);
-            (st.notice_seq, st.notice.clone())
+            (st.notice_seq, st.notice.clone(), st.notice_err)
         };
         if seq != self.notice_seq {
             self.notice_seq = seq;
             if let Some(msg) = msg {
-                self.set_toast(msg, true);
+                self.set_toast(msg, err);
             }
         }
     }

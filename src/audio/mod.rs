@@ -69,6 +69,8 @@ pub struct State {
     /// Set after a track is skipped because it would not resolve; the UI
     /// shows it once as a toast.
     pub notice: Option<String>,
+    /// Whether `notice` is an error (red) or just information (green).
+    pub notice_err: bool,
     pub notice_seq: u64,
     /// Bumped whenever the queue contents change, so the UI can cache rows.
     pub version: u64,
@@ -91,6 +93,7 @@ impl Default for State {
             repeat: Repeat::Off,
             err: None,
             notice: None,
+            notice_err: false,
             notice_seq: 0,
             version: 1,
         }
@@ -456,6 +459,7 @@ impl Engine {
     /// exact URL, otherwise straight from yt-dlp. A click never waits behind
     /// the prefetch queue.
     fn resolve(&self, url: &str) -> Result<ytdl::Stream, String> {
+        self.surface_note();
         if let Some(s) = self.prefetch.take(url) {
             return Ok(s);
         }
@@ -472,10 +476,23 @@ impl Engine {
         // processes overlap for a moment.
         self.prefetch.drop_queued(url);
         let res = ytdl::stream_url(url, &self.cfg);
+        self.surface_note();
         if let Ok(stream) = &res {
             self.prefetch.remember(url, stream);
         }
         res
+    }
+
+    /// Moves a remote-resolver failure into the player state, where the UI
+    /// shows it as a single toast. The notice is consumed, so a server that
+    /// stays down does not produce one per track.
+    fn surface_note(&self) {
+        if let Some(msg) = crate::remote::take_note() {
+            let mut st = self.lock();
+            st.notice = Some(msg);
+            st.notice_err = false;
+            st.notice_seq = st.notice_seq.wrapping_add(1);
+        }
     }
 
     /// Ask for the next track's URL once the current one is about to end.
@@ -787,6 +804,7 @@ impl Engine {
                     self.fails += 1;
                     let mut st = self.lock();
                     st.notice = Some(format!("{e}, skipped {}", st.title));
+                    st.notice_err = true;
                     st.notice_seq = st.notice_seq.wrapping_add(1);
                     drop(st);
                     self.start((index + 1) % len);

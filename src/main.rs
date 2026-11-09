@@ -9,6 +9,7 @@ mod auth;
 mod config;
 mod entry;
 mod listcache;
+mod remote;
 mod ui;
 mod update;
 mod ytapi;
@@ -101,6 +102,62 @@ fn doctor() -> i32 {
     let mut healthy = true;
     println!("ytui {} environment check\n", env!("CARGO_PKG_VERSION"));
 
+    let cfg = config::load();
+
+    // The resolver is checked first because a healthy one removes the local
+    // yt-dlp/deno requirement entirely.
+    let remote = remote::settings(&cfg);
+    let mut remote_ok = false;
+    if let Some(s) = &remote {
+        match remote::health(s) {
+            Ok((h, ms)) => {
+                remote_ok = h.ok;
+                if !h.ok {
+                    println!("✗ resolver {} reported not ok", s.base);
+                    healthy = false;
+                } else {
+                    let version = if h.version.is_empty() {
+                        "?"
+                    } else {
+                        &h.version
+                    };
+                    println!("✔ resolver {} (v{version}, {ms} ms)", s.base);
+                }
+                match (&h.ytdlp, &h.deno) {
+                    (Some(y), Some(d)) => println!("· resolver yt-dlp {y} · {d}"),
+                    (Some(y), None) => {
+                        println!("✗ resolver yt-dlp {y} · deno missing");
+                        healthy = false;
+                    }
+                    (None, Some(d)) => {
+                        println!("✗ resolver deno {d} · yt-dlp missing");
+                        healthy = false;
+                    }
+                    (None, None) => {
+                        println!("✗ resolver has neither yt-dlp nor deno");
+                        healthy = false;
+                    }
+                }
+            }
+            Err(e) if s.fallback => {
+                println!(
+                    "· resolver {} unavailable ({e}), using local yt-dlp",
+                    s.base
+                );
+            }
+            Err(e) => {
+                println!("✗ resolver {}: {e}", s.base);
+                healthy = false;
+            }
+        }
+    }
+    // Local yt-dlp only matters when nothing else can resolve: no resolver at
+    // all, or the configured one is down and fallback is enabled.
+    let local_needed = match &remote {
+        None => true,
+        Some(s) => s.fallback && !remote_ok,
+    };
+
     match ytdl::command().arg("--version").output() {
         Ok(o) if o.status.success() => {
             let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -111,10 +168,15 @@ fn doctor() -> i32 {
                 .unwrap_or(0);
             if year >= 2025 {
                 println!("✔ yt-dlp {v}");
-            } else {
+            } else if local_needed {
                 println!("✗ yt-dlp {v} is too old, run install.sh to update it");
                 healthy = false;
+            } else {
+                println!("· yt-dlp {v} is old, but the resolver does the work");
             }
+        }
+        _ if !local_needed => {
+            println!("· yt-dlp not needed locally while the resolver is up");
         }
         _ => {
             println!("✗ yt-dlp not found in PATH (needed for search and stream resolution)");
@@ -131,6 +193,9 @@ fn doctor() -> i32 {
             let v = String::from_utf8_lossy(&o.stdout);
             println!("✔ {}", v.lines().next().unwrap_or("deno").trim());
         }
+        _ if !local_needed => {
+            println!("· deno not needed locally while the resolver is up");
+        }
         _ => {
             println!("✗ deno not found, yt-dlp needs it to solve YouTube JS challenges");
             healthy = false;
@@ -145,7 +210,6 @@ fn doctor() -> i32 {
         }
     }
 
-    let cfg = config::load();
     match cfg.cookie_args() {
         Some((flag, value)) => {
             // The saved account name can be months old; ask YouTube once so

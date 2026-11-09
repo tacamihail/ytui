@@ -1,6 +1,6 @@
 [package]
 name = "ytui"
-version = "0.3.20"
+version = "0.4.0"
 edition = "2021"
 description = "A YouTube Music player for the terminal"
 license = "MIT"
@@ -24,11 +24,20 @@ libc = "0.2"
 # Same crate and version ratatui uses, so our padding and its cell layout agree
 # when a title contains wide characters.
 unicode-width = "0.2"
+# yt-dlp invocation and AAC candidate ranking, shared with the resolver server.
+ytui-resolve = { path = "crates/resolve" }
 
 # Standalone crate. Without this, cargo walks up the directory tree looking for
 # a workspace root and trips over any Cargo.toml in a parent directory (for
 # example an unrelated or half-finished one in ~/Downloads).
+#
+# The shared resolve crate is used by both the TUI and the optional resolver
+# server. `default-members` keeps `cargo build --release` (and therefore
+# install.sh and `ytui update`) building only the client.
 [workspace]
+members = ["crates/resolve", "crates/resolver"]
+default-members = ["."]
+resolver = "2"
 
 [profile.release]
 opt-level = 3

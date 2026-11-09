@@ -27,6 +27,18 @@ pub struct Config {
     pub buffer_ms: u32,
     /// HTTP range cache chunk in KiB (one chunk is resident at a time).
     pub cache_kib: u64,
+    /// Optional `ytui-resolver` base URL, e.g. `http://100.64.0.5:8787`.
+    /// Empty means resolve locally with yt-dlp.
+    pub resolver_url: String,
+    /// Bearer token for the resolver (takes precedence over the file).
+    pub resolver_token: String,
+    /// File containing the resolver token. Empty = `~/.config/ytui/resolver.token`
+    /// when it exists.
+    pub resolver_token_file: String,
+    /// How long to wait for `/v1/resolve`, seconds.
+    pub resolver_timeout_secs: u64,
+    /// Fall back to local yt-dlp when the resolver is unreachable or fails.
+    pub resolver_fallback: bool,
 }
 
 impl Default for Config {
@@ -42,6 +54,11 @@ impl Default for Config {
             volume: 35,
             buffer_ms: 2000,
             cache_kib: 256,
+            resolver_url: String::new(),
+            resolver_token: String::new(),
+            resolver_token_file: String::new(),
+            resolver_timeout_secs: 20,
+            resolver_fallback: true,
         }
     }
 }
@@ -176,5 +193,17 @@ mod tests {
         adopt_cookies_file(&mut cfg, false);
         assert!(cfg.cookies_file.is_empty());
         assert_eq!(cfg.cookie_args(), None);
+    }
+
+    #[test]
+    fn an_old_config_without_resolver_fields_still_loads() {
+        let cfg: Config = serde_json::from_str(r#"{"results_count": 5, "volume": 10}"#).unwrap();
+        assert_eq!(cfg.results_count, 5);
+        assert_eq!(cfg.volume, 10);
+        assert!(cfg.resolver_url.is_empty());
+        assert!(cfg.resolver_token.is_empty());
+        assert!(cfg.resolver_token_file.is_empty());
+        assert_eq!(cfg.resolver_timeout_secs, 20);
+        assert!(cfg.resolver_fallback);
     }
 }
