@@ -262,9 +262,45 @@ the 1 KiB probes local.
 
 Build and install it on the server:
 
+### Server-only install
+
+The resolver is a separate package. Building it does not compile the TUI,
+`ratatui`, `cpal` or `symphonia`, and the server needs no ALSA. The resulting
+binary is about 600 KB.
+
+If the server has Rust, this downloads the source to cargo's cache and builds
+only `ytui-resolver` and `ytui-resolve`:
+
+```bash
+cargo install --git https://github.com/tacamihail/ytui --branch remote-resolver ytui-resolver
+```
+
+The binary lands in `~/.cargo/bin/ytui-resolver`. Once the branch is merged,
+drop `--branch remote-resolver`. `cargo install` does not install `yt-dlp` or
+`deno`; the server still needs both.
+
+If you prefer a checkout, or want the script to install `yt-dlp` and `deno`
+too:
+
+```bash
+git clone --branch remote-resolver https://github.com/tacamihail/ytui.git
+cd ytui
+./install-resolver.sh          # add --token for public/token mode
+```
+
+`install-resolver.sh` builds only `-p ytui-resolver` and installs
+`~/.local/bin/ytui-resolver`. The manual equivalent inside a checkout is:
+
 ```bash
 cargo build --release -p ytui-resolver
 install -Dm755 target/release/ytui-resolver ~/.local/bin/ytui-resolver
+```
+
+Without keeping a checkout, fetch the script and run it with `--from-git`:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/tacamihail/ytui/remote-resolver/install-resolver.sh
+bash install-resolver.sh --from-git
 ```
 
 ### Automatic discovery

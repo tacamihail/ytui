@@ -16,15 +16,44 @@ as before and resolves locally.
 
 ## Build and install
 
-From the repository root:
+The resolver is its own package, so a server does not build the TUI, audio
+crates or ALSA. The binary is about 600 KB. There are no prebuilt server
+binaries yet, so the server needs Rust for either route below. Pick one:
+
+```bash
+# no checkout to manage: cargo builds only ytui-resolver and ytui-resolve
+cargo install --git https://github.com/tacamihail/ytui --branch remote-resolver ytui-resolver
+```
+
+or, from a checkout:
+
+```bash
+git clone --branch remote-resolver https://github.com/tacamihail/ytui.git
+cd ytui
+./install-resolver.sh          # add --token for public/token mode
+```
+
+`install-resolver.sh` installs `yt-dlp` and `deno` if they are missing, then
+builds only `-p ytui-resolver`. The manual equivalent is:
 
 ```bash
 cargo build --release -p ytui-resolver
 install -Dm755 target/release/ytui-resolver ~/.local/bin/ytui-resolver
 ```
 
-`install.sh` installs only the client, so a server box does not need ALSA or
-the audio crates.
+After the branch is merged, use `main` and drop `--branch remote-resolver` /
+`--branch`. `cargo install` leaves `yt-dlp` and `deno` to you; the script
+installs them.
+
+If you want the script's `yt-dlp`/`deno` setup without keeping a checkout:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/tacamihail/ytui/remote-resolver/install-resolver.sh
+bash install-resolver.sh --from-git
+```
+
+`--from-git` runs `cargo install` under the hood, so only the resolver package
+is built. Set `YTUI_BRANCH` if you are installing from a different branch.
 
 ## Token
 
