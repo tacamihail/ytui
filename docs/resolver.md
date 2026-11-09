@@ -149,11 +149,11 @@ ytui discover --save --timeout 10
 
 The scan probes port 8787 on localhost, each private IPv4 `/24`, and Tailscale
 peers obtained from `tailscale status --json`. The CLI is looked up as
-`tailscale` and then as `tailscale.exe`, so a WSL client can use the Windows
-Tailscale install. Every probe has a short connect timeout, so a silent host
-cannot stretch the scan past its deadline. A tokenless result is preferred and
-applied automatically; a token-protected result is only applied when
-`resolver_token_file` already points at a token.
+`tailscale`, `tailscale.exe` (WSL) and the macOS app bundle. Every probe has a
+short connect timeout, so a silent host cannot stretch the scan past its
+deadline. A tokenless result is preferred and applied automatically, and the
+scan stops as soon as one answers; a token-protected result is only applied
+when `resolver_token_file` already points at a token.
 
 WSL note: a client inside WSL sees the WSL virtual network, not the Windows
 LAN, so a resolver in another physical `/24` is invisible from inside WSL. A

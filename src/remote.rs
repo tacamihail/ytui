@@ -23,13 +23,13 @@ use ytui_resolve::{Resolved, UA};
 pub const SCAN_PORT: u16 = 8787;
 /// How long a `?`-menu or install-time scan may take.
 pub const SCAN_BUDGET: Duration = Duration::from_secs(10);
-/// Per-host connect/read timeout during a scan.
-///
-/// This is deliberately generous: a resolver reached through a WSL NAT and a
-/// Tailscale tunnel can take a full second to answer a tiny health request,
-/// and a shorter timeout would silently miss it.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
-/// Parallel probes; a /24 then finishes in about six seconds when every host
+/// Per-host connect/read timeout during a scan. Loopback and LAN hosts answer
+/// in milliseconds, so a silent one should not stretch the sweep.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(600);
+/// Timeout for tailnet peers. Reaching one through WSL's NAT and the Tailscale
+/// tunnel takes about a second even for a tiny health request.
+const TAILNET_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+/// Parallel probes; a /24 then finishes in about three seconds when every host
 /// is silent, which fits the scan budget.
 const SCAN_WORKERS: usize = 64;
 /// Hard cap on addresses so a strange interface cannot turn a scan into a
@@ -200,11 +200,17 @@ fn scan_port(port: u16, budget: Duration) -> Vec<Found> {
     let deadline = Instant::now() + budget;
     let next = AtomicUsize::new(0);
     let found = Mutex::new(Vec::new());
+    // A tokenless answer is what the caller wants, so stop probing as soon as
+    // one arrives instead of sweeping every adapter's /24 for a faster one.
+    let tokenless = AtomicBool::new(false);
     let workers = SCAN_WORKERS.min(targets.len()).max(1);
 
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| loop {
+                if tokenless.load(Ordering::Relaxed) {
+                    break;
+                }
                 let left = deadline.saturating_duration_since(Instant::now());
                 if left.is_zero() {
                     break;
@@ -213,7 +219,10 @@ fn scan_port(port: u16, budget: Duration) -> Vec<Found> {
                 let Some(&ip) = targets.get(i) else {
                     break;
                 };
-                if let Some(hit) = probe(ip, port, PROBE_TIMEOUT.min(left)) {
+                if let Some(hit) = probe(ip, port, probe_timeout(ip).min(left)) {
+                    if !hit.auth {
+                        tokenless.store(true, Ordering::Relaxed);
+                    }
                     found.lock().unwrap_or_else(|e| e.into_inner()).push(hit);
                 }
             });
@@ -248,6 +257,9 @@ fn scan_targets() -> Vec<IpAddr> {
     if let Ok(interfaces) = get_if_addrs() {
         for iface in interfaces {
             match iface.addr {
+                // 127.0.0.1 is already the first target; the rest of the
+                // loopback /24 never hosts a resolver.
+                IfAddr::V4(v4) if v4.ip.is_loopback() => {}
                 IfAddr::V4(v4) if ytui_resolve::is_private_ip(IpAddr::V4(v4.ip)) => {
                     add_v4_range(&mut push, v4.ip, v4.prefixlen);
                 }
@@ -330,6 +342,24 @@ fn add_tailscale_node(node: &serde_json::Value, push: &mut impl FnMut(IpAddr)) {
         if let Some(addr) = ip.as_str().and_then(|s| s.parse::<IpAddr>().ok()) {
             push(addr);
         }
+    }
+}
+
+/// Tailscale peers live in `100.64.0.0/10`, outside the machine's own private
+/// `/24`, and are the targets normally reached through a tunnel. IPv6 targets
+/// are only ever a local ULA/link-local address or a peer's tailnet address.
+fn probe_timeout(ip: IpAddr) -> Duration {
+    let tailnet = match ip {
+        IpAddr::V4(v4) => {
+            let range = u32::from(v4) & 0xffc0_0000;
+            range == u32::from(Ipv4Addr::new(100, 64, 0, 0))
+        }
+        IpAddr::V6(_) => true,
+    };
+    if tailnet {
+        TAILNET_PROBE_TIMEOUT
+    } else {
+        PROBE_TIMEOUT
     }
 }
 
@@ -569,6 +599,20 @@ mod tests {
         let mut ips = Vec::new();
         add_v4_range(&mut |ip| ips.push(ip), Ipv4Addr::new(100, 64, 0, 7), 32);
         assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 7))]);
+    }
+
+    #[test]
+    fn tailnet_targets_get_the_longer_probe_timeout() {
+        let tailnet = IpAddr::V4(Ipv4Addr::new(100, 126, 49, 124));
+        assert_eq!(probe_timeout(tailnet), TAILNET_PROBE_TIMEOUT);
+        assert_eq!(
+            probe_timeout(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5))),
+            PROBE_TIMEOUT
+        );
+        assert_eq!(
+            probe_timeout(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
+            TAILNET_PROBE_TIMEOUT
+        );
     }
 
     #[test]
