@@ -89,7 +89,7 @@ refuses to touch a checkout with uncommitted changes or local commits, and
 the one `install.sh` ran from; set `YTUI_SRC` to point elsewhere. Inside the
 player, `?` opens help and checks github; `u` installs the newer version (or
 checks again when there is none), and it works from inside the help overlay
-too. When a newer version is waiting, a clickable `↑ 0.3.19` chip appears next
+too. When a newer version is waiting, a clickable `↑ 0.3.20` chip appears next
 to the account name.
 
 To build it yourself:
