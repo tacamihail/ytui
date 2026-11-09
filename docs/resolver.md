@@ -22,13 +22,13 @@ binaries yet, so the server needs Rust for either route below. Pick one:
 
 ```bash
 # no checkout to manage: cargo builds only ytui-resolver and ytui-resolve
-cargo install --git https://github.com/tacamihail/ytui --branch remote-resolver ytui-resolver
+cargo install --git https://github.com/tacamihail/ytui ytui-resolver
 ```
 
 or, from a checkout:
 
 ```bash
-git clone --branch remote-resolver https://github.com/tacamihail/ytui.git
+git clone https://github.com/tacamihail/ytui.git
 cd ytui
 ./install-resolver.sh          # add --token for public/token mode
 ```
@@ -41,14 +41,12 @@ cargo build --release -p ytui-resolver
 install -Dm755 target/release/ytui-resolver ~/.local/bin/ytui-resolver
 ```
 
-After the branch is merged, use `main` and drop `--branch remote-resolver` /
-`--branch`. `cargo install` leaves `yt-dlp` and `deno` to you; the script
-installs them.
+`cargo install` leaves `yt-dlp` and `deno` to you; the script installs them.
 
 If you want the script's `yt-dlp`/`deno` setup without keeping a checkout:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/tacamihail/ytui/remote-resolver/install-resolver.sh
+curl -fsSLO https://raw.githubusercontent.com/tacamihail/ytui/main/install-resolver.sh
 bash install-resolver.sh --from-git
 ```
 
@@ -274,7 +272,7 @@ OS ship an old `rustc` (often 1.63). Install rustup and retry:
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 source "$HOME/.cargo/env"
-cargo install --git https://github.com/tacamihail/ytui --branch remote-resolver ytui-resolver
+cargo install --git https://github.com/tacamihail/ytui ytui-resolver
 ```
 
 `install-resolver.sh` performs this upgrade automatically when `rustc` is too

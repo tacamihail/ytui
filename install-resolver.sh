@@ -30,7 +30,7 @@ checkout, so only the resolver package is built.
   --token     also generate ~/.config/ytui/resolver.token (public/token mode;
               for a trusted LAN/tailnet the default tokenless setup is enough)
   --from-git  install from github, no local checkout required (uses
-              YTUI_BRANCH, default remote-resolver)
+              YTUI_BRANCH, default main)
 EOF
 }
 
@@ -44,7 +44,7 @@ for arg in "$@"; do
     *) die "unknown option: $arg (try --help)" ;;
   esac
 done
-BRANCH="${YTUI_BRANCH:-remote-resolver}"
+BRANCH="${YTUI_BRANCH:-main}"
 REPO="${YTUI_REPO:-https://github.com/tacamihail/ytui.git}"
 
 [[ ${EUID} -eq 0 ]] && die "run as your normal user (sudo is requested only when needed)"

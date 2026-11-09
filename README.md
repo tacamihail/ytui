@@ -58,13 +58,11 @@ opening a new TLS session every sixteen seconds.
 Opus (`itag` 251) would be a bit better than 128 kbps AAC, but `symphonia` has
 no Opus decoder, so those uploads are skipped with a message.
 
-## Install
+## Quick start
 
-You need Rust 1.83+ (the installers use rustup when the system Rust is
-older), `yt-dlp`, `deno` (yt-dlp uses it for YouTube's JS challenges)
-and, on Linux, the ALSA headers: `libasound2-dev` on Debian/Ubuntu, `alsa-lib`
-on Arch. macOS uses CoreAudio, so it needs nothing beyond the Xcode command
-line tools (`xcode-select --install`).
+### 1. Install the player
+
+Linux, WSL and macOS use the same commands:
 
 ```bash
 git clone https://github.com/tacamihail/ytui.git
@@ -72,32 +70,101 @@ cd ytui
 ./install.sh
 ```
 
-Those three commands are the same on Linux, WSL and macOS. On macOS the script
-checks for the command line tools, downloads the `deno-*-apple-darwin` build
-and adds `~/.local/bin` to `~/.zprofile` when the account has no `.zshrc` yet.
+`install.sh` installs a current Rust (via rustup when the system one is too
+old), `yt-dlp`, `deno` and the ALSA headers when needed, then builds and
+installs `~/.local/bin/ytui`. Verify it:
 
-The script puts a recent `yt-dlp` and `deno` in `~/.local/bin` and `~/.deno/bin`
-if they're missing, builds the release binary and installs `~/.local/bin/ytui`.
-That last file is a small launcher around `ytui.bin`; on WSL it points
-`ALSA_PLUGIN_DIR` at the PulseAudio plugin when that lives in `~/.local/alsa`.
-When no resolver is configured yet, the script also scans the local network
-for an optional `ytui-resolver` for up to 10 seconds. If a tokenless one
-answers, its URL is saved; otherwise nothing changes and ytui resolves
-locally. Set `YTUI_SKIP_DISCOVER=1` to skip that scan.
+```bash
+ytui doctor
+```
 
-To update later, run `ytui update`: it fetches the checkout and, when the
-`version` in github's `Cargo.toml` is newer than the running binary,
-fast-forwards and rebuilds `ytui.bin`. The version is bumped by hand when a
-release is cut, so commits that leave it unchanged are not installed. It
-refuses to touch a checkout with uncommitted changes or local commits, and
-`ytui update --check` only says whether a newer version exists. The checkout is
-the one `install.sh` ran from; set `YTUI_SRC` to point elsewhere. Inside the
-player, `?` opens help and checks github; `u` installs the newer version (or
-checks again when there is none), and it works from inside the help overlay
-too. When a newer version is waiting, a clickable `↑ 0.4.0` chip appears next
-to the account name.
+### 2. Connect your YouTube account (optional)
 
-To build it yourself:
+Liked Music, playlists and subscriptions need cookies; search and playback do
+not. Export `cookies.txt` from a private window as described in
+[Account](#account), then import and check it:
+
+```bash
+ytui auth ~/cookies.txt
+ytui auth --status
+```
+
+Or let yt-dlp read a local browser profile:
+
+```bash
+ytui auth --browser chrome
+```
+
+`ytui logout` forgets the cookies and the saved account.
+
+### 3. Install ytui-resolver on another machine (optional)
+
+The resolver moves yt-dlp/deno's memory spike off the player machine. It is a
+separate package: no TUI, no audio crates, no ALSA. On the server:
+
+```bash
+# Option A: build only the resolver (needs Rust 1.83+)
+cargo install --git https://github.com/tacamihail/ytui ytui-resolver
+
+# Option B: no checkout; also installs yt-dlp and deno
+curl -fsSLO https://raw.githubusercontent.com/tacamihail/ytui/main/install-resolver.sh
+bash install-resolver.sh --from-git
+```
+
+Launch it on a trusted LAN or tailnet without a token:
+
+```bash
+ytui-resolver --bind 0.0.0.0:8787 --allow-private
+```
+
+For a public address, generate a token and run the same bind **without**
+`--allow-private`:
+
+```bash
+ytui-resolver --gen-token
+ytui-resolver --bind 0.0.0.0:8787
+```
+
+On the player machine, discover a tokenless private resolver and save it:
+
+```bash
+ytui discover --save
+```
+
+Or open the player and press `?`, then `s`. A public resolver is not found by
+the scan: set `resolver_url` and `resolver_token_file` in
+`~/.config/ytui/config.json` (see [Client config](#client-config)).
+`ytui doctor` prints the resolver address, version and latency. More detail:
+[Remote resolver](#remote-resolver).
+
+## Install details
+
+The installer is safe to rerun. It keeps an existing config and updates the
+binary in place. On Linux the build needs a C linker and the ALSA headers
+(`libasound2-dev`, `alsa-lib` or `alsa-lib-devel`); the script installs them
+when it can, and prints the package names when it cannot. On macOS it checks
+for the Xcode command line tools and installs the deno build for your
+architecture.
+
+When no resolver is configured, `install.sh` also scans the local network for
+up to 10 seconds and saves a tokenless one if it finds it. Set
+`YTUI_SKIP_DISCOVER=1` to skip that scan.
+
+To update later:
+
+```bash
+ytui update          # pull and rebuild when a newer version is published
+ytui update --check  # only report whether one exists
+```
+
+The version is the `[package] version` in `Cargo.toml`; commits that do not
+change it are not installed. `ytui update` refuses to touch a checkout with
+uncommitted changes or local commits. It updates the checkout `install.sh` ran
+from; set `YTUI_SRC` to point elsewhere. Inside the player, `?` checks github
+and `u` installs a newer version; a clickable `↑ 0.4.0` chip appears when one
+is waiting.
+
+Manual build:
 
 ```bash
 cargo build --release
@@ -261,44 +328,34 @@ If that spike is unwelcome on the machine that plays music, run the small
 The client then asks it for stream candidates and keeps audio playback and
 the 1 KiB probes local.
 
-Build and install it on the server:
-
-### Server-only install
+### Install on the server
 
 The resolver is a separate package. Building it does not compile the TUI,
 `ratatui`, `cpal` or `symphonia`, and the server needs no ALSA. The resulting
 binary is about 600 KB.
 
-If the server has Rust, this downloads the source to cargo's cache and builds
-only `ytui-resolver` and `ytui-resolve`:
+If the server has Rust 1.83+, this downloads the source to cargo's cache and
+builds only `ytui-resolver` and `ytui-resolve`:
 
 ```bash
-cargo install --git https://github.com/tacamihail/ytui --branch remote-resolver ytui-resolver
+cargo install --git https://github.com/tacamihail/ytui ytui-resolver
 ```
 
-The binary lands in `~/.cargo/bin/ytui-resolver`. Once the branch is merged,
-drop `--branch remote-resolver`. `cargo install` does not install `yt-dlp` or
-`deno`; the server still needs both. Debian and Raspberry Pi OS often ship an
-old `rustc`; the resolver needs **1.83+**, so run the rustup installer below
-if `cargo` reports that requirement:
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-source "$HOME/.cargo/env"
-cargo install --git https://github.com/tacamihail/ytui --branch remote-resolver ytui-resolver
-```
+The binary lands in `~/.cargo/bin/ytui-resolver`. `cargo install` does not
+install `yt-dlp` or `deno`; the server still needs both.
 
 If you prefer a checkout, or want the script to install `yt-dlp` and `deno`
 too:
 
 ```bash
-git clone --branch remote-resolver https://github.com/tacamihail/ytui.git
+git clone https://github.com/tacamihail/ytui.git
 cd ytui
 ./install-resolver.sh          # add --token for public/token mode
 ```
 
 `install-resolver.sh` builds only `-p ytui-resolver` and installs
-`~/.local/bin/ytui-resolver`. The manual equivalent inside a checkout is:
+`~/.local/bin/ytui-resolver`. It upgrades an old system Rust via rustup. The
+manual equivalent inside a checkout is:
 
 ```bash
 cargo build --release -p ytui-resolver
@@ -308,8 +365,23 @@ install -Dm755 target/release/ytui-resolver ~/.local/bin/ytui-resolver
 Without keeping a checkout, fetch the script and run it with `--from-git`:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/tacamihail/ytui/remote-resolver/install-resolver.sh
+curl -fsSLO https://raw.githubusercontent.com/tacamihail/ytui/main/install-resolver.sh
 bash install-resolver.sh --from-git
+```
+
+### Launch
+
+On a trusted LAN or tailnet, no token is needed:
+
+```bash
+ytui-resolver --bind 0.0.0.0:8787 --allow-private
+```
+
+Public addresses need a token:
+
+```bash
+ytui-resolver --gen-token
+ytui-resolver --bind 0.0.0.0:8787
 ```
 
 ### Automatic discovery
