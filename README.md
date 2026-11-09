@@ -134,9 +134,17 @@ On the player machine, discover a tokenless private resolver and save it:
 ytui discover --save
 ```
 
-Or open the player and press `?`, then `s`. A public resolver is not found by
-the scan: set `resolver_url` and `resolver_token_file` in
-`~/.config/ytui/config.json` (see [Client config](#client-config)).
+If the resolver is not on the local network (Tailscale, WireGuard, a VPN,
+another subnet, or a client inside WSL), pass its address instead:
+
+```bash
+ytui discover --url http://100.126.49.124:8787 --save
+```
+
+Or open the player and press `?`, then `s`, to scan the local network again. A
+public resolver is not found by the scan: set `resolver_url` and
+`resolver_token_file` in `~/.config/ytui/config.json` (see
+[Client config](#client-config)).
 `ytui doctor` prints the resolver address, version and latency. More detail:
 [Remote resolver](#remote-resolver).
 
