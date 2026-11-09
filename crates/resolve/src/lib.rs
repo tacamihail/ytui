@@ -68,7 +68,14 @@ pub struct Resolved {
 /// `deno`, which it needs to solve YouTube's JS challenges.
 pub fn tool_path() -> String {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-    for var in ["HOME", "USERPROFILE"] {
+    // Windows exports USERPROFILE; HOME there may be a MSYS path that native
+    // programs cannot use, so it comes second.
+    #[cfg(windows)]
+    let vars: &[&str] = &["USERPROFILE", "HOME"];
+    #[cfg(not(windows))]
+    let vars: &[&str] = &["HOME"];
+
+    for var in vars {
         if let Ok(home) = std::env::var(var) {
             if !home.is_empty() {
                 let home = std::path::PathBuf::from(home);
@@ -103,8 +110,12 @@ pub fn command() -> Command {
 }
 
 fn on_path(name: &str) -> bool {
+    // On Windows the file on PATH is `name.exe`; a literal `name` never exists.
+    let exe = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|d| d.join(name).is_file()))
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|d| d.join(name).is_file() || d.join(&exe).is_file())
+        })
         .unwrap_or(false)
 }
 

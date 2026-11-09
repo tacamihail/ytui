@@ -1,4 +1,8 @@
 * text=auto
 # Shell scripts are executed on Linux/WSL; CRLF breaks the shebang.
 *.sh text eol=lf
+# PowerShell accepts LF, and the installer must stay byte-identical to what the
+# README shows. Batch files are safer with CRLF in cmd.exe.
+*.ps1 text eol=lf
+*.cmd text eol=crlf
 Cargo.lock text eol=lf

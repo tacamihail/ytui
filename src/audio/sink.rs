@@ -84,7 +84,14 @@ fn candidates() -> Vec<(String, cpal::Device)> {
     let mut devices: Vec<(String, cpal::Device)> = Vec::new();
 
     if let Some(device) = host.default_output_device() {
-        devices.push(("default".to_string(), device));
+        // The label is what `doctor` prints. On Unix `default` is the ALSA PCM
+        // name and ranks first. On Windows there is one WASAPI device behind
+        // it and its real name is more useful than the word "default".
+        #[cfg(windows)]
+        let label = device.name().unwrap_or_else(|_| "default".to_string());
+        #[cfg(not(windows))]
+        let label = "default".to_string();
+        devices.push((label, device));
     }
 
     // On a healthy machine the default PCM is the answer. Enumerating opens

@@ -87,12 +87,44 @@ impl Config {
     }
 }
 
+/// The user's home directory.
+///
+/// Unix shells set `HOME`. Windows sets `USERPROFILE`, and the `HOME` that a
+/// MSYS/Git Bash environment exports is a POSIX path (`/c/Users/...`) that a
+/// native binary cannot use, so it must not win there.
 pub(crate) fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+    #[cfg(windows)]
+    let vars: &[&str] = &["USERPROFILE", "HOME"];
+    #[cfg(not(windows))]
+    let vars: &[&str] = &["HOME"];
+
+    for var in vars {
+        if let Some(home) = std::env::var_os(var) {
+            if !home.is_empty() {
+                return PathBuf::from(home);
+            }
+        }
+    }
+    std::env::temp_dir()
 }
 
 pub fn config_dir() -> PathBuf {
     home().join(".config/ytui")
+}
+
+/// Expand a leading `~`, `~/` or `~\` to the home directory.
+///
+/// cmd.exe and PowerShell pass `~/cookies.txt` through to a native program
+/// unchanged, so the commands in the README have to do this themselves.
+pub fn expand_tilde(path: &str) -> PathBuf {
+    let rest = path
+        .strip_prefix("~/")
+        .or_else(|| path.strip_prefix("~\\"))
+        .or_else(|| (path == "~").then_some(""));
+    match rest {
+        Some(rest) => home().join(rest),
+        None => PathBuf::from(path),
+    }
 }
 
 pub fn data_dir() -> PathBuf {
@@ -193,6 +225,37 @@ mod tests {
         adopt_cookies_file(&mut cfg, false);
         assert!(cfg.cookies_file.is_empty());
         assert_eq!(cfg.cookie_args(), None);
+    }
+
+    #[test]
+    fn the_config_dir_hangs_off_the_home_directory() {
+        // Regression test: a missing HOME used to fall back to `/tmp`, which on
+        // Windows is a path relative to the current drive instead of the user's
+        // profile.
+        let dir = config_dir();
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert!(dir.ends_with(".config/ytui"), "{}", dir.display());
+    }
+
+    #[test]
+    fn a_tilde_path_expands_to_the_home_directory() {
+        assert_eq!(
+            expand_tilde("~/x/cookies.txt"),
+            home().join("x/cookies.txt")
+        );
+        assert_eq!(
+            expand_tilde("~\\x\\cookies.txt"),
+            home().join("x\\cookies.txt")
+        );
+        assert_eq!(expand_tilde("~"), home());
+        assert_eq!(
+            expand_tilde("rel/cookies.txt"),
+            PathBuf::from("rel/cookies.txt")
+        );
+        assert_eq!(
+            expand_tilde("/abs/cookies.txt"),
+            PathBuf::from("/abs/cookies.txt")
+        );
     }
 
     #[test]

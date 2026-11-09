@@ -12,8 +12,9 @@ A terminal player for YouTube Music. Audio only: no browser and no video
 window.
 
 ytui asks yt-dlp for the stream URL, then pulls the AAC file over HTTP Range,
-decodes it with `symphonia` and writes to ALSA through `cpal`. yt-dlp exits
-after resolving, so nothing else is running while you listen.
+decodes it with `symphonia` and writes to `cpal` (ALSA on Linux, CoreAudio on
+macOS, WASAPI on Windows). yt-dlp exits after resolving, so nothing else is
+running while you listen.
 
 ```
 ┌─ 1 Liked Music·412 ─ 2 Playlists ─ 3 Subscriptions ─ 4 History ─ 5 Queue·2 ─ 6 Search·30 ─ ◉ you ┐
@@ -38,7 +39,9 @@ them.
 
 The output stream is opened at the track's own sample rate. YouTube AAC is
 44.1 kHz, so on a 44.1 kHz device nothing is resampled. If the device refuses
-that rate, ytui falls back to 48 kHz and resamples.
+that rate, ytui falls back to 48 kHz and resamples. Windows WASAPI shared mode
+only accepts the device mix format, which is usually 48 kHz, so there the
+44.1 kHz tracks are resampled by default.
 
 Working out a stream URL takes `yt-dlp` about four seconds, which used to be
 dead air between songs. The next track is resolved in the last ten seconds of
@@ -77,6 +80,32 @@ installs `~/.local/bin/ytui`. Verify it:
 ```bash
 ytui doctor
 ```
+
+Windows runs the player natively, without WSL, so resolver discovery can see
+the LAN and audio goes through WASAPI. In PowerShell:
+
+```powershell
+git clone https://github.com/tacamihail/ytui.git
+cd ytui
+.\install.ps1
+```
+
+From cmd.exe, run `install.cmd` instead; it calls the same script with a
+process-local execution policy. If PowerShell refuses to run `install.ps1`,
+that wrapper (or `powershell -ExecutionPolicy Bypass -File .\install.ps1`) is
+the way around it. The script installs Rust via rustup when
+needed, downloads `yt-dlp.exe` and Deno, builds the release binary and copies
+`ytui.exe` to `%USERPROFILE%\.local\bin`, adding that directory to the user
+`PATH`. Open a new terminal afterwards and run:
+
+```powershell
+ytui doctor
+```
+
+The build needs the MSVC linker: install "Visual Studio Build Tools" with the
+"Desktop development with C++" workload if you do not have Visual Studio.
+Windows Terminal is recommended over legacy `conhost` for the box drawing and
+mouse support.
 
 ### 2. Connect your YouTube account (optional)
 
@@ -170,9 +199,14 @@ when it can, and prints the package names when it cannot. On macOS it checks
 for the Xcode command line tools and installs the deno build for your
 architecture.
 
-When no resolver is configured, `install.sh` also scans the local network for
+On Windows, `install.ps1` also downloads the standalone `yt-dlp.exe`, so no
+Python is needed, and Deno is unpacked into `%USERPROFILE%\.deno\bin`. It
+writes the checkout path to `%USERPROFILE%\.config\ytui\source`, so
+`ytui update` rebuilds from the same place.
+
+When no resolver is configured, the installer also scans the local network for
 up to 10 seconds and saves a tokenless one if it finds it. Set
-`YTUI_SKIP_DISCOVER=1` to skip that scan.
+`YTUI_SKIP_DISCOVER=1` (or pass `-SkipDiscover` on Windows) to skip that scan.
 
 To update later:
 
@@ -183,7 +217,7 @@ ytui update --check  # only report whether one exists
 
 The version is the `[package] version` in `Cargo.toml`; commits that do not
 change it are not installed. `ytui update` refuses to touch a checkout with
-uncommitted changes or local commits. It updates the checkout `install.sh` ran
+uncommitted changes or local commits. It updates the checkout the installer ran
 from; set `YTUI_SRC` to point elsewhere. Inside the player, `?` checks github
 and `u` installs a newer version; a clickable `↑ 0.4.0` chip appears when one
 is waiting.
@@ -196,7 +230,20 @@ mkdir -p ~/.local/bin
 cp target/release/ytui ~/.local/bin/ytui
 ```
 
+On Windows the same manual build is:
+
+```powershell
+cargo build --release
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.local\bin"
+Copy-Item target\release\ytui.exe "$env:USERPROFILE\.local\bin\"
+```
+
 ### WSL
+
+WSL cannot discover a resolver on your LAN: it only sees the WSL virtual
+network. Run the player natively on Windows (see above) if you want discovery,
+or point it at the resolver explicitly with
+`ytui discover --url http://<host>:8787 --save`.
 
 WSL has no sound card, only a PulseAudio socket. ALSA's `default` device still
 points at card 0, so ytui asks for the `pulse` PCM first and only falls back to
@@ -323,7 +370,9 @@ rather than the list; `space` retries.
 
 ## Config
 
-`~/.config/ytui/config.json` is created by `install.sh`:
+`~/.config/ytui/config.json` (on Windows
+`%USERPROFILE%\.config\ytui\config.json`) is created on the first run or by
+the installer:
 
 | field | default | meaning |
 |---|---|---|
@@ -410,7 +459,7 @@ ytui-resolver --bind 0.0.0.0:8787
 
 ### Automatic discovery
 
-When `install.sh` runs and `resolver_url` is still empty, the client scans
+When the installer runs and `resolver_url` is still empty, the client scans
 localhost and the private networks for up to 10 seconds. If a tokenless
 resolver answers on port 8787, its URL is saved to `config.json` and ytui uses
 it from then on. If nothing answers, the config is left alone and ytui keeps
@@ -463,8 +512,8 @@ ytui-resolver --bind 0.0.0.0:8787 --token-file ~/.config/ytui/resolver.token
 
 The server has no TLS of its own, so put Caddy or nginx in front when the
 address is public. The automatic scan only finds private resolvers; a public
-resolver is added by editing the config and is never overwritten by
-`install.sh` or a later scan.
+resolver is added by editing the config and is never overwritten by the
+installer or a later scan.
 
 ### Client config
 
@@ -498,6 +547,11 @@ cache/rate-limit details.
 - `~/.config/ytui/cache/` - last listing per tab, ignored after logout
 - `~/.config/ytui/resolver.token` - token for the remote resolver, mode `600`
 - `~/.local/share/ytui/history.json` - play history
+
+On Windows the same layout lives under `%USERPROFILE%`: the config and cookies
+are in `%USERPROFILE%\.config\ytui\`, history in
+`%USERPROFILE%\.local\share\ytui\`, and the binary is
+`%USERPROFILE%\.local\bin\ytui.exe`.
 
 ## Memory
 
@@ -574,7 +628,7 @@ a signed-in browser and run `ytui auth <file>` again. `ytui doctor` and
 Search returns nothing or a 403: `yt-dlp` is too old.
 
 "Unable to extract uploader id": `yt-dlp` can't find `deno`. Make sure
-`~/.deno/bin` is on `PATH`.
+`~/.deno/bin` (Windows: `%USERPROFILE%\.deno\bin`) is on `PATH`.
 
 "resolver unavailable (...), using local yt-dlp": the configured resolver
 did not answer and the client fell back. `ytui doctor` shows the reason.
@@ -585,6 +639,21 @@ did not answer and the client fell back. `ytui doctor` shows the reason.
 Mouse does nothing: the terminal has to forward mouse events. Windows Terminal
 and most Linux terminals do; in tmux add `set -g mouse on` and restart ytui.
 
+Windows:
+
+- `ytui` is not recognized after installing: the installer added
+  `%USERPROFILE%\.local\bin` to the user `PATH`, which only new terminals pick
+  up. Open a new Windows Terminal or PowerShell window, or run the full path
+  `%USERPROFILE%\.local\bin\ytui.exe`.
+- No sound: `ytui doctor` prints the WASAPI device and sample rate it opened.
+  Check Settings → System → Sound that the intended output is the default.
+  WASAPI shared mode plays at the device mix rate, usually 48 kHz, so 44.1 kHz
+  tracks are resampled.
+- Garbled box drawing or no mouse: use Windows Terminal instead of legacy
+  `conhost`.
+- `ytui update` cannot replace `ytui.exe`: close the player first. The updater
+  renames the running binary, but antivirus can briefly hold the file open.
+
 Tracks that sound muffled only had 48 kbps HE-AAC (`itag 139`). Symphonia
 decodes the AAC core but not the SBR band, so the highs are missing. ytui
 prefers AAC-LC when YouTube offers it.
@@ -594,6 +663,13 @@ prefers AAC-LC when YouTube offers it.
 ```bash
 rm ~/.local/bin/ytui ~/.local/bin/ytui.bin
 rm -rf ~/.config/ytui ~/.local/share/ytui
+```
+
+On Windows:
+
+```powershell
+Remove-Item "$env:USERPROFILE\.local\bin\ytui.exe"
+Remove-Item -Recurse -Force "$env:USERPROFILE\.config\ytui", "$env:USERPROFILE\.local\share\ytui"
 ```
 
 ## License
