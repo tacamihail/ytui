@@ -34,6 +34,12 @@ pub fn uninstall() -> Result<(), String> {
     platform::uninstall()
 }
 
+/// Restarts the autostart entry after an update replaced the binary. Does
+/// nothing when the resolver is run by hand.
+pub fn restart_if_installed() -> Result<(), String> {
+    platform::restart()
+}
+
 // ---------------- generated files (platform independent) ----------------
 
 #[cfg(any(target_os = "linux", test))]
@@ -228,6 +234,15 @@ mod platform {
         let _ = run("systemctl", &["--user", "daemon-reload"]);
         Ok(())
     }
+
+    pub fn restart() -> Result<(), String> {
+        if !unit_path().exists() {
+            return Ok(());
+        }
+        run("systemctl", &["--user", "restart", UNIT])?;
+        println!("restarted the systemd unit");
+        Ok(())
+    }
 }
 
 // ---------------- macOS: LaunchAgent ----------------
@@ -244,33 +259,61 @@ mod platform {
         home_dir().join(".config").join("ytui").join("resolver.log")
     }
 
+    fn load(path: &Path) -> Result<(), String> {
+        let out = Command::new("launchctl")
+            .arg("load")
+            .arg("-w")
+            .arg(path)
+            .output()
+            .map_err(|e| format!("cannot run launchctl: {e}"))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        Err(format!(
+            "launchctl failed: {}\n  agent written to {}",
+            stderr.trim(),
+            path.display()
+        ))
+    }
+
+    fn unload(path: &Path) {
+        let _ = Command::new("launchctl")
+            .arg("unload")
+            .arg("-w")
+            .arg(path)
+            .output();
+    }
+
     pub fn install(spec: &Spec) -> Result<(), String> {
         let path = agent_path();
         let log = log_path();
         write_file(&path, &launchd_plist(spec, &log))?;
-        let _ = Command::new("launchctl").arg("unload").arg("-w").arg(&path).output();
-        let out = Command::new("launchctl")
-            .arg("load")
-            .arg("-w")
-            .arg(&path)
-            .output()
-            .map_err(|e| format!("cannot run launchctl: {e}"))?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            return Err(format!(
-                "launchctl failed: {}\n  agent written to {}",
-                stderr.trim(),
-                path.display()
-            ));
-        }
-        println!("installed {} (starts at login, logs in {})", path.display(), log.display());
+        unload(&path);
+        load(&path)?;
+        println!(
+            "installed {} (starts at login, logs in {})",
+            path.display(),
+            log.display()
+        );
         Ok(())
     }
 
     pub fn uninstall() -> Result<(), String> {
         let path = agent_path();
-        let _ = Command::new("launchctl").arg("unload").arg("-w").arg(&path).output();
+        unload(&path);
         remove_file(&path, "the LaunchAgent")
+    }
+
+    pub fn restart() -> Result<(), String> {
+        let path = agent_path();
+        if !path.exists() {
+            return Ok(());
+        }
+        unload(&path);
+        load(&path)?;
+        println!("restarted the LaunchAgent");
+        Ok(())
     }
 }
 
@@ -303,6 +346,12 @@ mod platform {
     pub fn uninstall() -> Result<(), String> {
         remove_file(&startup_path()?, "the Startup entry")
     }
+
+    pub fn restart() -> Result<(), String> {
+        // A Startup entry starts the resolver as a plain process; the old one
+        // is still running and must be restarted by hand.
+        Ok(())
+    }
 }
 
 // ---------------- anything else ----------------
@@ -317,6 +366,10 @@ mod platform {
 
     pub fn uninstall() -> Result<(), String> {
         Err("autostart is only implemented for Linux, macOS and Windows".into())
+    }
+
+    pub fn restart() -> Result<(), String> {
+        Ok(())
     }
 }
 

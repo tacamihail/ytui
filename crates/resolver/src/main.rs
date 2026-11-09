@@ -27,6 +27,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use ytui_resolve::{Candidate, Resolved};
 
 mod service;
+mod update;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8787";
 const DEFAULT_TTL: Duration = Duration::from_secs(4 * 60 * 60);
@@ -51,6 +52,9 @@ fn run() -> Result<(), String> {
     if argv.iter().any(|a| a == "-V" || a == "--version") {
         println!("ytui-resolver {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
+    }
+    if argv.get(1).map(String::as_str) == Some("update") {
+        return update::cli(&argv[2..]);
     }
 
     let args = Args::parse(&argv)?;
@@ -296,6 +300,7 @@ Runs yt-dlp for ytui clients on another machine.
 
 usage:
   ytui-resolver [options]
+  ytui-resolver update [--check] [--force]   reinstall from github
 
 options:
   --bind ADDR             listen address (default {DEFAULT_BIND})
@@ -311,6 +316,9 @@ options:
   --max-concurrency N     simultaneous yt-dlp runs (default 2)
   -V, --version           print version
   -h, --help              this text
+
+  ytui-resolver update        install a newer version from github
+  ytui-resolver update --check  only report whether one exists
 
 The default bind is loopback. Bind a tailnet/LAN address for remote clients,
 and either use --allow-private (trust private ranges) or a token. Public

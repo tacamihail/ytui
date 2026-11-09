@@ -114,6 +114,9 @@ bash install-resolver.sh --from-git
 Both options need `yt-dlp` and `deno` on the server. The script installs them;
 `cargo install` does not.
 
+Update it later with `ytui-resolver update` (or `update --check` to only ask
+github); it rebuilds in place and restarts the autostart entry.
+
 Launch it on a trusted LAN or tailnet without a token:
 
 ```bash

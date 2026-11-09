@@ -43,6 +43,18 @@ install -Dm755 target/release/ytui-resolver ~/.local/bin/ytui-resolver
 
 `cargo install` leaves `yt-dlp` and `deno` to you; the script installs them.
 
+Update later from either install route:
+
+```bash
+ytui-resolver update          # install a newer version from github
+ytui-resolver update --check  # only report whether one exists
+```
+
+`ytui-resolver update` builds the resolver crates into the same prefix it runs
+from (`~/.cargo/bin` or `~/.local/bin`) and restarts the autostart entry, so
+`--install-service` installations keep working. `--force` reinstalls when the
+version is unchanged.
+
 If you want the script's `yt-dlp`/`deno` setup without keeping a checkout:
 
 ```bash
