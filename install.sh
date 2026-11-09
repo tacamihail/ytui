@@ -228,14 +228,48 @@ elif [[ "$PM" != unknown ]]; then
 fi
 
 # --- rust --------------------------------------------------------------------
-if ! command -v cargo >/dev/null 2>&1; then
-  info "installing Rust via rustup"
-  curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+# Debian/Raspberry Pi OS ships a rustc that is much older than the crates
+# expect. rustup gives a current toolchain and keeps the old system one out of
+# the way.
+MIN_RUST_MAJOR=1
+MIN_RUST_MINOR=83
+
+rust_is_new_enough() {
+  command -v rustc >/dev/null 2>&1 || return 1
+  local v major minor
+  v="$(rustc --version 2>/dev/null | awk '{print $2}')"
+  major="${v%%.*}"
+  minor="${v#*.}"
+  minor="${minor%%.*}"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  ((major > MIN_RUST_MAJOR || (major == MIN_RUST_MAJOR && minor >= MIN_RUST_MINOR)))
+}
+
+# Prefer a rustup toolchain if one is already installed but not first in PATH.
+[[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+[[ -x "$HOME/.cargo/bin/cargo" ]] && export PATH="$HOME/.cargo/bin:$PATH"
+hash -r
+
+if ! rust_is_new_enough; then
+  if command -v rustup >/dev/null 2>&1; then
+    info "updating the Rust toolchain (needs ${MIN_RUST_MAJOR}.${MIN_RUST_MINOR}+)"
+    rustup toolchain install stable --profile minimal || true
+    rustup default stable >/dev/null 2>&1 || true
+  else
+    info "installing Rust via rustup (needs ${MIN_RUST_MAJOR}.${MIN_RUST_MINOR}+)"
+    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal
+  fi
   # shellcheck disable=SC1091
-  source "$HOME/.cargo/env"
+  [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+  [[ -x "$HOME/.cargo/bin/cargo" ]] && export PATH="$HOME/.cargo/bin:$PATH"
+  hash -r
 fi
-command -v cargo >/dev/null 2>&1 || die "cargo not found, install Rust: https://rustup.rs"
-ok "cargo $(cargo --version | cut -d' ' -f2)"
+
+if ! rust_is_new_enough; then
+  die "Rust ${MIN_RUST_MAJOR}.${MIN_RUST_MINOR}+ is required; run 'rustup default stable' or see https://rustup.rs"
+fi
+ok "rustc $(rustc --version | cut -d' ' -f2) · cargo $(cargo --version | cut -d' ' -f2)"
 
 # --- build -------------------------------------------------------------------
 info "building ytui (the first build downloads crates, 1-3 min)"

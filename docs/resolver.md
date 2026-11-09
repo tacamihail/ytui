@@ -11,7 +11,7 @@ as before and resolves locally.
 ## Requirements
 
 - `yt-dlp` and `deno` on the server, the same as for a local install
-- Rust to build it
+- Rust 1.83+ (the installer upgrades old system Rust via rustup)
 - a LAN, Tailscale or WireGuard path between the client and the server
 
 ## Build and install
@@ -267,6 +267,19 @@ intended deployment.
 
 `401 bad token`: the client token and server token differ. Re-run
 `ytui-resolver --gen-token` and point `resolver_token_file` at the file.
+
+`error: package ... requires rustc 1.83 or newer`: Debian and Raspberry Pi
+OS ship an old `rustc` (often 1.63). Install rustup and retry:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+source "$HOME/.cargo/env"
+cargo install --git https://github.com/tacamihail/ytui --branch remote-resolver ytui-resolver
+```
+
+`install-resolver.sh` performs this upgrade automatically when `rustc` is too
+old. On a 32-bit ARMv6 board (Pi 1/Zero) rustup may not have a toolchain; build
+a prebuilt binary elsewhere or use a newer board.
 
 `scan found nothing`: the resolver is on another subnet, port 8787 is
 firewalled, or the client is inside WSL and sees only the WSL virtual network.

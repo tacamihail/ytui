@@ -60,7 +60,8 @@ no Opus decoder, so those uploads are skipped with a message.
 
 ## Install
 
-You need Rust, `yt-dlp`, `deno` (yt-dlp uses it for YouTube's JS challenges)
+You need Rust 1.83+ (the installers use rustup when the system Rust is
+older), `yt-dlp`, `deno` (yt-dlp uses it for YouTube's JS challenges)
 and, on Linux, the ALSA headers: `libasound2-dev` on Debian/Ubuntu, `alsa-lib`
 on Arch. macOS uses CoreAudio, so it needs nothing beyond the Xcode command
 line tools (`xcode-select --install`).
@@ -277,7 +278,15 @@ cargo install --git https://github.com/tacamihail/ytui --branch remote-resolver 
 
 The binary lands in `~/.cargo/bin/ytui-resolver`. Once the branch is merged,
 drop `--branch remote-resolver`. `cargo install` does not install `yt-dlp` or
-`deno`; the server still needs both.
+`deno`; the server still needs both. Debian and Raspberry Pi OS often ship an
+old `rustc`; the resolver needs **1.83+**, so run the rustup installer below
+if `cargo` reports that requirement:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+source "$HOME/.cargo/env"
+cargo install --git https://github.com/tacamihail/ytui --branch remote-resolver ytui-resolver
+```
 
 If you prefer a checkout, or want the script to install `yt-dlp` and `deno`
 too:
