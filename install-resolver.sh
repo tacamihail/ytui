@@ -265,4 +265,5 @@ else
   printf '%s\n' "  ./install-resolver.sh --token                        # add a token later"
 fi
 printf '%s\n' "  ytui doctor                         # on the player machine"
-printf '%s\n' "  docs/resolver.md has systemd and public-address notes"
+printf '%s\n' "  add --install-service to keep it running at login"
+printf '%s\n' "  docs/resolver.md has autostart and public-address notes"

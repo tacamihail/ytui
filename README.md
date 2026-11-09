@@ -128,6 +128,16 @@ ytui-resolver --gen-token
 ytui-resolver --bind 0.0.0.0:8787
 ```
 
+Add `--install-service` to run it at login instead, reusing the same options:
+
+```bash
+ytui-resolver --bind 0.0.0.0:8787 --allow-private --install-service
+```
+
+That writes a systemd user unit on Linux, a LaunchAgent on macOS and a Startup
+entry on Windows. `--uninstall-service` removes it. See
+[Run at login](docs/resolver.md#run-at-login).
+
 On the player machine, discover a tokenless private resolver and save it:
 
 ```bash

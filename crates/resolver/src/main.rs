@@ -26,6 +26,8 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use ytui_resolve::{Candidate, Resolved};
 
+mod service;
+
 const DEFAULT_BIND: &str = "127.0.0.1:8787";
 const DEFAULT_TTL: Duration = Duration::from_secs(4 * 60 * 60);
 const DEFAULT_CACHE_CAP: usize = 512;
@@ -53,6 +55,12 @@ fn run() -> Result<(), String> {
 
     let args = Args::parse(&argv)?;
 
+    if args.uninstall_service {
+        return service::uninstall();
+    }
+    if args.install_service {
+        return install_service(&args);
+    }
     if args.gen_token {
         let path = args.token_file.clone().unwrap_or_else(default_token_path);
         write_secret(&path, &generate_token())?;
@@ -62,14 +70,7 @@ fn run() -> Result<(), String> {
     }
 
     let token = load_token(&args)?;
-    if !bind_is_loopback(&args.bind) && token.is_none() && !args.allow_private {
-        return Err(
-            "refusing to listen on a non-loopback address without a token\n\
-             pass --allow-private to trust LAN/Tailscale peers without one, or\n\
-             generate a token with --gen-token"
-                .into(),
-        );
-    }
+    check_bind_auth(&args.bind, token.is_some(), args.allow_private)?;
     if let Some(p) = &args.cookies {
         if !p.exists() {
             eprintln!("warning: cookie file {} does not exist", p.display());
@@ -141,6 +142,8 @@ struct Args {
     max_concurrency: usize,
     allow_private: bool,
     gen_token: bool,
+    install_service: bool,
+    uninstall_service: bool,
 }
 
 impl Args {
@@ -155,6 +158,8 @@ impl Args {
             max_concurrency: DEFAULT_CONCURRENCY,
             allow_private: false,
             gen_token: false,
+            install_service: false,
+            uninstall_service: false,
         };
         let mut i = 1;
         while i < argv.len() {
@@ -189,12 +194,97 @@ impl Args {
                 }
                 "--gen-token" => a.gen_token = true,
                 "--allow-private" => a.allow_private = true,
+                "--install-service" => a.install_service = true,
+                "--uninstall-service" => a.uninstall_service = true,
                 other => return Err(format!("unknown option {other} (try --help)")),
             }
             i += 1;
         }
         Ok(a)
     }
+}
+
+/// Non-loopback binds need either a token or explicit trust in private peers.
+fn check_bind_auth(bind: &str, has_token: bool, allow_private: bool) -> Result<(), String> {
+    if bind_is_loopback(bind) || has_token || allow_private {
+        return Ok(());
+    }
+    Err(
+        "refusing to listen on a non-loopback address without a token\n\
+         pass --allow-private to trust LAN/Tailscale peers without one, or\n\
+         generate a token with --gen-token"
+            .into(),
+    )
+}
+
+/// Writes the autostart entry for this machine, reusing the options given on
+/// this command line, and starts it where the platform does that.
+fn install_service(args: &Args) -> Result<(), String> {
+    if args.gen_token {
+        return Err("--install-service and --gen-token are separate steps".into());
+    }
+    let token = load_token(args)?;
+    check_bind_auth(&args.bind, token.is_some(), args.allow_private)?;
+
+    // Keep the secret out of the unit file: an inline token moves to the
+    // default 0600 file, and the service only ever sees the path.
+    let token_path = if let Some(t) = &args.token {
+        let path = default_token_path();
+        write_secret(&path, t)?;
+        println!("wrote token to {}", path.display());
+        Some(path)
+    } else if let Some(p) = &args.token_file {
+        Some(p.clone())
+    } else if default_token_path().exists() {
+        Some(default_token_path())
+    } else {
+        None
+    };
+
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot find this binary to autostart it: {e}"))?;
+    let spec_args = service_args(args, token_path);
+
+    if bind_is_loopback(&args.bind) {
+        println!(
+            "note: {} is loopback only; pass --bind 0.0.0.0:8787 for remote clients",
+            args.bind
+        );
+    }
+    service::install(&service::Spec {
+        exe,
+        args: spec_args,
+    })
+}
+
+/// The flags the service should run with: what the user asked for, without the
+/// service flags and with defaults omitted so the unit file stays readable.
+fn service_args(args: &Args, token_path: Option<PathBuf>) -> Vec<String> {
+    let mut out = vec!["--bind".to_string(), args.bind.clone()];
+    if let Some(p) = token_path {
+        out.push("--token-file".into());
+        out.push(p.display().to_string());
+    }
+    if args.allow_private {
+        out.push("--allow-private".into());
+    }
+    if let Some(p) = &args.cookies {
+        out.push("--cookies".into());
+        out.push(p.display().to_string());
+    }
+    if args.cache_ttl != DEFAULT_TTL {
+        out.push("--cache-ttl-secs".into());
+        out.push(args.cache_ttl.as_secs().to_string());
+    }
+    if args.cache_cap != DEFAULT_CACHE_CAP {
+        out.push("--cache-cap".into());
+        out.push(args.cache_cap.to_string());
+    }
+    if args.max_concurrency != DEFAULT_CONCURRENCY {
+        out.push("--max-concurrency".into());
+        out.push(args.max_concurrency.to_string());
+    }
+    out
 }
 
 fn help() {
@@ -213,6 +303,8 @@ options:
   --token-file PATH       read the token from PATH
   --gen-token             create a random token and exit
   --allow-private         trust LAN/Tailscale peers without a token
+  --install-service       start at login (systemd, launchd or Startup)
+  --uninstall-service     remove that autostart entry and stop it
   --cookies PATH          pass cookies.txt to yt-dlp (age-restricted tracks)
   --cache-ttl-secs N      how long resolved URLs are reused (default 14400)
   --cache-cap N           cached videos kept (default 512)
@@ -222,7 +314,11 @@ options:
 
 The default bind is loopback. Bind a tailnet/LAN address for remote clients,
 and either use --allow-private (trust private ranges) or a token. Public
-peers always need the token. TLS is left to Tailscale/WireGuard or a proxy.",
+peers always need the token. TLS is left to Tailscale/WireGuard or a proxy.
+
+--install-service reuses the other flags, so install it the way you run it:
+
+  ytui-resolver --bind 0.0.0.0:8787 --allow-private --install-service",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -254,7 +350,7 @@ fn load_token(args: &Args) -> Result<Option<String>, String> {
 }
 
 fn default_token_path() -> PathBuf {
-    home().join(".config/ytui/resolver.token")
+    home().join(".config").join("ytui").join("resolver.token")
 }
 
 fn home() -> PathBuf {
@@ -852,5 +948,44 @@ mod tests {
         assert!(bind_is_loopback("[::1]:8787"));
         assert!(!bind_is_loopback("0.0.0.0:8787"));
         assert!(!bind_is_loopback("100.64.0.5:8787"));
+    }
+
+    fn base_args() -> Args {
+        Args::parse(&["ytui-resolver".to_string()]).unwrap()
+    }
+
+    #[test]
+    fn service_args_keep_the_options_that_matter() {
+        let mut args = base_args();
+        args.bind = "0.0.0.0:8787".into();
+        args.allow_private = true;
+        assert_eq!(
+            service_args(&args, None),
+            vec!["--bind", "0.0.0.0:8787", "--allow-private"]
+        );
+    }
+
+    #[test]
+    fn service_args_use_a_token_file_not_the_secret() {
+        let mut args = base_args();
+        args.token = Some("hunter2".into());
+        let path = PathBuf::from("/home/me/.config/ytui/resolver.token");
+        let spec = service_args(&args, Some(path.clone()));
+        assert!(spec
+            .windows(2)
+            .any(|w| w == ["--token-file", path.to_str().unwrap()]));
+        assert!(!spec.iter().any(|a| a.contains("hunter2")));
+    }
+
+    #[test]
+    fn service_args_include_changed_tunables_only() {
+        let mut args = base_args();
+        args.cache_cap = 64;
+        args.max_concurrency = 4;
+        let spec = service_args(&args, None);
+        assert_eq!(
+            spec,
+            vec!["--bind", DEFAULT_BIND, "--cache-cap", "64", "--max-concurrency", "4"]
+        );
     }
 }

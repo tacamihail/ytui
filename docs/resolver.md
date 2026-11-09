@@ -91,6 +91,8 @@ Options:
 | `--token` / `--token-file` | auto | bearer token |
 | `--gen-token` | - | write a random token and exit |
 | `--allow-private` | off | trust LAN/Tailscale peers without a token |
+| `--install-service` | - | start at login and exit |
+| `--uninstall-service` | - | remove the autostart entry and stop it |
 | `--cookies PATH` | none | cookies for age-restricted/members-only tracks |
 | `--cache-ttl-secs` | `14400` | how long a resolved URL is reused |
 | `--cache-cap` | `512` | cached videos |
@@ -196,20 +198,35 @@ If the resolver is down and `resolver_fallback` is true, doctor reports it and
 checks the local yt-dlp/deno path instead. With fallback off, a resolver
 failure is a hard error and local yt-dlp is not required for playback.
 
-## systemd (user unit)
+## Run at login
 
-Install `tools/ytui-resolver.service` as
-`~/.config/systemd/user/ytui-resolver.service`, adjust the bind address, then:
+`--install-service` writes the native autostart entry for this machine, using
+the options you passed, and starts it now on Linux and macOS:
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user enable --now ytui-resolver
-journalctl --user -u ytui-resolver -f
+# trusted LAN/tailnet
+ytui-resolver --bind 0.0.0.0:8787 --allow-private --install-service
+
+# token mode: --gen-token first; the entry stores only the token file path
+ytui-resolver --gen-token
+ytui-resolver --bind 0.0.0.0:8787 --install-service
 ```
 
-Use `loginctl enable-linger "$USER"` if the server must run without a login
-session. The unit restarts on failure and reads the token file from the
-default location.
+| OS | autostart entry |
+|---|---|
+| Linux | `~/.config/systemd/user/ytui-resolver.service`; `loginctl enable-linger "$USER"` keeps it running without a login session |
+| macOS | `~/Library/LaunchAgents/com.ytui.resolver.plist`, logs to `~/.config/ytui/resolver.log` |
+| Windows | `ytui-resolver.cmd` in your Startup folder, no admin rights needed |
+
+Rerunning the command replaces the entry. `--uninstall-service` stops and
+removes it. Follow the logs with `journalctl --user -u ytui-resolver -f` on
+Linux, the log file on macOS, and the console on Windows.
+
+A token passed as `--token` is written to `~/.config/ytui/resolver.token` with
+mode `600`, so the unit never contains the secret itself.
+
+`tools/ytui-resolver.service` is still there if you prefer to manage a unit by
+hand.
 
 ## Protocol v1
 
