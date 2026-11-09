@@ -24,8 +24,13 @@ pub const SCAN_PORT: u16 = 8787;
 /// How long a `?`-menu or install-time scan may take.
 pub const SCAN_BUDGET: Duration = Duration::from_secs(10);
 /// Per-host connect/read timeout during a scan.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(400);
-/// Parallel probes; 254 hosts then finish in about two seconds.
+///
+/// This is deliberately generous: a resolver reached through a WSL NAT and a
+/// Tailscale tunnel can take a full second to answer a tiny health request,
+/// and a shorter timeout would silently miss it.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+/// Parallel probes; a /24 then finishes in about six seconds when every host
+/// is silent, which fits the scan budget.
 const SCAN_WORKERS: usize = 64;
 /// Hard cap on addresses so a strange interface cannot turn a scan into a
 /// minute-long crawl.
@@ -134,12 +139,23 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// A request agent whose connect timeout matches `timeout`. ureq's default
+/// connect timeout is 30 seconds and `.timeout()` does not override it, which
+/// turns a probe of a silent host into a 30-second stall.
+fn agent(timeout: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(timeout)
+        .timeout(timeout)
+        .build()
+}
+
 /// Fetches `/v1/health`. Errors are already human-readable for `ytui doctor`.
 pub fn health(s: &Settings) -> Result<(Health, u64), String> {
     let started = Instant::now();
-    let resp = ureq::get(&format!("{}/v1/health", s.base))
+    let timeout = s.timeout.min(Duration::from_secs(5));
+    let resp = agent(timeout)
+        .get(&format!("{}/v1/health", s.base))
         .set("User-Agent", UA)
-        .timeout(s.timeout.min(Duration::from_secs(5)))
         .call()
         .map_err(http_error)?;
     let ms = started.elapsed().as_millis() as u64;
@@ -158,7 +174,7 @@ pub fn resolve(s: &Settings, url: &str, refresh: bool) -> Result<Resolved, Strin
     if refresh {
         target.push_str("&refresh=1");
     }
-    let mut req = ureq::get(&target).set("User-Agent", UA).timeout(s.timeout);
+    let mut req = agent(s.timeout).get(&target).set("User-Agent", UA);
     if let Some(token) = &s.token {
         req = req.set("Authorization", &format!("Bearer {token}"));
     }
@@ -225,6 +241,10 @@ fn scan_targets() -> Vec<IpAddr> {
         }
     };
 
+    // Tailscale peers answer quickly when they exist but are the likeliest
+    // remote resolvers, so probe them before the /24 sweep.
+    add_tailscale_peers(&mut push);
+
     if let Ok(interfaces) = get_if_addrs() {
         for iface in interfaces {
             match iface.addr {
@@ -240,7 +260,6 @@ fn scan_targets() -> Vec<IpAddr> {
             }
         }
     }
-    add_tailscale_peers(&mut push);
     targets
 }
 
@@ -261,16 +280,7 @@ fn add_v4_range(push: &mut impl FnMut(IpAddr), ip: Ipv4Addr, prefixlen: u8) {
 /// Tailscale peers are usually `/32`s outside the interface's /24. Ask the CLI
 /// for the list when it is available; ignore anything else.
 fn add_tailscale_peers(push: &mut impl FnMut(IpAddr)) {
-    let Ok(out) = Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-    else {
-        return;
-    };
-    if !out.status.success() {
-        return;
-    }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+    let Some(value) = tailscale_status() else {
         return;
     };
     if let Some(node) = value.get("Self") {
@@ -281,6 +291,32 @@ fn add_tailscale_peers(push: &mut impl FnMut(IpAddr)) {
             add_tailscale_node(node, push);
         }
     }
+}
+
+/// Runs `tailscale status --json`, also trying the Windows executable name so
+/// a WSL install can see the host's tailnet, and the macOS app bundle path
+/// when the CLI is not on `PATH`. A missing CLI is not an error.
+fn tailscale_status() -> Option<serde_json::Value> {
+    const COMMANDS: [&str; 3] = [
+        // Linux, Windows and the macOS CLI symlink.
+        "tailscale",
+        // WSL interop: the host's Windows install.
+        "tailscale.exe",
+        // macOS app bundle.
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    ];
+    for cmd in COMMANDS {
+        let Ok(out) = Command::new(cmd).args(["status", "--json"]).output() else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+            return Some(value);
+        }
+    }
+    None
 }
 
 fn add_tailscale_node(node: &serde_json::Value, push: &mut impl FnMut(IpAddr)) {
@@ -304,9 +340,9 @@ fn probe(ip: IpAddr, port: u16, timeout: Duration) -> Option<Found> {
     };
     let base = format!("http://{host}:{port}");
     let started = Instant::now();
-    let resp = ureq::get(&format!("{base}/v1/health"))
+    let resp = agent(timeout)
+        .get(&format!("{base}/v1/health"))
         .set("User-Agent", UA)
-        .timeout(timeout)
         .call()
         .ok()?;
     if resp.status() != 200 {

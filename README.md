@@ -404,8 +404,9 @@ ytui discover --save --timeout 10
 ```
 
 The scan checks localhost, each private IPv4 `/24`, and Tailscale peers from
-`tailscale status --json` when the CLI is installed. It only probes port 8787,
-and it never overwrites a `resolver_url` that is already configured.
+`tailscale status --json` (or `tailscale.exe`, so a client in WSL sees the
+Windows tailnet). It only probes port 8787, and it never overwrites a
+`resolver_url` that is already configured.
 
 ### Tokenless LAN or tailnet
 
