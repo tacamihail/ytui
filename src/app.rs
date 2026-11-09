@@ -1375,14 +1375,13 @@ fn marked_line(text: &str, mark: char) -> Option<String> {
 }
 
 fn which(bin: &str) -> bool {
-    if let Ok(paths) = std::env::var("PATH") {
-        for dir in paths.split(':') {
-            if std::path::Path::new(dir).join(bin).is_file() {
-                return true;
-            }
-        }
-    }
-    false
+    // `split_paths` is the only correct separator-aware split: Windows uses
+    // `;`, Unix uses `:`. On Windows the file on disk is `clip.exe`.
+    let Ok(paths) = std::env::var("PATH") else {
+        return false;
+    };
+    let exe = format!("{bin}{}", std::env::consts::EXE_SUFFIX);
+    std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file() || dir.join(&exe).is_file())
 }
 
 #[cfg(test)]

@@ -7,7 +7,6 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -122,7 +121,7 @@ fn token_from(cfg: &Config) -> Option<String> {
                 let default = config::config_dir().join("resolver.token");
                 default.exists().then_some(default)
             } else {
-                Some(expand_home(explicit))
+                Some(config::expand_tilde(explicit))
             };
             path.and_then(|p| std::fs::read_to_string(p).ok())
                 .map(|t| t.trim().to_string())
@@ -135,15 +134,6 @@ fn env_nonempty(key: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-}
-
-fn expand_home(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    PathBuf::from(path)
 }
 
 /// A request agent whose connect timeout matches `timeout`. ureq's default

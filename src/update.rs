@@ -4,10 +4,11 @@
 //! build. Whether one is needed is decided by the `[package] version` in
 //! github's `Cargo.toml`, not by how many commits the checkout is behind: the
 //! version is bumped by hand when a release is cut, so an unbumped commit is
-//! not something to install. `install.sh` records the checkout it built from
-//! in `~/.config/ytui/source`; `$YTUI_SRC` overrides it. Only fast-forwards
-//! are done: a checkout with local commits, uncommitted changes or a diverged
-//! history is left alone so nothing of the user's work is touched.
+//! not something to install. `install.sh` (or `install.ps1` on Windows)
+//! records the checkout it built from in `~/.config/ytui/source`; `$YTUI_SRC`
+//! overrides it. Only fast-forwards are done: a checkout with local commits,
+//! uncommitted changes or a diverged history is left alone so nothing of the
+//! user's work is touched.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,12 @@ use std::process::Command;
 use crate::config;
 
 const BRANCH: &str = "main";
+
+/// The installer that records the checkout and refreshes the tools.
+#[cfg(windows)]
+const INSTALLER: &str = r".\install.ps1";
+#[cfg(not(windows))]
+const INSTALLER: &str = "./install.sh";
 
 const USAGE: &str = "\
 ytui update - install the newer version from github
@@ -27,7 +34,7 @@ usage:
 
 the version is the [package] version in Cargo.toml; it is bumped by hand when
 a release is cut, so commits that do not change it are not installed. the
-checkout is found through $YTUI_SRC, else the path install.sh saved in
+checkout is found through $YTUI_SRC, else the path the installer saved in
 ~/.config/ytui/source, else the current directory if it looks like the repo
 ";
 
@@ -158,7 +165,8 @@ fn run(args: &[String]) -> Result<(), String> {
 
     let touched_installer = git(&dir, &["diff", "--name-only", &local, &target])?
         .lines()
-        .any(|l| l.trim() == "install.sh");
+        .map(str::trim)
+        .any(|l| l == "install.sh" || l == "install.ps1");
 
     build_and_install(&dir, &target, Some(touched_installer))
 }
@@ -175,7 +183,9 @@ fn build_and_install(dir: &Path, sha: &str, installer_changed: Option<bool>) -> 
         return Err("build failed, the installed binary was left alone".into());
     }
 
-    let built = dir.join("target/release/ytui");
+    let built = dir
+        .join("target/release")
+        .join(format!("ytui{}", std::env::consts::EXE_SUFFIX));
     if !built.is_file() {
         return Err(format!("{} was not produced", built.display()));
     }
@@ -194,14 +204,14 @@ fn build_and_install(dir: &Path, sha: &str, installer_changed: Option<bool>) -> 
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755));
     }
-    fs::rename(&tmp, &dst).map_err(|e| format!("cannot replace {}: {e}", dst.display()))?;
+    replace_binary(&tmp, &dst).map_err(|e| format!("cannot replace {}: {e}", dst.display()))?;
 
     let version = version_at(dir).unwrap_or_else(|| version().to_string());
     println!("✔ updated to {} · ytui {version}", short(sha));
     println!("  installed -> {}", dst.display());
     if installer_changed == Some(true) {
         println!(
-            "  install.sh changed too, rerun ./install.sh to refresh yt-dlp, deno and the launcher"
+            "  the installer changed too, rerun {INSTALLER} to refresh yt-dlp, deno and the launcher"
         );
     }
     println!("  restart ytui to use the new binary");
@@ -210,14 +220,16 @@ fn build_and_install(dir: &Path, sha: &str, installer_changed: Option<bool>) -> 
 
 /// The recorded source checkout, validated as the ytui repo.
 fn checkout() -> Result<PathBuf, String> {
-    let dir = source_dir().ok_or(
-        "no source checkout recorded\n  \
-         run ./install.sh from the ytui checkout once, or set YTUI_SRC",
-    )?;
+    let dir = source_dir().ok_or_else(|| {
+        format!(
+            "no source checkout recorded\n  \
+             run {INSTALLER} from the ytui checkout once, or set YTUI_SRC"
+        )
+    })?;
     if !dir.join("Cargo.toml").is_file() || !dir.join(".git").exists() {
         return Err(format!(
             "{} is not the ytui checkout\n  expected Cargo.toml and .git there, \
-             set YTUI_SRC or rerun install.sh",
+             set YTUI_SRC or rerun {INSTALLER}",
             dir.display()
         ));
     }
@@ -245,7 +257,33 @@ fn source_dir() -> Option<PathBuf> {
     None
 }
 
-/// Where `install.sh` puts the real binary; `$YTUI_BIN` overrides it.
+/// Move `tmp` into place.
+///
+/// On Windows the running `ytui.exe` cannot be overwritten, but it can be
+/// renamed, so it is moved out of the way first and the leftover is removed
+/// (or replaced by the next update).
+fn replace_binary(tmp: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let old = dst.with_extension("old");
+        let _ = fs::remove_file(&old);
+        let moved = fs::rename(dst, &old).is_ok();
+        if let Err(e) = fs::rename(tmp, dst) {
+            if moved {
+                let _ = fs::rename(&old, dst);
+            }
+            return Err(e);
+        }
+        let _ = fs::remove_file(&old);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(tmp, dst)
+    }
+}
+
+/// Where the installer puts the real binary; `$YTUI_BIN` overrides it.
 fn bin_path() -> PathBuf {
     if let Ok(v) = std::env::var("YTUI_BIN") {
         let v = v.trim();
@@ -253,6 +291,9 @@ fn bin_path() -> PathBuf {
             return PathBuf::from(v);
         }
     }
+    #[cfg(windows)]
+    return config::home().join(format!(".local/bin/ytui{}", std::env::consts::EXE_SUFFIX));
+    #[cfg(not(windows))]
     config::home().join(".local/bin/ytui.bin")
 }
 

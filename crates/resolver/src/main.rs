@@ -362,11 +362,19 @@ fn default_token_path() -> PathBuf {
 }
 
 fn home() -> PathBuf {
-    PathBuf::from(
-        std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| ".".into()),
-    )
+    #[cfg(windows)]
+    let vars: &[&str] = &["USERPROFILE", "HOME"];
+    #[cfg(not(windows))]
+    let vars: &[&str] = &["HOME"];
+
+    for var in vars {
+        if let Some(home) = std::env::var_os(var) {
+            if !home.is_empty() {
+                return PathBuf::from(home);
+            }
+        }
+    }
+    PathBuf::from(".")
 }
 
 fn generate_token() -> String {

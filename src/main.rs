@@ -170,7 +170,7 @@ fn doctor() -> i32 {
             if year >= 2025 {
                 println!("✔ yt-dlp {v}");
             } else if local_needed {
-                println!("✗ yt-dlp {v} is too old, run install.sh to update it");
+                println!("✗ yt-dlp {v} is too old, update it with `yt-dlp -U`");
                 healthy = false;
             } else {
                 println!("· yt-dlp {v} is old, but the resolver does the work");

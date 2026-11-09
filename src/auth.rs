@@ -18,7 +18,7 @@ usage:
   ytui auth --status            show the current connection
   ytui logout                   forget cookies and account
 
-getting cookies.txt (works from Windows into WSL):
+getting cookies.txt:
   1. install the \"Get cookies.txt LOCALLY\" browser extension and allow it
      in private windows
   2. open a private/incognito window and sign in to https://music.youtube.com
@@ -26,7 +26,8 @@ getting cookies.txt (works from Windows into WSL):
   4. export the youtube.com cookies, then close the private window for good
      YouTube rotates cookies on open tabs, so an export from a normal window
      goes stale in hours or days; a closed private session keeps working
-  5. ytui auth /mnt/c/Users/<you>/cookies.txt
+  5. ytui auth C:\\Users\\<you>\\Downloads\\cookies.txt
+     (inside WSL: ytui auth /mnt/c/Users/<you>/Downloads/cookies.txt)
 
 supported browsers: firefox, chromium, chrome, brave, edge, vivaldi, opera
   reading cookies from a browser skips the export, but subscriptions still
@@ -59,8 +60,8 @@ pub fn cli(args: &[String]) -> i32 {
 }
 
 fn import(path: &str) -> i32 {
-    let p = Path::new(path);
-    let txt = match fs::read_to_string(p) {
+    let p = config::expand_tilde(path);
+    let txt = match fs::read_to_string(&p) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("✗ cannot read {path}: {e}");
