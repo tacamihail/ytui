@@ -253,7 +253,7 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             Line::from(Span::styled(
                 truncate(
-                    " stopped. / to search, enter plays the whole list, ? for help",
+                    " stopped. / to search, ENTER plays the whole list, ? for help",
                     w,
                 ),
                 Style::new().fg(DIM),
@@ -427,7 +427,7 @@ fn draw_player(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let title = if app.tab == TAB_PLAYLISTS && app.in_playlist {
-        format!(" Playlists · {} · esc back ", app.playlist_title)
+        format!(" Playlists · {} · ESC back ", app.playlist_title)
     } else {
         format!(" {} ", TABS[app.tab])
     };
@@ -448,7 +448,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 f,
                 inner,
                 Line::from(Span::styled(
-                    "queue is empty. Press enter on a list to play it, a to append",
+                    "queue is empty. Press ENTER on a list to play it, a to append",
                     Style::new().fg(DIM),
                 )),
             );
@@ -771,7 +771,7 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_hints(f: &mut Frame, _app: &App, area: Rect) {
-    let hints = " 1-6 tabs · / search · enter play list · a queue · space pause · ←→/h l seek · , . 30s · [ ] vol · <> track · s shuffle · R repeat · m mute · x stop · r refresh · ? help · q quit";
+    let hints = " 1-6 tabs · / search · ENTER play list · a queue · SPACE pause · ←→/h l seek · , . 30s · [ ] vol · <> track · s shuffle · R repeat · m mute · x stop · r refresh · ? help · q quit";
     let s = truncate(hints, area.width as usize);
     f.render_widget(Paragraph::new(Span::styled(s, Style::new().fg(DIM))), area);
 }
@@ -799,8 +799,8 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
-    // The updates section (heading plus one key row) sits under the 26 key-map
-    // rows, plus the border, so it still fits a 30-row terminal.
+    // The resolver status, the updates section (heading plus one key row) and
+    // the key map fit a 30-row terminal, plus the border.
     let (w, h) = (68u16, 30u16);
     let r = centered_rect(w.min(area.width), h.min(area.height), area);
     f.render_widget(Clear, r);
@@ -828,26 +828,35 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let upd_header = format!("updates · {update_label}");
 
+    // The resolver decides where all yt-dlp/deno work happens, so its address
+    // and reach come first: LOCAL (this machine), LAN/tailnet, or PUBLIC.
+    let (resolver_text, resolver_color) = resolver_status(&app.cfg.resolver_url);
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        format!(" {resolver_text}"),
+        Style::new()
+            .fg(resolver_color)
+            .add_modifier(Modifier::BOLD),
+    ))];
+
     let rows: Vec<(&str, &str)> = vec![
-        // Updates first: the box is clamped on short terminals, and the version
+        // Updates next: the box is clamped on short terminals, and the version
         // and update state are what the overlay is asked about most often.
         (upd_header.as_str(), ""),
         ("u", "install update or check again"),
         ("s", "scan the LAN for a resolver"),
         ("navigation", ""),
-        ("1-6 / Tab / Shift+Tab", "switch tabs"),
+        ("1-6 / TAB / SHIFT+TAB", "switch tabs"),
         ("↑↓ / j k / wheel", "move selection"),
         ("click / double-click", "select / play item"),
-        ("enter", "play the whole list from here"),
+        ("ENTER", "play the whole list from here"),
         ("a", "append selection to queue"),
-        ("esc", "leave a playlist drill-down"),
+        ("ESC", "leave a playlist drill-down"),
         ("playback", ""),
-        ("space or p", "pause / resume"),
+        ("SPACE or p", "pause / resume"),
         ("← → or h l", "seek 5s back/forward"),
         (", .", "seek 30s back/forward"),
-        ("click progress bar", "seek to that position"),
+        ("click bar / slider", "seek or set the volume"),
         ("click ◀◀ ‖ ▶▶", "previous, pause/resume, next"),
-        ("drag volume slider", "set the volume"),
         ("[ ]", "volume down/up by 5"),
         ("m / click icon", "mute / unmute"),
         ("s", "shuffle"),
@@ -860,25 +869,40 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
         ("r", "refresh list, / search"),
         ("q", "quit"),
     ];
-    let lines: Vec<Line> = rows
-        .iter()
-        .map(|(k, d)| {
-            if d.is_empty() {
-                Line::from(Span::styled(
-                    format!(" {k}"),
-                    Style::new().fg(DIM).add_modifier(Modifier::BOLD),
-                ))
-            } else {
-                Line::from(vec![
-                    Span::styled(format!("  {k:<22}"), Style::new().fg(ACCENT)),
-                    Span::styled(*d, Style::new().fg(FG)),
-                ])
-            }
-        })
-        // The box is clamped to a narrow terminal too; mark a clipped row.
-        .map(|line| clamp_line(line, inner.width as usize))
-        .collect();
+    lines.extend(
+        rows.iter()
+            .map(|(k, d)| {
+                if d.is_empty() {
+                    Line::from(Span::styled(
+                        format!(" {k}"),
+                        Style::new().fg(DIM).add_modifier(Modifier::BOLD),
+                    ))
+                } else {
+                    Line::from(vec![
+                        Span::styled(format!("  {k:<22}"), Style::new().fg(ACCENT)),
+                        Span::styled(*d, Style::new().fg(FG)),
+                    ])
+                }
+            })
+            // The box is clamped to a narrow terminal too; mark a clipped row.
+            .map(|line| clamp_line(line, inner.width as usize)),
+    );
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// One line for the help overlay: where the resolver is and how far away it is.
+fn resolver_status(resolver_url: &str) -> (String, Color) {
+    let url = resolver_url.trim();
+    if url.is_empty() {
+        return ("resolver · LOCAL · yt-dlp on this machine".into(), DIM);
+    }
+    let reach = remote::reach(url);
+    let color = match reach {
+        remote::Reach::Local => DIM,
+        remote::Reach::Lan => GREEN,
+        remote::Reach::Public => YELLOW,
+    };
+    (format!("resolver · {} · {url}", reach.label()), color)
 }
 
 fn draw_scan(f: &mut Frame, app: &mut App, area: Rect) {
@@ -888,7 +912,7 @@ fn draw_scan(f: &mut Frame, app: &mut App, area: Rect) {
 
     let title = match &app.scan {
         ScanState::Running => " resolver scan · scanning… ".to_string(),
-        _ => " resolver scan · s rescan · enter use · esc close ".to_string(),
+        _ => " resolver scan · s rescan · ENTER use · ESC close ".to_string(),
     };
     let b = Block::bordered()
         .border_style(Style::new().fg(ACCENT))
@@ -900,9 +924,13 @@ fn draw_scan(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(b, r);
 
     let current = if app.cfg.resolver_url.trim().is_empty() {
-        "current: local yt-dlp".to_string()
+        "current: LOCAL · yt-dlp on this machine".to_string()
     } else {
-        format!("current: {}", app.cfg.resolver_url)
+        format!(
+            "current: {} · {}",
+            remote::reach(&app.cfg.resolver_url).label(),
+            app.cfg.resolver_url
+        )
     };
     let mut lines = vec![
         Line::from(Span::styled(format!(" {current}"), Style::new().fg(DIM))),
@@ -919,7 +947,7 @@ fn draw_scan(f: &mut Frame, app: &mut App, area: Rect) {
                 " {} scanning localhost and private networks on port {} (up to {}s)…",
                 spinner(app.anim.elapsed()),
                 remote::SCAN_PORT,
-                remote::SCAN_BUDGET.as_secs()
+                remote::MENU_SCAN_BUDGET.as_secs()
             ),
             Style::new().fg(ACCENT),
         ))),
@@ -946,6 +974,9 @@ fn draw_scan(f: &mut Frame, app: &mut App, area: Rect) {
                     let marker = if selected { "▶" } else { " " };
                     let mut text =
                         format!(" {marker} {:<30} v{}  {} ms", hit.url, hit.version, hit.ms);
+                    if let Some(solve) = hit.solve_ms {
+                        text.push_str(&format!("  ~{:.1}s/track", solve as f64 / 1000.0));
+                    }
                     if hit.auth {
                         text.push_str("  token required");
                     }
@@ -968,7 +999,7 @@ fn draw_scan(f: &mut Frame, app: &mut App, area: Rect) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " esc cancels · a tokenless private resolver is used automatically",
+        " ESC cancels · a tokenless private resolver is used automatically",
         Style::new().fg(DIM),
     )));
     let lines: Vec<Line> = lines
@@ -1040,6 +1071,26 @@ mod tests {
     /// The player line right-aligns the volume block by padding after the
     /// title. If the padding is computed in chars while the title contains
     /// wide glyphs, the block slides left of its mouse area.
+    #[test]
+    fn help_names_the_resolver_reach() {
+        assert_eq!(
+            resolver_status("").0,
+            "resolver · LOCAL · yt-dlp on this machine"
+        );
+        assert_eq!(
+            resolver_status("  http://192.168.1.20:8787 ").0,
+            "resolver · LAN · http://192.168.1.20:8787"
+        );
+        assert_eq!(
+            resolver_status("http://100.64.0.5:8787").0,
+            "resolver · LAN · http://100.64.0.5:8787"
+        );
+        assert_eq!(
+            resolver_status("https://resolver.example.com").0,
+            "resolver · PUBLIC · https://resolver.example.com"
+        );
+    }
+
     #[test]
     fn wide_titles_fit_their_column() {
         let prefix = transport_width(ICON_PAUSE);

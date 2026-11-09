@@ -254,7 +254,7 @@ fn doctor() -> i32 {
 fn discover(args: &[String]) -> i32 {
     let mut save = false;
     let mut quiet = false;
-    let mut timeout = 10u64;
+    let mut timeout = remote::SCAN_BUDGET.as_secs();
     let mut url: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -343,11 +343,16 @@ fn discover(args: &[String]) -> i32 {
     } else {
         println!("found {} resolver(s):", found.len());
         for f in &found {
+            let solve = f
+                .solve_ms
+                .map(|ms| format!(", ~{:.1}s/track", ms as f64 / 1000.0))
+                .unwrap_or_default();
             println!(
-                "  {} v{} ({} ms){}",
+                "  {} v{} ({} ms{}){}",
                 f.url,
                 f.version,
                 f.ms,
+                solve,
                 if f.auth { " · token required" } else { "" }
             );
         }

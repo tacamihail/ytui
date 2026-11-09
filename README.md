@@ -465,9 +465,9 @@ resolver answers on port 8787, its URL is saved to `config.json` and ytui uses
 it from then on. If nothing answers, the config is left alone and ytui keeps
 resolving locally with its own yt-dlp.
 
-The same scan is in the help overlay: press `?`, then `s`. A tokenless
-private resolver is selected, saved and used immediately; `enter` picks a
-listed one and `esc` cancels. From a shell:
+The same scan is in the help overlay: press `?`, then `s`. It may take up to
+60 seconds (the install-time scan is capped at 10), and `ENTER` picks a listed
+resolver while `ESC` cancels. From a shell:
 
 ```bash
 ytui discover --save --timeout 10
@@ -475,8 +475,11 @@ ytui discover --save --timeout 10
 
 The scan checks localhost and each private IPv4 `/24` the machine is attached
 to, so it finds a resolver on a plain LAN without any extra tooling. It only
-probes port 8787, it stops as soon as a tokenless resolver answers, and it never
-overwrites a `resolver_url` that is already configured.
+probes port 8787, and it never overwrites a `resolver_url` that is already
+configured. When several tokenless resolvers answer, ytui picks the one with
+the lowest estimated wait per track: the server's own recent resolve time from
+`/v1/health` plus the health round-trip. The scan keeps probing for 1.5 s after
+the first answer, so a neighbouring faster resolver still gets a chance.
 
 Overlay networks are not a local `/24`, so the scan cannot see them: that
 covers Tailscale's `100.64.0.0/10`, WireGuard and other VPNs, a resolver on

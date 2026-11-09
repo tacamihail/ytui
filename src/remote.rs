@@ -15,12 +15,18 @@ use if_addrs::{get_if_addrs, IfAddr};
 use serde::Deserialize;
 
 use crate::config::{self, Config};
-use ytui_resolve::{Resolved, UA};
+use ytui_resolve::{is_private_ip, Resolved, UA};
 
 /// Port `ytui-resolver` listens on by default.
 pub const SCAN_PORT: u16 = 8787;
 /// How long a `?`-menu or install-time scan may take.
 pub const SCAN_BUDGET: Duration = Duration::from_secs(10);
+/// The interactive scan may take longer: a person is watching it, while an
+/// unattended `install.sh` should not sit there for a minute.
+pub const MENU_SCAN_BUDGET: Duration = Duration::from_secs(60);
+/// After the first tokenless answer, keep probing for this long so a second,
+/// faster resolver on the same network still gets a chance to answer.
+const SCAN_GRACE: Duration = Duration::from_millis(1500);
 /// Per-host connect/read timeout during a scan. A resolver on the local
 /// network answers in milliseconds; a silent host should not hold the sweep.
 /// Kept generous because `/v1/health` on an older server can take about a
@@ -65,6 +71,10 @@ pub struct Health {
     /// Whether this peer would need a bearer token for `/v1/resolve`.
     #[serde(default)]
     pub auth: bool,
+    /// Median cold-resolve time the server has seen, when it has resolved
+    /// anything since it started.
+    #[serde(default)]
+    pub resolve_ms: Option<u64>,
 }
 
 /// A resolver found by [`scan_for`].
@@ -76,6 +86,8 @@ pub struct Found {
     /// trust private peers, or no token is configured locally).
     pub auth: bool,
     pub ms: u64,
+    /// The server's own median resolve time, when it reported one.
+    pub solve_ms: Option<u64>,
 }
 
 /// `None` when no resolver is configured, so callers keep using local yt-dlp.
@@ -109,6 +121,65 @@ pub fn settings_at(base: &str, cfg: &Config) -> Settings {
 /// scan uses this to decide if a token-protected server is usable.
 pub fn has_token(cfg: &Config) -> bool {
     token_from(cfg).is_some()
+}
+
+/// Where the configured resolver lives, shown in the help overlay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    Local,
+    Lan,
+    Public,
+}
+
+impl Reach {
+    pub fn label(self) -> &'static str {
+        match self {
+            Reach::Local => "LOCAL",
+            Reach::Lan => "LAN",
+            Reach::Public => "PUBLIC",
+        }
+    }
+}
+
+/// Classifies a resolver URL by its host: loopback is local, private/tailnet
+/// addresses and mDNS-style names are LAN, everything else is public.
+pub fn reach(url: &str) -> Reach {
+    let Some(host) = host_of(url) else {
+        return Reach::Public;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return Reach::Local;
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return if ip.is_loopback() {
+            Reach::Local
+        } else if is_private_ip(ip) {
+            Reach::Lan
+        } else {
+            Reach::Public
+        };
+    }
+    let host = host.to_ascii_lowercase();
+    let local_name = [".local", ".lan", ".home", ".internal", ".localdomain"]
+        .iter()
+        .any(|suffix| host.ends_with(suffix));
+    if local_name {
+        Reach::Lan
+    } else {
+        Reach::Public
+    }
+}
+
+/// Host part of a URL without scheme, userinfo, port or IPv6 brackets.
+fn host_of(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    if let Some(v6) = host.strip_prefix('[') {
+        return v6.split(']').next().map(str::to_string);
+    }
+    let host = host.split(':').next()?;
+    (!host.is_empty()).then(|| host.to_string())
 }
 
 fn token_from(cfg: &Config) -> Option<String> {
@@ -185,13 +256,20 @@ pub fn resolve(s: &Settings, url: &str, refresh: bool) -> Result<Resolved, Strin
 }
 
 /// Scans localhost and each private IPv4 `/24` on the default resolver port.
-/// The caller gets at most `SCAN_BUDGET` of wall-clock time.
-/// Results are ordered by "token not needed" first, then by response time.
+/// The caller gets at most `budget` of wall-clock time. Results are ordered by
+/// "token not needed" first, then by the estimated wait per track.
 pub fn scan_for(budget: Duration) -> Vec<Found> {
-    scan_port(SCAN_PORT, budget)
+    scan_for_cancellable(budget, None)
 }
 
-fn scan_port(port: u16, budget: Duration) -> Vec<Found> {
+/// Like [`scan_for`], but stops early when `cancel` becomes true. The help
+/// overlay uses it so closing the scan does not leave a minute-long sweep
+/// running in the background.
+pub fn scan_for_cancellable(budget: Duration, cancel: Option<&AtomicBool>) -> Vec<Found> {
+    scan_port(SCAN_PORT, budget, cancel)
+}
+
+fn scan_port(port: u16, budget: Duration, cancel: Option<&AtomicBool>) -> Vec<Found> {
     let targets = scan_targets();
     if targets.is_empty() {
         return Vec::new();
@@ -199,16 +277,21 @@ fn scan_port(port: u16, budget: Duration) -> Vec<Found> {
     let deadline = Instant::now() + budget;
     let next = AtomicUsize::new(0);
     let found = Mutex::new(Vec::new());
-    // A tokenless answer is what the caller wants, so stop probing as soon as
-    // one arrives instead of sweeping every adapter's /24 for a faster one.
-    let tokenless = AtomicBool::new(false);
+    // After the first tokenless answer, keep probing for a moment so other
+    // resolvers on the same network can answer too and the fastest wins.
+    let first_tokenless: Mutex<Option<Instant>> = Mutex::new(None);
     let workers = SCAN_WORKERS.min(targets.len()).max(1);
 
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| loop {
-                if tokenless.load(Ordering::Relaxed) {
+                if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
                     break;
+                }
+                if let Some(at) = *first_tokenless.lock().unwrap_or_else(|e| e.into_inner()) {
+                    if at.elapsed() >= SCAN_GRACE {
+                        break;
+                    }
                 }
                 let left = deadline.saturating_duration_since(Instant::now());
                 if left.is_zero() {
@@ -220,7 +303,10 @@ fn scan_port(port: u16, budget: Duration) -> Vec<Found> {
                 };
                 if let Some(hit) = probe(ip, port, PROBE_TIMEOUT.min(left)) {
                     if !hit.auth {
-                        tokenless.store(true, Ordering::Relaxed);
+                        let mut slot = first_tokenless.lock().unwrap_or_else(|e| e.into_inner());
+                        if slot.is_none() {
+                            *slot = Some(Instant::now());
+                        }
                     }
                     found.lock().unwrap_or_else(|e| e.into_inner()).push(hit);
                 }
@@ -229,13 +315,23 @@ fn scan_port(port: u16, budget: Duration) -> Vec<Found> {
     });
 
     let mut found = found.into_inner().unwrap_or_else(|e| e.into_inner());
-    found.sort_by(|a, b| {
-        a.auth
-            .cmp(&b.auth)
-            .then(a.ms.cmp(&b.ms))
-            .then(a.url.cmp(&b.url))
-    });
+    found.sort_by(rank);
     found
+}
+
+/// Tokenless first, then the shortest estimated wait per track.
+fn rank(a: &Found, b: &Found) -> std::cmp::Ordering {
+    a.auth
+        .cmp(&b.auth)
+        .then(score(a).cmp(&score(b)))
+        .then(a.url.cmp(&b.url))
+}
+
+/// The wait a client would see for a track: the server's own median resolve
+/// time plus the health round-trip. A server that has not resolved yet is
+/// judged on the round-trip alone.
+fn score(found: &Found) -> u64 {
+    found.ms + found.solve_ms.unwrap_or(0)
 }
 
 fn scan_targets() -> Vec<IpAddr> {
@@ -330,6 +426,7 @@ fn probe(ip: IpAddr, port: u16, timeout: Duration) -> Option<Found> {
         version: health.version,
         auth: health.auth,
         ms: started.elapsed().as_millis() as u64,
+        solve_ms: health.resolve_ms,
     })
 }
 
@@ -541,6 +638,49 @@ mod tests {
         let mut ips = Vec::new();
         add_v4_range(&mut |ip| ips.push(ip), Ipv4Addr::new(100, 64, 0, 7), 32);
         assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 7))]);
+    }
+
+    #[test]
+    fn classifies_the_configured_resolver() {
+        for url in [
+            "http://127.0.0.1:8787",
+            "http://[::1]:8787",
+            "http://localhost:8787",
+        ] {
+            assert_eq!(reach(url), Reach::Local, "{url}");
+        }
+        for url in [
+            "http://192.168.1.170:8787",
+            "http://10.0.0.5:8787",
+            "http://100.64.0.5:8787",
+            "http://raspberrypi.local:8787",
+        ] {
+            assert_eq!(reach(url), Reach::Lan, "{url}");
+        }
+        for url in ["https://resolver.example.com:8787", "http://8.8.8.8:8787"] {
+            assert_eq!(reach(url), Reach::Public, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_faster_resolver_outranks_a_nearer_slow_one() {
+        let slow = Found {
+            url: "http://10.0.0.2:8787".into(),
+            version: "0.4.4".into(),
+            auth: false,
+            ms: 5,
+            solve_ms: Some(8000),
+        };
+        let fast = Found {
+            url: "http://10.0.0.3:8787".into(),
+            version: "0.4.4".into(),
+            auth: false,
+            ms: 40,
+            solve_ms: Some(2000),
+        };
+        let mut found = vec![slow, fast];
+        found.sort_by(rank);
+        assert_eq!(found[0].url, "http://10.0.0.3:8787");
     }
 
     #[test]

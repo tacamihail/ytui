@@ -154,8 +154,9 @@ on the local network. A public resolver is configured by hand (or by editing
 
 ## Automatic discovery
 
-`install.sh` scans for up to 10 seconds when `resolver_url` is still empty,
-and the help overlay does the same with `?` then `s`. From a shell:
+`install.sh` scans for up to 10 seconds when `resolver_url` is still empty.
+The help overlay does the same with `?` then `s`, but gives itself 60 seconds
+and stops probing as soon as the overlay is closed. From a shell:
 
 ```bash
 ytui discover --save --timeout 10
@@ -164,9 +165,14 @@ ytui discover --save --timeout 10
 The scan probes port 8787 on localhost and each private IPv4 `/24` the machine
 is attached to. Every probe has a short connect timeout, so a silent host
 cannot stretch the scan past its deadline. A tokenless result is preferred and
-applied automatically, and the scan stops as soon as one answers; a
-token-protected result is only applied when `resolver_token_file` already
-points at a token.
+applied automatically; a token-protected result is only applied when
+`resolver_token_file` already points at a token.
+
+When several tokenless resolvers answer, the one with the lowest estimated
+wait per track wins: the server's median cold-resolve time, reported as
+`resolve_ms` by `/v1/health`, plus the health round-trip. After the first
+tokenless answer the scan keeps probing for another 1.5 s, so a neighbouring
+faster resolver still gets a chance.
 
 Discovery stays provider-neutral on purpose: it does not shell out to
 Tailscale, ZeroTier or any other overlay CLI. Those networks are not a local
@@ -244,9 +250,9 @@ hand.
 
 ```text
 GET /v1/health
-  -> 200 { "ok": true, "version": "0.4.0",
+  -> 200 { "ok": true, "version": "0.4.5",
            "ytdlp": "2026.10.26", "deno": "deno 2.9.8",
-           "auth": false }
+           "auth": false, "resolve_ms": 812 }
 
 GET /v1/resolve?url=<watch-url>[&refresh=1]
   Authorization: Bearer <token>
@@ -268,6 +274,9 @@ GET /v1/resolve?url=<watch-url>[&refresh=1]
 - `auth` says whether this particular peer would need a token for
   `/v1/resolve`. A private peer of a server started with `--allow-private`
   sees `false`.
+- `resolve_ms` is the median of the server's last eight cold resolves, or
+  `null` before the first one. Clients with more than one resolver on the
+  network use it to pick the fastest; the health round-trip is added on top.
 - The client probes each candidate with a 1 KiB HTTP Range request. That probe
   stays local because googlevideo URLs can be bound to the requesting IP.
 - If every candidate is refused, the client calls `/v1/resolve?...&refresh=1`

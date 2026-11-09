@@ -19,6 +19,7 @@ use ratatui::widgets::ListState;
 use ratatui::Terminal;
 use std::io;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -141,6 +142,8 @@ pub struct App {
     pub scan: ScanState,
     pub scan_sel: usize,
     scan_rx: Option<Receiver<Vec<remote::Found>>>,
+    /// Set when the overlay closes, so a 60-second menu scan stops probing.
+    scan_cancel: Option<Arc<AtomicBool>>,
     pub last_query: String,
     pub should_quit: bool,
     pub player: Arc<Mutex<PlayerState>>,
@@ -218,6 +221,7 @@ impl App {
             scan: ScanState::Idle,
             scan_sel: 0,
             scan_rx: None,
+            scan_cancel: None,
             last_query: String::new(),
             should_quit: false,
             player: Arc::clone(&player.state),
@@ -558,8 +562,9 @@ impl App {
     // ---------------- resolver scan ----------------
 
     /// Scans localhost and the private networks on port 8787 in the
-    /// background. The result is applied automatically when it is a tokenless
-    /// private resolver (or when a token is already configured).
+    /// background, for up to a minute. The result is applied automatically when
+    /// it is a tokenless private resolver (or when a token is already
+    /// configured).
     fn start_scan(&mut self) {
         self.scan_open = true;
         if self.scan_rx.is_some() {
@@ -569,9 +574,23 @@ impl App {
         self.scan_sel = 0;
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.scan_cancel = Some(Arc::clone(&cancel));
         std::thread::spawn(move || {
-            let _ = tx.send(remote::scan_for(remote::SCAN_BUDGET));
+            let found =
+                remote::scan_for_cancellable(remote::MENU_SCAN_BUDGET, Some(cancel.as_ref()));
+            let _ = tx.send(found);
         });
+    }
+
+    /// Stops the worker behind the overlay; a closed scan must not keep the
+    /// network busy for the rest of its minute.
+    fn cancel_scan(&mut self) {
+        if let Some(cancel) = self.scan_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.scan_rx = None;
+        self.scan = ScanState::Idle;
     }
 
     pub fn scan_running(&self) -> bool {
@@ -588,6 +607,7 @@ impl App {
             return;
         };
         self.scan_rx = None;
+        self.scan_cancel = None;
         self.scan_sel = 0;
         self.scan = ScanState::Done(found);
         if let Some(chosen) = pick_resolver(&self.scan, &self.cfg) {
@@ -634,8 +654,15 @@ impl App {
         self.cmd(Cmd::SetConfig(self.cfg.clone()));
         self.scan_open = false;
         self.help_open = false;
-        self.scan = ScanState::Idle;
-        self.set_toast(format!("resolver: {}", chosen.url), false);
+        self.cancel_scan();
+        self.set_toast(
+            format!(
+                "resolver: {} · {}",
+                remote::reach(&chosen.url).label(),
+                chosen.url
+            ),
+            false,
+        );
     }
 
     // ---------------- keys ----------------
@@ -651,10 +678,10 @@ impl App {
             match k.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     // Dropping the receiver stops this scan from changing the
-                    // config after the overlay was dismissed.
+                    // config after the overlay was dismissed, and the flag
+                    // stops the probes themselves.
                     self.scan_open = false;
-                    self.scan_rx = None;
-                    self.scan = ScanState::Idle;
+                    self.cancel_scan();
                 }
                 KeyCode::Char('s') => self.start_scan(),
                 KeyCode::Up | KeyCode::Char('k') => self.scan_move(-1),
@@ -864,7 +891,7 @@ impl App {
                             self.last_click = None;
                             self.activate();
                         } else {
-                            self.set_toast("double-click (or enter) to play", false);
+                            self.set_toast("double-click (or ENTER) to play", false);
                         }
                     }
                 }
@@ -1129,7 +1156,7 @@ impl App {
 
     fn queue_append(&mut self) {
         if self.tab == TAB_QUEUE {
-            self.set_toast("already in the queue, press enter to play it", false);
+            self.set_toast("already in the queue, press ENTER to play it", false);
             return;
         }
         if let Some(e) = self.current_entry() {
@@ -1413,12 +1440,14 @@ mod tests {
                 version: "0.4.0".into(),
                 auth: true,
                 ms: 1,
+                solve_ms: None,
             },
             remote::Found {
                 url: "http://10.0.0.3:8787".into(),
                 version: "0.4.0".into(),
                 auth: false,
                 ms: 50,
+                solve_ms: None,
             },
         ];
         let chosen = pick_resolver(&ScanState::Done(found), &Config::default()).unwrap();
@@ -1432,6 +1461,7 @@ mod tests {
             version: "0.4.0".into(),
             auth: true,
             ms: 1,
+            solve_ms: None,
         }];
         assert!(pick_resolver(&ScanState::Done(found), &Config::default()).is_none());
     }
@@ -1447,6 +1477,7 @@ mod tests {
             version: "0.4.0".into(),
             auth: true,
             ms: 1,
+            solve_ms: None,
         }];
         assert!(pick_resolver(&ScanState::Done(found), &cfg).is_some());
     }

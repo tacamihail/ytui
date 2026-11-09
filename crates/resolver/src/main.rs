@@ -98,6 +98,7 @@ fn run() -> Result<(), String> {
         cache: Mutex::new(Cache::new(args.cache_cap, args.cache_ttl)),
         rate: Mutex::new(RateLimit::new(RATE_MAX, RATE_WINDOW)),
         tools: Mutex::new(None),
+        speed: Mutex::new(Speed::default()),
     });
     let gate = Arc::new(Gate::new(args.max_concurrency));
     let server =
@@ -418,6 +419,7 @@ struct Ctx {
     cache: Mutex<Cache>,
     rate: Mutex<RateLimit>,
     tools: Mutex<Option<(Instant, Option<String>, Option<String>)>>,
+    speed: Mutex<Speed>,
 }
 
 fn handle(request: Request, ctx: &Ctx) {
@@ -499,6 +501,10 @@ fn resolve_request(request: Request, url: &str, ctx: &Ctx) {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .put(&id, track.clone());
+            ctx.speed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record(ms);
             eprintln!(
                 "resolve {id} ok ({ms} ms, {} candidates)",
                 track.candidates.len()
@@ -558,6 +564,11 @@ fn health_json(ctx: &Ctx, request: &Request) -> String {
         .map(|a| ytui_resolve::is_private_ip(a.ip()))
         .unwrap_or(true);
     let auth = token_needed(ctx.token.is_some(), ctx.allow_private, private);
+    let resolve_ms = ctx
+        .speed
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .median();
     let (ytdlp, deno) = tool_versions(ctx);
     serde_json::json!({
         "ok": true,
@@ -565,6 +576,9 @@ fn health_json(ctx: &Ctx, request: &Request) -> String {
         "ytdlp": ytdlp,
         "deno": deno,
         "auth": auth,
+        // Recent cold-resolve time, so clients with more than one resolver on
+        // the network can pick the fastest rather than the nearest.
+        "resolve_ms": resolve_ms,
     })
     .to_string()
 }
@@ -695,6 +709,36 @@ impl Cache {
             }
         }
         self.entries.insert(id.to_string(), (Instant::now(), track));
+    }
+}
+
+// ---------------- resolve speed ----------------
+
+/// Recent cold-resolve times, reported by `/v1/health` so a client with more
+/// than one resolver on the network can pick the fastest, not the nearest.
+#[derive(Default)]
+struct Speed {
+    samples: VecDeque<u64>,
+}
+
+/// Resolves kept for the median; enough to smooth a slow first run.
+const SPEED_SAMPLES: usize = 8;
+
+impl Speed {
+    fn record(&mut self, ms: u64) {
+        if self.samples.len() == SPEED_SAMPLES {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(ms);
+    }
+
+    fn median(&self) -> Option<u64> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let mut sorted: Vec<u64> = self.samples.iter().copied().collect();
+        sorted.sort_unstable();
+        Some(sorted[sorted.len() / 2])
     }
 }
 
@@ -950,6 +994,22 @@ mod tests {
         assert!(cache.get("b").is_some());
         thread::sleep(Duration::from_millis(30));
         assert!(cache.get("b").is_none());
+    }
+
+    #[test]
+    fn speed_reports_a_median() {
+        let mut speed = Speed::default();
+        assert_eq!(speed.median(), None);
+        speed.record(9000);
+        assert_eq!(speed.median(), Some(9000));
+        speed.record(1000);
+        speed.record(5000);
+        assert_eq!(speed.median(), Some(5000));
+        for ms in [2000, 3000, 4000, 6000, 7000, 8000] {
+            speed.record(ms);
+        }
+        assert_eq!(speed.samples.len(), SPEED_SAMPLES);
+        assert_eq!(speed.median(), Some(5000));
     }
 
     #[test]
