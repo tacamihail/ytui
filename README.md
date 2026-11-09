@@ -180,7 +180,7 @@ If the resolver is not on the local network (Tailscale, WireGuard, a VPN,
 another subnet, or a client inside WSL), pass its address instead:
 
 ```bash
-ytui discover --url http://100.126.49.124:8787 --save
+ytui discover --url http://100.64.0.5:8787 --save
 ```
 
 Or open the player and press `?`, then `s`, to scan the local network again. A
@@ -484,7 +484,7 @@ another subnet, and a client inside WSL (which only sees the WSL virtual
 network). Point ytui at the address once instead:
 
 ```bash
-ytui discover --url http://100.126.49.124:8787 --save
+ytui discover --url http://100.64.0.5:8787 --save
 ```
 
 ### Tokenless LAN or tailnet
