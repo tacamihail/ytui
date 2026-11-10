@@ -576,6 +576,9 @@ fn health_json(ctx: &Ctx, request: &Request) -> String {
         "ytdlp": ytdlp,
         "deno": deno,
         "auth": auth,
+        // Whether the resolver passes a cookie file of its own to yt-dlp. The
+        // player's cookies are never sent over the network.
+        "cookies": ctx.cookies.is_some(),
         // Recent cold-resolve time, so clients with more than one resolver on
         // the network can pick the fastest rather than the nearest.
         "resolve_ms": resolve_ms,

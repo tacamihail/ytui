@@ -93,7 +93,12 @@ fn run(seq: u64, kind: Kind, target: &str, cfg: &Config, tx: &Sender<Msg>) -> Re
         TEMPLATE,
         &format!("--playlist-items=1-{}", cfg.fetch_limit.max(1)),
     ]);
-    if let Some((flag, value)) = cfg.cookie_args() {
+    let cookies = cfg.cookie_args();
+    // yt-dlp saves the jar when it exits, so only one run may touch it at a
+    // time or a stale rotating token can overwrite a fresh one.
+    let _cookie_lock =
+        ytui_resolve::lock_cookies(cookies.as_ref().map(|(flag, value)| (*flag, value.as_str())));
+    if let Some((flag, value)) = &cookies {
         c.arg(flag).arg(value);
     }
     c.arg(target);
@@ -297,6 +302,8 @@ pub fn account(cfg: &Config) -> Result<(String, String), String> {
     let Some((flag, value)) = cfg.cookie_args() else {
         return Err("no cookies configured".into());
     };
+    // Same jar as the player's listings and resolves; serialize with them.
+    let _cookie_lock = ytui_resolve::lock_cookies(Some((flag, value.as_str())));
     let mut last_err = String::new();
     for url in [WATCH_LATER_URL, LIKED_MUSIC_URL] {
         let out = command()

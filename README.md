@@ -137,7 +137,7 @@ The resolver moves yt-dlp/deno's memory spike off the player machine. It is a
 separate package: no TUI, no audio crates, no ALSA. On the server:
 
 ```bash
-# Option A: build only the resolver (needs Rust 1.83+)
+# Option A: build only the resolver (needs Rust 1.89+)
 cargo install --git https://github.com/tacamihail/ytui ytui-resolver
 
 # Option B: no checkout; also installs yt-dlp and deno
@@ -156,6 +156,15 @@ Launch it on a trusted LAN or tailnet without a token:
 ```bash
 ytui-resolver --bind 0.0.0.0:8787 --allow-private
 ```
+
+Leave `--cookies` off unless you need age-restricted or members-only tracks.
+The resolver never receives the player's cookies, but if you give it a copy of
+the same session, two machines keep their own `cookies.txt` and refresh
+`__Secure-1PSIDTS` independently; when they drift, Google can treat the second
+one as a stolen session and sign the account out. Age-restricted tracks still
+play when the server is anonymous: the client falls back to its own yt-dlp when
+the server answers `502`. `ytui doctor` prints a line when the resolver reports
+that it uses cookies.
 
 For a public address, generate a token and run the same bind **without**
 `--allow-private`:
@@ -307,6 +316,15 @@ Nothing rotates that session after step 5, so the file keeps working for weeks
 or months instead of expiring. This is the same advice as the "Exporting
 YouTube cookies" section of the yt-dlp wiki.
 
+ytui also serializes its own yt-dlp runs around the `--cookies` file. yt-dlp
+saves the jar when it exits, which is how the rotating `__Secure-1PSIDTS`
+stays current. A listing, a background prefetch and a manual resolve used to be
+able to write the same jar at once; the last save could put a stale token back,
+and the next request would sign the account out. The runs now share a
+`cookies.txt.lock` file next to it, across the player, `ytui doctor` and
+`ytui auth`. A second machine with its own copy of the same session cannot
+share that lock — see the resolver note below.
+
 The export has to include the HttpOnly cookies: without them the file is
 signed out, and `ytui auth` refuses it rather than overwriting a working
 `~/.config/ytui/cookies.txt`. `ytui auth` checks the cookies against YouTube,
@@ -412,7 +430,7 @@ The resolver is a separate package. Building it does not compile the TUI,
 `ratatui`, `cpal` or `symphonia`, and the server needs no ALSA. The resulting
 binary is about 600 KB.
 
-If the server has Rust 1.83+, this downloads the source to cargo's cache and
+If the server has Rust 1.89+, this downloads the source to cargo's cache and
 builds only `ytui-resolver` and `ytui-resolve`:
 
 ```bash

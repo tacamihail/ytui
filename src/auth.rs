@@ -85,11 +85,22 @@ fn import(path: &str) -> i32 {
     if let Some(dir) = dst.parent() {
         let _ = fs::create_dir_all(dir);
     }
+    // A running player may have a yt-dlp that saves the old jar when it exits.
+    // Wait for it and refuse rather than write a file that is about to be
+    // replaced with stale cookies.
+    let jar = dst.display().to_string();
+    let Some(cookie_lock) = ytui_resolve::lock_cookies(Some(("--cookies", jar.as_str()))) else {
+        eprintln!("✗ another yt-dlp is still using {}", dst.display());
+        eprintln!("  close the player and run `ytui auth` again");
+        return 1;
+    };
     if let Err(e) = fs::write(&dst, &txt) {
         eprintln!("✗ cannot write {}: {e}", dst.display());
         return 1;
     }
     restrict_permissions(&dst);
+    // Release before `verify`, which takes the same lock for its own run.
+    drop(cookie_lock);
 
     let mut cfg = config::load();
     cfg.cookies_file = dst.display().to_string();

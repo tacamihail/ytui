@@ -5,6 +5,7 @@
 //! formats best-first. Probing a candidate URL stays with the player because
 //! googlevideo URLs can be bound to the requesting IP.
 
+use std::fs::OpenOptions;
 use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::{Command, Output, Stdio};
@@ -115,6 +116,60 @@ pub fn command() -> Command {
     c
 }
 
+/// How long a cookie-using run waits for another one before going ahead
+/// without the lock. A stuck yt-dlp must not block playback forever; before
+/// the lock existed every run was unserialized anyway.
+pub const COOKIE_LOCK_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// An exclusive lock on the file passed to `yt-dlp --cookies`, held for one
+/// run.
+///
+/// yt-dlp rewrites that file when it exits, which is also how the rotating
+/// `__Secure-1PSIDTS` / `__Secure-3PSIDTS` cookies stay current. Two runs that
+/// load the same jar at the same time race on save: the later one can put a
+/// stale token back, and YouTube then treats the session as stolen and signs
+/// the account out. Serialize the runs instead, across threads and across ytui
+/// processes (the player, a second window, `ytui doctor`, `ytui auth`).
+pub struct CookieLock {
+    _file: std::fs::File,
+}
+
+impl CookieLock {
+    /// Blocks until the lock is free, up to `wait`.
+    pub fn acquire(path: &str, wait: Duration) -> Option<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(format!("{path}.lock"))
+            .ok()?;
+        let deadline = Instant::now() + wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Some(Self { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        return None;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+}
+
+/// Takes the cookie lock when `cookies` is a `--cookies <file>` pair.
+///
+/// `--cookies-from-browser` needs no lock: yt-dlp reads the browser database
+/// and never writes it back.
+pub fn lock_cookies(cookies: Option<(&str, &str)>) -> Option<CookieLock> {
+    match cookies {
+        Some(("--cookies", path)) => CookieLock::acquire(path, COOKIE_LOCK_TIMEOUT),
+        _ => None,
+    }
+}
+
 fn on_path(name: &str) -> bool {
     // On Windows the file on PATH is `name.exe`; a literal `name` never exists.
     let exe = format!("{name}{}", std::env::consts::EXE_SUFFIX);
@@ -193,6 +248,9 @@ fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Outpu
 /// `itag=139` (HE-AAC, 48 kbps) almost always works. Callers probe the list
 /// in order instead of trusting the first URL `-g` prints.
 pub fn resolve(url: &str, cookies: Option<(&str, &str)>) -> Result<Resolved, String> {
+    // One writer at a time keeps the rotating session cookies in the jar
+    // current; see [`CookieLock`].
+    let _lock = lock_cookies(cookies);
     let mut c = command();
     c.args(["--no-warnings", "-j", url]);
     if let Some((flag, value)) = cookies {
@@ -332,6 +390,30 @@ fn first_lines(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point: two yt-dlp runs must not rewrite the same jar at the
+    /// same time, or one can save a stale `__Secure-1PSIDTS` over the other.
+    #[test]
+    fn cookie_runs_are_serialized() {
+        let dir = std::env::temp_dir().join(format!("ytui-cookielock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let jar = dir.join("cookies.txt");
+        std::fs::write(&jar, "x").unwrap();
+        let path = jar.to_str().unwrap();
+
+        let held = CookieLock::acquire(path, Duration::from_millis(100)).expect("first lock");
+        assert!(CookieLock::acquire(path, Duration::from_millis(100)).is_none());
+        drop(held);
+        assert!(CookieLock::acquire(path, Duration::from_millis(100)).is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn browser_cookies_need_no_lock() {
+        assert!(lock_cookies(Some(("--cookies-from-browser", "chrome"))).is_none());
+        assert!(lock_cookies(None).is_none());
+    }
 
     fn format(id: &str, ext: &str, codec: &str, abr: f64) -> serde_json::Value {
         serde_json::json!({

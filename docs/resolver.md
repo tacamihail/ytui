@@ -11,7 +11,7 @@ as before and resolves locally.
 ## Requirements
 
 - `yt-dlp` and `deno` on the server, the same as for a local install
-- Rust 1.83+ (the installer upgrades old system Rust via rustup)
+- Rust 1.89+ (the installer upgrades old system Rust via rustup)
 - a LAN, Tailscale or WireGuard path between the client and the server
 
 ## Build and install
@@ -112,7 +112,18 @@ Options:
 
 The cookie file is optional. Without it the server resolves what YouTube
 serves to an anonymous client. With it, the server can use its own account
-instead of forwarding the client's cookies per request.
+instead of forwarding the client's cookies per request. The player's cookies
+are never sent to the server.
+
+Only give the resolver `--cookies` if you actually need age-restricted or
+members-only tracks. If the same account is used by the player and the
+resolver, copy the file once and never re-export only one side: Google rotates
+`__Secure-1PSIDTS` on every use, and two machines that each keep their own
+copy will drift apart. The second one to refresh can be treated as a stolen
+session and sign the account out. The player serializes its own yt-dlp runs
+around the file, but that lock cannot cross machines. For age-restricted
+tracks it is simpler to leave the server anonymous: the client falls back to
+its own yt-dlp when the server answers `502`.
 
 ## Tokenless private network
 
@@ -250,9 +261,9 @@ hand.
 
 ```text
 GET /v1/health
-  -> 200 { "ok": true, "version": "0.4.5",
+  -> 200 { "ok": true, "version": "0.4.8",
            "ytdlp": "2026.10.26", "deno": "deno 2.9.8",
-           "auth": false, "resolve_ms": 812 }
+           "auth": false, "cookies": false, "resolve_ms": 812 }
 
 GET /v1/resolve?url=<watch-url>[&refresh=1]
   Authorization: Bearer <token>
@@ -277,6 +288,9 @@ GET /v1/resolve?url=<watch-url>[&refresh=1]
 - `resolve_ms` is the median of the server's last eight cold resolves, or
   `null` before the first one. Clients with more than one resolver on the
   network use it to pick the fastest; the health round-trip is added on top.
+- `cookies` is `true` when the server itself was started with `--cookies`.
+  `ytui doctor` prints a line for it, because the client's cookies never leave
+  the machine.
 - The client probes each candidate with a 1 KiB HTTP Range request. That probe
   stays local because googlevideo URLs can be bound to the requesting IP.
 - If every candidate is refused, the client calls `/v1/resolve?...&refresh=1`
@@ -311,7 +325,7 @@ intended deployment.
 `401 bad token`: the client token and server token differ. Re-run
 `ytui-resolver --gen-token` and point `resolver_token_file` at the file.
 
-`error: package ... requires rustc 1.83 or newer`: Debian and Raspberry Pi
+`error: package ... requires rustc 1.89 or newer`: Debian and Raspberry Pi
 OS ship an old `rustc` (often 1.63). Install rustup and retry:
 
 ```bash

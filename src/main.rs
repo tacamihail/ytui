@@ -123,6 +123,11 @@ fn doctor() -> i32 {
                         &h.version
                     };
                     println!("✔ resolver {} (v{version}, {ms} ms)", s.base);
+                    if h.cookies {
+                        println!(
+                            "· resolver uses its own cookies.txt (two machines refreshing one session can sign out)"
+                        );
+                    }
                 }
                 match (&h.ytdlp, &h.deno) {
                     (Some(y), Some(d)) => println!("· resolver yt-dlp {y} · {d}"),

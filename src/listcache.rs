@@ -54,12 +54,17 @@ pub fn key(kind: Kind) -> Option<&'static str> {
     }
 }
 
-/// Identifies the signed-in account without opening the cookie jar: the file's
-/// size and mtime change whenever cookies are re-exported or removed. Browser
-/// cookies have no file to stat, so the browser name stands in for them.
+/// Identifies the signed-in account without opening the cookie jar.
+///
+/// yt-dlp rewrites the `--cookies` file after every run (it refreshes the
+/// rotating `__Secure-1PSIDTS`), so the file's size and mtime change all the
+/// time. Only the first-party session cookies say *whose* lists these are, and
+/// they change exactly when the account does or when a fresh export replaces
+/// the old session. Browser cookies have no file to read, so the browser name
+/// stands in for them.
 pub fn stamp(cfg: &Config) -> String {
     if let Some(path) = cfg.cookie_path() {
-        return file_stamp(&path);
+        return session_stamp(&path);
     }
     if !cfg.cookies_browser.is_empty() {
         return format!("browser:{}", cfg.cookies_browser);
@@ -67,19 +72,54 @@ pub fn stamp(cfg: &Config) -> String {
     "none".into()
 }
 
-fn file_stamp(path: &Path) -> String {
-    match fs::metadata(path) {
-        Ok(m) => {
-            let mtime = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            format!("file:{}:{}", m.len(), mtime)
+/// Cookies that identify the account rather than a visitor or a rotating
+/// token. Their values change on re-import or when a different account is
+/// signed in, which is exactly when the cached lists must be discarded.
+const SESSION_COOKIES: &[&str] = &[
+    "SID",
+    "HSID",
+    "SSID",
+    "APISID",
+    "SAPISID",
+    "__Secure-1PSID",
+    "__Secure-1PAPISID",
+    "__Secure-3PSID",
+    "__Secure-3PAPISID",
+];
+
+fn session_stamp(path: &Path) -> String {
+    let Ok(txt) = fs::read_to_string(path) else {
+        return "file:missing".into();
+    };
+    // FNV-1a over just the names and values, so the result is stable across
+    // runs and builds (unlike DefaultHasher).
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for line in txt.lines() {
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+        if line.starts_with('#') {
+            continue;
         }
-        Err(_) => "file:missing".into(),
+        let mut f = line.split('\t');
+        let (Some(_domain), Some(_flag), Some(_path), Some(_secure), Some(_exp), Some(name), Some(value)) = (
+            f.next(),
+            f.next(),
+            f.next(),
+            f.next(),
+            f.next(),
+            f.next(),
+            f.next(),
+        ) else {
+            continue;
+        };
+        if !SESSION_COOKIES.contains(&name) {
+            continue;
+        }
+        for b in name.bytes().chain(std::iter::once(b'=')).chain(value.bytes()) {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
     }
+    format!("auth:{hash:016x}")
 }
 
 pub fn load(key: &str, stamp: &str) -> Option<Cached> {
@@ -165,6 +205,55 @@ mod tests {
         save_to(&dir, "liked", "file:10:20", &[entry("a")]);
         assert!(load_from(&dir, "liked", "file:11:21").is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn cookie_file(dir: &Path, lines: &[(&str, &str)]) -> Config {
+        fs::create_dir_all(dir).unwrap();
+        let p = dir.join("cookies.txt");
+        let mut txt = String::from("# Netscape HTTP Cookie File\n");
+        for &(name, value) in lines {
+            let prefix = if name == "SID" { "#HttpOnly_" } else { "" };
+            txt.push_str(&format!(
+                "{prefix}.youtube.com\tTRUE\t/\tTRUE\t1900000000\t{name}\t{value}\n"
+            ));
+        }
+        fs::write(&p, txt).unwrap();
+        Config {
+            cookies_file: p.display().to_string(),
+            ..Config::default()
+        }
+    }
+
+    /// yt-dlp refreshes the rotating tokens after every run. That must not
+    /// throw away the cached lists; a different session must.
+    #[test]
+    fn the_stamp_follows_the_session_not_the_rotating_cookies() {
+        let dir = tmp_dir();
+        let a = stamp(&cookie_file(
+            &dir,
+            &[("SID", "one"), ("__Secure-1PSIDTS", "old")],
+        ));
+        let b = stamp(&cookie_file(
+            &dir,
+            &[("SID", "one"), ("__Secure-1PSIDTS", "new")],
+        ));
+        assert_eq!(a, b);
+        let c = stamp(&cookie_file(
+            &dir,
+            &[("SID", "two"), ("__Secure-1PSIDTS", "new")],
+        ));
+        assert_ne!(a, c);
+        assert!(a.starts_with("auth:"), "{a}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_cookie_file_has_no_stamp() {
+        let cfg = Config {
+            cookies_file: tmp_dir().join("gone.txt").display().to_string(),
+            ..Config::default()
+        };
+        assert_eq!(stamp(&cfg), "none");
     }
 
     /// Caches written by older builds can contain rows whose title never got

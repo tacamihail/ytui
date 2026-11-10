@@ -71,6 +71,10 @@ pub struct Health {
     /// Whether this peer would need a bearer token for `/v1/resolve`.
     #[serde(default)]
     pub auth: bool,
+    /// Whether the resolver passes a cookie file of its own to yt-dlp. The
+    /// player's cookies are never sent to it.
+    #[serde(default)]
+    pub cookies: bool,
     /// Median cold-resolve time the server has seen, when it has resolved
     /// anything since it started.
     #[serde(default)]
