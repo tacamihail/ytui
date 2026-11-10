@@ -106,6 +106,12 @@ pub fn command() -> Command {
         Command::new("yt-dlp")
     };
     c.env("PATH", tool_path());
+    // yt-dlp re-encodes its console output with the ANSI code page, so on a
+    // Windows machine a title like "Arun’s Roof" reaches a pipe as the single
+    // byte 0x92 instead of UTF-8. Anything reading a line at a time then sees
+    // an invalid stream. Ask for UTF-8 explicitly; the flag is old enough to
+    // exist in every yt-dlp that supports the rest of the arguments we pass.
+    c.args(["--encoding", "utf-8"]);
     c
 }
 

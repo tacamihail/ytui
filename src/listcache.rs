@@ -20,8 +20,17 @@ use crate::ytdl::Kind;
 /// still painted, but a refresh starts behind them.
 const TTL_SECS: u64 = 15 * 60;
 
+/// Bumped when a cache written by an older build is known to be incomplete, so
+/// it is painted once and then refreshed instead of trusted for another TTL.
+/// Version 2: 0.4.5 and older could stop a listing at the first non-UTF-8
+/// byte (a cp1252 curly quote on Windows) and then cache the short list.
+const CACHE_VERSION: u32 = 2;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Cached {
+    /// Missing in caches written before the field existed; those count as 0.
+    #[serde(default)]
+    version: u32,
     saved_at: u64,
     /// Cookie-file fingerprint from [`stamp`]; rows from another account are
     /// never shown.
@@ -31,7 +40,7 @@ pub struct Cached {
 
 impl Cached {
     pub fn fresh(&self) -> bool {
-        now().saturating_sub(self.saved_at) < TTL_SECS
+        self.version == CACHE_VERSION && now().saturating_sub(self.saved_at) < TTL_SECS
     }
 }
 
@@ -103,6 +112,7 @@ fn load_from(dir: &Path, key: &str, stamp: &str) -> Option<Cached> {
 
 fn save_to(dir: &Path, key: &str, stamp: &str, entries: &[Entry]) {
     let c = Cached {
+        version: CACHE_VERSION,
         saved_at: now(),
         stamp: stamp.to_string(),
         entries: entries.to_vec(),
@@ -174,11 +184,25 @@ mod tests {
     #[test]
     fn old_lists_are_stale_but_still_usable() {
         let c = Cached {
+            version: CACHE_VERSION,
             saved_at: now() - TTL_SECS - 1,
             stamp: "none".into(),
             entries: Vec::new(),
         };
         assert!(!c.fresh());
+    }
+
+    /// A cache from a build that could truncate a listing is painted once, but
+    /// must not suppress the refresh that replaces its missing rows.
+    #[test]
+    fn caches_from_older_builds_refresh_at_once() {
+        let dir = tmp_dir();
+        let old = format!(r#"{{"saved_at":{},"stamp":"none","entries":[]}}"#, now());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("liked.json"), old).unwrap();
+        let c = load_from(&dir, "liked", "none").expect("old cache should still parse");
+        assert!(!c.fresh());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

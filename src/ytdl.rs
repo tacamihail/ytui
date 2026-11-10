@@ -109,7 +109,7 @@ fn run(seq: u64, kind: Kind, target: &str, cfg: &Config, tx: &Sender<Msg>) -> Re
     let err = child.stderr.take().unwrap();
     let errth = thread::spawn(move || {
         let mut buf = String::new();
-        for line in BufReader::new(err).lines().map_while(Result::ok) {
+        for line in lossy_lines(BufReader::new(err)) {
             if buf.lines().count() < 6 {
                 buf.push_str(&line);
                 buf.push('\n');
@@ -119,7 +119,7 @@ fn run(seq: u64, kind: Kind, target: &str, cfg: &Config, tx: &Sender<Msg>) -> Re
     });
 
     let mut n = 0usize;
-    for line in BufReader::new(out).lines().map_while(Result::ok) {
+    for line in lossy_lines(BufReader::new(out)) {
         if let Some(entry) = parse_line(kind, &line) {
             n += 1;
             let _ = tx.send(Msg::Add(seq, kind, entry));
@@ -133,6 +133,33 @@ fn run(seq: u64, kind: Kind, target: &str, cfg: &Config, tx: &Sender<Msg>) -> Re
     } else {
         Ok(n)
     }
+}
+
+/// Reads a pipe line by line, decoding each line separately and replacing a
+/// byte that is not UTF-8 instead of refusing the whole stream.
+///
+/// `BufRead::lines()` returns `Err` on the first invalid byte. Callers that
+/// stopped at that error (`map_while(Result::ok)`) used to drop the read end of
+/// the pipe in the middle of a listing; yt-dlp then failed with
+/// `[Errno 22] Invalid argument` and the list ended at a song title with a
+/// curly quote. `yt-dlp --encoding utf-8` is set in [`command`] so this is a
+/// safety net for warnings and for other tools, not the happy path.
+fn lossy_lines<R: BufRead>(mut reader: R) -> impl Iterator<Item = String> {
+    std::iter::from_fn(move || {
+        let mut buf = Vec::new();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => {
+                if buf.last() == Some(&b'\n') {
+                    buf.pop();
+                }
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+                Some(String::from_utf8_lossy(&buf).into_owned())
+            }
+        }
+    })
 }
 
 fn parse_line(kind: Kind, line: &str) -> Option<Entry> {
@@ -325,6 +352,24 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    /// The 31st liked song carried a cp1252 curly quote, and stopping at that
+    /// byte truncated the rest of the list. Every line must survive.
+    #[test]
+    fn lossy_lines_keep_going_past_an_invalid_byte() {
+        let raw: &[u8] = b"first\nsecond\nArun\x92s Roof\nfourth\n";
+        let lines: Vec<String> = lossy_lines(raw).collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "first");
+        assert_eq!(lines[2], "Arun\u{fffd}s Roof");
+        assert_eq!(lines[3], "fourth");
+    }
+
+    #[test]
+    fn lossy_lines_strip_windows_newlines() {
+        let lines: Vec<String> = lossy_lines(&b"a\r\nb\r\n"[..]).collect();
+        assert_eq!(lines, ["a", "b"]);
+    }
 
     /// A resolver and a CDN in one: `/v1/resolve` returns a candidate, and the
     /// candidate URL answers the 1 KiB probe with 206.
