@@ -43,6 +43,11 @@ that rate, ytui falls back to 48 kHz and resamples. Windows WASAPI shared mode
 only accepts the device mix format, which is usually 48 kHz, so there the
 44.1 kHz tracks are resampled by default.
 
+On Windows the player also follows the system default output device, checked
+every two seconds: connecting Bluetooth headphones mid-song reopens the stream
+on them and carries the unplayed seconds over, instead of leaving the music on
+the speakers the stream was opened on.
+
 Working out a stream URL takes `yt-dlp` about four seconds, which used to be
 dead air between songs. The next track is resolved in the last ten seconds of
 the current one and only its URL is kept (a few hundred bytes, no audio), so
@@ -650,8 +655,9 @@ Windows:
   `%USERPROFILE%\.local\bin\ytui.exe`.
 - No sound: `ytui doctor` prints the WASAPI device and sample rate it opened.
   Check Settings → System → Sound that the intended output is the default.
-  WASAPI shared mode plays at the device mix rate, usually 48 kHz, so 44.1 kHz
-  tracks are resampled.
+  ytui moves to a new default while it is running; a build older than 0.4.7
+  needs a restart after switching. WASAPI shared mode plays at the device mix
+  rate, usually 48 kHz, so 44.1 kHz tracks are resampled.
 - Garbled box drawing or no mouse: use Windows Terminal instead of legacy
   `conhost`.
 - `ytui update` cannot replace `ytui.exe`: close the player first. The updater

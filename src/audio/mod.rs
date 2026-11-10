@@ -152,6 +152,10 @@ struct Engine {
     /// Where the output should resume once the ring has enough audio, in
     /// seconds. `Some` while the sink is held after a start or a seek.
     holding: Option<f64>,
+    /// Last time the default output device was polled, and the throttle for
+    /// reopening a stream whose device went away.
+    device_check: Instant,
+    last_rebuild: Instant,
     /// Resolves the next track in the last seconds of the current one.
     /// `yt-dlp` takes a few seconds per track, which is most of the pause
     /// between songs.
@@ -189,6 +193,10 @@ const PREFETCH_WINDOW_SECS: f64 = 10.0;
 const URL_EXPIRY_MARGIN_SECS: u64 = 5 * 60;
 /// Gap before retrying a failed background resolve.
 const PREFETCH_RETRY_GAP: Duration = Duration::from_millis(1500);
+/// How often the system default output device is checked while a stream is
+/// open. Windows keeps an open WASAPI stream on the endpoint it was created
+/// for, so this poll is what moves playback to headphones connected mid-song.
+const DEVICE_POLL: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 struct Job {
@@ -385,6 +393,20 @@ fn link_expired(url: &str) -> bool {
     false
 }
 
+/// What a replacement sink starts with after the output device changed.
+///
+/// At the same rate the unplayed ring is handed over untouched, so a switch is
+/// seamless. At a different rate the ring would need resampling; start the new
+/// sink at the scaled position and let the decoder feed it from there.
+fn handover(old_rate: u32, new_rate: u32, frames: u64, buffered: Vec<f32>) -> (Vec<f32>, u64) {
+    if old_rate == new_rate {
+        (buffered, frames)
+    } else {
+        let scaled = (frames as f64 * f64::from(new_rate) / f64::from(old_rate)) as u64;
+        (Vec::new(), scaled)
+    }
+}
+
 impl Engine {
     fn new(cfg: Config, state: Arc<Mutex<State>>) -> Self {
         let prefetch = Prefetch::spawn(cfg.clone());
@@ -396,6 +418,8 @@ impl Engine {
             eof: false,
             fails: 0,
             holding: None,
+            device_check: Instant::now(),
+            last_rebuild: Instant::now(),
             prefetch,
             prefetched: None,
             tmp: Vec::with_capacity(16384),
@@ -495,11 +519,16 @@ impl Engine {
     /// stays down does not produce one per track.
     fn surface_note(&self) {
         if let Some(msg) = crate::remote::take_note() {
-            let mut st = self.lock();
-            st.notice = Some(msg);
-            st.notice_err = false;
-            st.notice_seq = st.notice_seq.wrapping_add(1);
+            self.note(msg);
         }
+    }
+
+    /// Shows `msg` once as an informational toast in the player.
+    fn note(&self, msg: String) {
+        let mut st = self.lock();
+        st.notice = Some(msg);
+        st.notice_err = false;
+        st.notice_seq = st.notice_seq.wrapping_add(1);
     }
 
     /// Ask for the next track's URL once the current one is about to end.
@@ -553,6 +582,85 @@ impl Engine {
         }
         self.prefetched = Some(url.clone());
         self.prefetch.request(vec![url]);
+    }
+
+    /// Reopens the output on the current default device, keeping the track
+    /// where it was.
+    ///
+    /// The samples that were decoded but not played yet are handed to the new
+    /// sink, so a device change does not cost the buffered seconds. If the
+    /// track's rate is refused there, the device's own default rate is used and
+    /// the decoder starts resampling to it.
+    fn reopen_sink(&mut self) -> Result<(), String> {
+        self.last_rebuild = Instant::now();
+        let Some(old) = self.sink.as_ref() else {
+            return Err("no output device is open".into());
+        };
+        let rate = old.rate();
+        let (vol, muted) = {
+            let st = self.lock();
+            (st.volume, st.muted)
+        };
+        let new = match Sink::new(rate, self.cfg.buffer_ms) {
+            Ok(s) => s,
+            Err(first) => {
+                let fallback = sink::Sink::default_rate().unwrap_or(OUT_RATE);
+                if fallback == rate {
+                    return Err(first);
+                }
+                Sink::new(fallback, self.cfg.buffer_ms)
+                    .map_err(|e| format!("{first}; then {e}"))?
+            }
+        };
+        let new_rate = new.rate();
+        let paused = old.is_paused();
+        let (buffered, frames) = handover(
+            rate,
+            new_rate,
+            old.played_frames(),
+            old.take_buffered(),
+        );
+        new.push(&buffered);
+        new.set_played_frames(frames);
+        new.set_volume(vol);
+        new.set_muted(muted);
+        new.set_paused(paused);
+        if self.holding.is_some() {
+            new.set_hold(true);
+        }
+        self.sink = Some(new);
+        if let Some(loaded) = &mut self.loaded {
+            loaded.set_target_rate(new_rate);
+        }
+        Ok(())
+    }
+
+    /// Moves playback to the new default output device when the system default
+    /// changes while a stream is open.
+    ///
+    /// WASAPI binds a stream to the endpoint it was created on, so connecting
+    /// AirPods or picking another output in the tray otherwise leaves the music
+    /// on the old speakers. PulseAudio and ALSA's `default` PCM already reroute
+    /// an open stream, so [`sink::default_device_name`] only answers on Windows.
+    fn follow_default_output(&mut self) {
+        if self.device_check.elapsed() < DEVICE_POLL {
+            return;
+        }
+        self.device_check = Instant::now();
+        let Some(name) = sink::default_device_name() else {
+            return;
+        };
+        if self.sink.as_ref().is_some_and(|s| s.device_name() == name) {
+            return;
+        }
+        if self.reopen_sink().is_ok() {
+            let opened = self
+                .sink
+                .as_ref()
+                .map(|s| s.device_name().to_string())
+                .unwrap_or(name);
+            self.note(format!("audio: {opened}"));
+        }
     }
 
     /// Reopens the output stream at `want` when the track's rate differs from
@@ -846,12 +954,24 @@ impl Engine {
     }
 
     fn tick(&mut self) {
-        if let Some(s) = &self.sink {
-            if let Some(e) = s.take_error() {
+        let sink_err = self.sink.as_ref().and_then(|s| s.take_error());
+        if let Some(e) = sink_err {
+            // A stream dies when its endpoint goes away (headphones unplugged,
+            // Bluetooth off). Try the current default first and only report the
+            // failure when no device can be opened.
+            if self.last_rebuild.elapsed() >= DEVICE_POLL && self.reopen_sink().is_ok() {
+                let opened = self
+                    .sink
+                    .as_ref()
+                    .map(|s| s.device_name().to_string())
+                    .unwrap_or_default();
+                self.note(format!("audio: {opened}"));
+            } else {
                 self.fail(e);
                 return;
             }
         }
+        self.follow_default_output();
 
         // Pump the decoder while the ring buffer has room. After a start or a
         // seek only a short pre-roll is needed to let go of the output, so do
@@ -1066,6 +1186,20 @@ fn seed() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_same_rate_device_change_keeps_the_unplayed_ring() {
+        let (ring, frames) = handover(44_100, 44_100, 1234, vec![0.1, 0.2, 0.3]);
+        assert_eq!(ring, [0.1, 0.2, 0.3]);
+        assert_eq!(frames, 1234);
+    }
+
+    #[test]
+    fn a_rate_change_moves_the_position_and_drops_the_old_ring() {
+        let (ring, frames) = handover(44_100, 48_000, 44_100, vec![0.1, 0.2]);
+        assert!(ring.is_empty());
+        assert_eq!(frames, 48_000);
+    }
 
     #[test]
     fn only_hopeless_tracks_are_skipped() {

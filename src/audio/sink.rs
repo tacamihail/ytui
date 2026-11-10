@@ -211,6 +211,24 @@ impl QuietStderr {
     }
 }
 
+/// Name of the output device that is the OS default right now.
+///
+/// Only Windows needs the check: WASAPI keeps rendering an open stream to the
+/// endpoint it was created for, even after the user picks different speakers or
+/// connects Bluetooth headphones. PulseAudio and ALSA's `default` PCM move an
+/// open stream to the new default on their own.
+pub fn default_device_name() -> Option<String> {
+    #[cfg(windows)]
+    {
+        let device = cpal::default_host().default_output_device()?;
+        device.name().ok()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 impl Sink {
     /// Preferred rate of the output device, if it can be queried.
     pub fn default_rate() -> Option<u32> {
@@ -356,6 +374,14 @@ impl Sink {
 
     pub fn clear(&self) {
         self.buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    /// Removes the samples that were decoded but not played yet, so a
+    /// replacement sink can continue where this one stopped instead of
+    /// skipping the buffered seconds.
+    pub fn take_buffered(&self) -> Vec<f32> {
+        let mut q = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        q.drain(..).collect()
     }
 
     pub fn played_frames(&self) -> u64 {
