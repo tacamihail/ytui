@@ -151,6 +151,13 @@ Both options need `yt-dlp` and `deno` on the server. The script installs them;
 Update it later with `ytui-resolver update` (or `update --check` to only ask
 github); it rebuilds in place and restarts the autostart entry.
 
+The server can also keep itself current: every four hours it checks github and,
+when the version on `main` changed, reinstalls with the same `cargo install`
+and re-executes into the new binary. That is on by default; add
+`--no-auto-update` to the service flags to keep a fixed version. It needs
+`cargo`, `git` and a C toolchain on the server, like a manual update, and is
+Linux/macOS only (Windows cannot replace a running `.exe`).
+
 Launch it on a trusted LAN or tailnet without a token:
 
 ```bash

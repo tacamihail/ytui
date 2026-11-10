@@ -113,6 +113,10 @@ fn run() -> Result<(), String> {
         args.max_concurrency
     );
 
+    if args.auto_update {
+        update::spawn_auto();
+    }
+
     loop {
         match server.recv() {
             Ok(request) => {
@@ -150,6 +154,9 @@ struct Args {
     gen_token: bool,
     install_service: bool,
     uninstall_service: bool,
+    /// Check github every four hours and reinstall when a newer version is
+    /// there. On by default; `--no-auto-update` turns it off.
+    auto_update: bool,
 }
 
 impl Args {
@@ -166,6 +173,7 @@ impl Args {
             gen_token: false,
             install_service: false,
             uninstall_service: false,
+            auto_update: true,
         };
         let mut i = 1;
         while i < argv.len() {
@@ -202,6 +210,8 @@ impl Args {
                 "--allow-private" => a.allow_private = true,
                 "--install-service" => a.install_service = true,
                 "--uninstall-service" => a.uninstall_service = true,
+                "--auto-update" => a.auto_update = true,
+                "--no-auto-update" => a.auto_update = false,
                 other => return Err(format!("unknown option {other} (try --help)")),
             }
             i += 1;
@@ -290,6 +300,9 @@ fn service_args(args: &Args, token_path: Option<PathBuf>) -> Vec<String> {
         out.push("--max-concurrency".into());
         out.push(args.max_concurrency.to_string());
     }
+    if !args.auto_update {
+        out.push("--no-auto-update".into());
+    }
     out
 }
 
@@ -316,6 +329,8 @@ options:
   --cache-ttl-secs N      how long resolved URLs are reused (default 14400)
   --cache-cap N           cached videos kept (default 512)
   --max-concurrency N     simultaneous yt-dlp runs (default 2)
+  --auto-update           check github every 4 hours and reinstall (default)
+  --no-auto-update        do not update the server on its own
   -V, --version           print version
   -h, --help              this text
 
@@ -325,6 +340,10 @@ options:
 The default bind is loopback. Bind a tailnet/LAN address for remote clients,
 and either use --allow-private (trust private ranges) or a token. Public
 peers always need the token. TLS is left to Tailscale/WireGuard or a proxy.
+
+With auto-update on, the running server checks github every four hours and
+reinstalls itself in place with `cargo install --git`, then restarts into the
+new binary. Linux and macOS only; `--no-auto-update` turns it off.
 
 --install-service reuses the other flags, so install it the way you run it:
 
@@ -1084,6 +1103,24 @@ mod tests {
         assert_eq!(
             spec,
             vec!["--bind", DEFAULT_BIND, "--cache-cap", "64", "--max-concurrency", "4"]
+        );
+    }
+
+    #[test]
+    fn auto_update_is_on_unless_told_otherwise() {
+        let on = Args::parse(&["ytui-resolver".to_string()]).unwrap();
+        assert!(on.auto_update);
+        assert!(!service_args(&on, None).contains(&"--no-auto-update".to_string()));
+
+        let off = Args::parse(&[
+            "ytui-resolver".to_string(),
+            "--no-auto-update".to_string(),
+        ])
+        .unwrap();
+        assert!(!off.auto_update);
+        assert_eq!(
+            service_args(&off, None),
+            vec!["--bind", DEFAULT_BIND, "--no-auto-update"]
         );
     }
 }

@@ -8,6 +8,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
+use std::time::Duration;
 
 use crate::service;
 
@@ -63,13 +65,25 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("cannot find this binary: {e}\n  {USAGE}"))?;
     let root = install_root(&exe)?;
     println!("· installing ytui-resolver {remote} into {}", root.display());
-    let status = Command::new("cargo")
+    install(&root, &remote)?;
+    if let Err(e) = service::restart_if_installed() {
+        eprintln!("warning: could not restart the autostart entry: {e}");
+    }
+    Ok(())
+}
+
+/// Runs `cargo install` into `root` and reports the new version.
+///
+/// Shared by the `update` command and the automatic updater, so both fetch the
+/// same commit and leave the binary where the autostart entry expects it.
+fn install(root: &Path, remote: &str) -> Result<(), String> {
+    let status = cargo_command()
         .arg("install")
         .arg("--git")
         .arg(REPO)
         .arg("ytui-resolver")
         .arg("--root")
-        .arg(&root)
+        .arg(root)
         .arg("--force")
         .status()
         .map_err(|e| {
@@ -81,10 +95,99 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         return Err("cargo install failed; nothing was changed".into());
     }
     println!("✔ updated to {remote}");
-    if let Err(e) = service::restart_if_installed() {
-        eprintln!("warning: could not restart the autostart entry: {e}");
-    }
     Ok(())
+}
+
+/// Cargo is usually in `~/.cargo/bin`, which a systemd user unit does not have
+/// on `PATH`. Prefer the rustup location when it exists.
+fn cargo_command() -> Command {
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let cargo = PathBuf::from(home)
+            .join(".cargo")
+            .join("bin")
+            .join(format!("cargo{}", std::env::consts::EXE_SUFFIX));
+        if cargo.is_file() {
+            return Command::new(cargo);
+        }
+    }
+    Command::new("cargo")
+}
+
+// ---------------- automatic updates ----------------
+
+/// How often the running server looks for a new release.
+#[cfg(unix)]
+const AUTO_UPDATE_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
+/// Wait for the network and the rest of the boot before the first check.
+#[cfg(unix)]
+const AUTO_UPDATE_FIRST: Duration = Duration::from_secs(2 * 60);
+
+/// Starts the background updater. Called by the server when auto-update is on
+/// (the default).
+pub fn spawn_auto() {
+    #[cfg(unix)]
+    {
+        let exe = std::env::current_exe()
+            .unwrap_or_else(|_| PathBuf::from(format!("ytui-resolver{}", std::env::consts::EXE_SUFFIX)));
+        // A checkout build or a binary outside a `bin` directory cannot be
+        // replaced in place; say so once instead of failing every four hours.
+        if let Err(e) = install_root(&exe) {
+            eprintln!("· auto-update is off: {e}");
+            return;
+        }
+        eprintln!("· auto-update: checking github every 4 hours (--no-auto-update turns this off)");
+        std::thread::spawn(move || auto_loop(exe));
+    }
+    #[cfg(not(unix))]
+    {
+        eprintln!("· auto-update needs Linux or macOS; run `ytui-resolver update` by hand");
+    }
+}
+
+#[cfg(unix)]
+fn auto_loop(exe: PathBuf) {
+    std::thread::sleep(AUTO_UPDATE_FIRST);
+    loop {
+        match auto_step() {
+            Ok(true) => restart_in_place(&exe),
+            Ok(false) => {}
+            Err(e) => eprintln!("· auto-update: {e}"),
+        }
+        std::thread::sleep(AUTO_UPDATE_INTERVAL);
+    }
+}
+
+/// Checks github and installs a newer release. `Ok(true)` means a new binary is
+/// on disk and the process should re-exec into it.
+#[cfg(unix)]
+fn auto_step() -> Result<bool, String> {
+    let current = env!("CARGO_PKG_VERSION");
+    let remote = remote_version()?;
+    if !is_newer(&remote, current) {
+        return Ok(false);
+    }
+    println!("· auto-update: ytui-resolver {remote} is available (running {current})");
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot find this binary: {e}"))?;
+    let root = install_root(&exe)?;
+    install(&root, &remote)?;
+    Ok(true)
+}
+
+/// Replaces the process image with the binary that was just installed.
+///
+/// `exe` is captured before the install on purpose: once cargo has unlinked
+/// the old file, `/proc/self/exe` can resolve to `… (deleted)`, which cannot
+/// be executed. Re-exec keeps the systemd/launchd main PID, so no service
+/// manager restart is needed and the update cannot kill its own build.
+#[cfg(unix)]
+fn restart_in_place(exe: &Path) -> ! {
+    use std::os::unix::process::CommandExt;
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    eprintln!("· auto-update: restarting into the new binary");
+    let err = Command::new(exe).args(&args).exec();
+    eprintln!("· auto-update: cannot restart ({err}); exiting so the service manager starts it");
+    std::process::exit(1);
 }
 
 /// The cargo `--root` that owns the running binary. `~/.cargo/bin` and

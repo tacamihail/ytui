@@ -109,6 +109,8 @@ Options:
 | `--cache-ttl-secs` | `14400` | how long a resolved URL is reused |
 | `--cache-cap` | `512` | cached videos |
 | `--max-concurrency` | `2` | simultaneous yt-dlp runs |
+| `--auto-update` | on | check github every 4 hours and reinstall |
+| `--no-auto-update` | - | keep the running version |
 
 The cookie file is optional. Without it the server resolves what YouTube
 serves to an anonymous client. With it, the server can use its own account
@@ -257,11 +259,39 @@ mode `600`, so the unit never contains the secret itself.
 `tools/ytui-resolver.service` is still there if you prefer to manage a unit by
 hand.
 
+## Automatic updates
+
+A running server checks github every four hours and reinstalls itself when
+`crates/resolver/Cargo.toml` on `main` has a newer version. This is on by
+default; `--no-auto-update` turns it off (and `--install-service` records that
+choice in the unit).
+
+The first check is two minutes after startup, so a reboot does not race the
+network or the package manager. A check is one API call plus one raw file; a
+download only happens when the version changed. The install is the same
+`cargo install --git https://github.com/tacamihail/ytui ytui-resolver --root …`
+as `ytui-resolver update`, so the host needs `cargo`, `git`, a C toolchain and
+network access, exactly like a manual update. Rust 1.89 or newer is required.
+
+After a successful install the process re-executes itself into the new binary.
+On systemd and launchd that keeps the service's main PID, so nothing has to
+restart the unit (an update cannot kill its own build). If the re-exec fails,
+the server exits nonzero and `Restart=on-failure` / `KeepAlive` starts the new
+binary. The listener is closed for the moment of the exec, so a client may see
+one failed request and retry.
+
+Auto-update is Linux and macOS only: Windows cannot replace a running `.exe`.
+There `ytui-resolver update` still works when the server is stopped. The log
+shows the checks as `· auto-update:` lines in `journalctl` / the launchd log.
+
+To roll back, run `cargo install --git https://github.com/tacamihail/ytui
+ytui-resolver --root … --version <older>` (or `--no-auto-update` first).
+
 ## Protocol v1
 
 ```text
 GET /v1/health
-  -> 200 { "ok": true, "version": "0.4.8",
+  -> 200 { "ok": true, "version": "0.4.9",
            "ytdlp": "2026.10.26", "deno": "deno 2.9.8",
            "auth": false, "cookies": false, "resolve_ms": 812 }
 
@@ -337,6 +367,15 @@ cargo install --git https://github.com/tacamihail/ytui ytui-resolver
 `install-resolver.sh` performs this upgrade automatically when `rustc` is too
 old. On a 32-bit ARMv6 board (Pi 1/Zero) rustup may not have a toolchain; build
 a prebuilt binary elsewhere or use a newer board.
+
+`· auto-update: cannot run cargo`: the service does not see cargo. The updater
+looks in `~/.cargo/bin` first (where rustup puts it), then `PATH`; install
+rustup for the same user the unit runs as. To stay on the current build
+instead, add `--no-auto-update` and restart the service.
+
+`· auto-update is off: ... is not inside a bin directory`: the server runs from
+a `cargo run` / `target/debug` build, so there is no install root to replace.
+Run the updater by hand or install it with `cargo install --root`.
 
 `scan found nothing`: the resolver is on another subnet, port 8787 is
 firewalled, or the client is inside WSL and sees only the WSL virtual network.
