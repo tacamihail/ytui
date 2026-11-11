@@ -434,8 +434,8 @@ usage:
   ytui doctor             check yt-dlp, audio device and config
   ytui discover [--save]  scan the LAN for an optional resolver
   ytui discover --url U   check a resolver by address, e.g. over a VPN
-  ytui update             pull the latest source and rebuild
-  ytui update --check     only report whether newer commits exist
+  ytui update             install the newer version from github
+  ytui update --check     only report whether a newer version exists
   ytui --version          print version
 
 inside the player: ? for the full key map
