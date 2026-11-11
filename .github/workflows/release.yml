@@ -67,21 +67,39 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          # The azure mirror this image uses occasionally fails to resolve, so
-          # retry and point apt at the main archive before the last attempt.
-          for attempt in 1 2 3; do
-            if sudo apt-get update -o Acquire::Retries=3 \
-               && sudo apt-get install -y --no-install-recommends libasound2-dev; then
-              exit 0
-            fi
-            if [ "$attempt" = 2 ]; then
-              sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
-                /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
-                2>/dev/null || true
-            fi
-            sleep 10
-          done
-          sudo apt-get update && sudo apt-get install -y libasound2-dev
+          # The ubuntu mirrors these images use have intermittently failed to
+          # resolve on the runners. Pick a mirror that resolves, and fall back to
+          # public resolvers when none do, instead of losing the whole build.
+          mirrors=(
+            'https://mirrors.edge.kernel.org/ubuntu/'
+            'https://ftp.osuosl.org/pub/ubuntu/'
+            'http://archive.ubuntu.com/ubuntu/'
+          )
+          pick_mirror() {
+            local m host
+            for m in "${mirrors[@]}"; do
+              host="${m#*://}"
+              host="${host%%/*}"
+              if getent hosts "$host" >/dev/null 2>&1; then
+                printf '%s\n' "$m"
+                return 0
+              fi
+            done
+            return 1
+          }
+          base="$(pick_mirror)" || base=""
+          if [ -z "$base" ]; then
+            echo "no ubuntu mirror resolves; retrying with public resolvers"
+            sudo sh -c 'printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf'
+            base="$(pick_mirror)" || {
+              echo "still cannot resolve an ubuntu mirror" >&2
+              exit 1
+            }
+          fi
+          echo "apt mirror: $base"
+          printf '%s\n' "$base" | sudo tee /etc/apt/apt-mirrors.txt
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends libasound2-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
