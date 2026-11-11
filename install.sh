@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # ytui installer
 #
-# Installs what is missing, builds from source and drops the binary in
-# ~/.local/bin. Nothing is downloaded at runtime except audio itself.
+# Downloads the prebuilt binary from the latest github release, falling back to
+# a source build when no release asset can be used, and drops the binary in
+# ~/.local/bin. Also installs what the player needs at runtime (yt-dlp, Deno and
+# ALSA on Linux). Nothing is downloaded at runtime except audio itself.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,6 +18,12 @@ ARCH="$(uname -m)"
 # this run only, so the check for "already on PATH" has to look at this one or
 # the rc file never gets the line.
 PATH_AT_START="$PATH"
+# --from-source and YTUI_FROM_SOURCE=1 skip the release download. Useful for a
+# fork, an unreleased commit, or a platform with no published asset.
+FROM_SOURCE=0
+if [[ "${1:-}" == "--from-source" || "${YTUI_FROM_SOURCE:-0}" == "1" ]]; then
+  FROM_SOURCE=1
+fi
 
 c_dim=$'\e[2m'; c_ok=$'\e[32m'; c_yel=$'\e[33m'; c_ac=$'\e[36m'; c_rst=$'\e[0m'
 info() { printf '%s\n' "${c_dim}::${c_rst} $*"; }
@@ -28,13 +36,11 @@ die()  { printf '%s\n' "${c_yel} !${c_rst} $*" >&2; exit 1; }
 # --- package manager ---------------------------------------------------------
 if [[ "$OS" == Darwin ]]; then
   # cpal talks to CoreAudio here, so there is no audio package to install. The
-  # only requirement is a linker, which comes with the Xcode command line tools.
+  # only requirement is a C compiler, which comes with the Xcode command line
+  # tools; it is checked in the source build, not for a release download.
   PM=brew
   BUILD_DEPS=()
   RUNTIME_DEPS=()
-  if ! xcode-select -p >/dev/null 2>&1; then
-    die "install the Xcode command line tools first: xcode-select --install"
-  fi
 elif command -v apt-get >/dev/null 2>&1; then
   PM=apt
   BUILD_DEPS=(build-essential pkg-config libasound2-dev)
@@ -204,77 +210,139 @@ elif [[ "$PM" == apt ]]; then
   fi
 fi
 
-# --- build dependencies ------------------------------------------------------
-if [[ "$OS" == Darwin ]]; then
-  command -v cc >/dev/null 2>&1 || die "no C compiler: run xcode-select --install"
-  ok "build deps present (Xcode command line tools)"
-elif [[ "$PM" != unknown ]]; then
-  missing=()
-  if [[ "$PM" == apt ]]; then
-    for p in "${BUILD_DEPS[@]}"; do
-      dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")
-    done
+# --- prebuilt release ---------------------------------------------------------
+# The assets are built by .github/workflows/release.yml. A release install is a
+# download, so Rust, a C toolchain and the ALSA headers are only needed when the
+# fallback source build below runs.
+RELEASE_BASE="https://github.com/tacamihail/ytui/releases/latest/download"
+case "$OS/$ARCH" in
+  Linux/x86_64|Linux/amd64)    release_asset=ytui-x86_64-unknown-linux-gnu ;;
+  Linux/aarch64|Linux/arm64)   release_asset=ytui-aarch64-unknown-linux-gnu ;;
+  Darwin/x86_64)               release_asset=ytui-x86_64-apple-darwin ;;
+  Darwin/arm64|Darwin/aarch64) release_asset=ytui-aarch64-apple-darwin ;;
+  *)                           release_asset= ;;
+esac
+
+BIN_SRC=""
+FROM_RELEASE=0
+release_tmp=""
+if [[ -n "$release_asset" && "$FROM_SOURCE" == 0 ]]; then
+  release_tmp="$(mktemp -d)"
+  if curl -fsSL "$RELEASE_BASE/$release_asset" -o "$release_tmp/ytui"; then
+    if curl -fsSL "$RELEASE_BASE/SHA256SUMS" -o "$release_tmp/SHA256SUMS" 2>/dev/null; then
+      want="$(awk -v a="$release_asset" '$2 == a {print $1; exit}' "$release_tmp/SHA256SUMS")"
+      if [[ -z "$want" ]]; then
+        warn "SHA256SUMS has no entry for $release_asset"
+      else
+        if command -v sha256sum >/dev/null 2>&1; then
+          got="$(sha256sum "$release_tmp/ytui" | awk '{print $1}')"
+        else
+          got="$(shasum -a 256 "$release_tmp/ytui" | awk '{print $1}')"
+        fi
+        if [[ "$want" != "$got" ]]; then
+          warn "the downloaded binary did not match SHA256SUMS, discarding it"
+          rm -rf "$release_tmp"
+          release_tmp=""
+        fi
+      fi
+    else
+      warn "could not verify the download (SHA256SUMS unavailable)"
+    fi
+    if [[ -n "$release_tmp" ]]; then
+      chmod 755 "$release_tmp/ytui" 2>/dev/null || true
+      # A binary built against a newer glibc fails here; building from source is
+      # the honest answer rather than an "Illegal instruction" at playback time.
+      if "$release_tmp/ytui" --version >/dev/null 2>&1; then
+        BIN_SRC="$release_tmp/ytui"
+        FROM_RELEASE=1
+        ok "downloaded ytui $("$release_tmp/ytui" --version | awk '{print $2}')"
+      else
+        warn "the prebuilt binary does not run on this system"
+        rm -rf "$release_tmp"
+        release_tmp=""
+      fi
+    fi
   else
-    # Cheap heuristic: a working compiler + pkg-config + ALSA headers.
-    command -v cc >/dev/null 2>&1 || missing+=("${BUILD_DEPS[@]}")
-    command -v pkg-config >/dev/null 2>&1 || missing+=("${BUILD_DEPS[@]}")
-    [[ -e /usr/include/alsa/asoundlib.h ]] || missing+=("${BUILD_DEPS[@]}")
-  fi
-  if ((${#missing[@]})); then
-    info "installing build deps: ${missing[*]}"
-    pm_install "${missing[@]}" || warn "some build deps failed to install"
-  else
-    ok "build deps present"
+    warn "no prebuilt release for $OS/$ARCH"
+    rm -rf "$release_tmp"
+    release_tmp=""
   fi
 fi
 
-# --- rust --------------------------------------------------------------------
-# Debian/Raspberry Pi OS ships a rustc that is much older than the crates
-# expect. rustup gives a current toolchain and keeps the old system one out of
-# the way.
-MIN_RUST_MAJOR=1
-MIN_RUST_MINOR=83
-
-rust_is_new_enough() {
-  command -v rustc >/dev/null 2>&1 || return 1
-  local v major minor
-  v="$(rustc --version 2>/dev/null | awk '{print $2}')"
-  major="${v%%.*}"
-  minor="${v#*.}"
-  minor="${minor%%.*}"
-  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
-  ((major > MIN_RUST_MAJOR || (major == MIN_RUST_MAJOR && minor >= MIN_RUST_MINOR)))
-}
-
-# Prefer a rustup toolchain if one is already installed but not first in PATH.
-[[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
-[[ -x "$HOME/.cargo/bin/cargo" ]] && export PATH="$HOME/.cargo/bin:$PATH"
-hash -r
-
-if ! rust_is_new_enough; then
-  if command -v rustup >/dev/null 2>&1; then
-    info "updating the Rust toolchain (needs ${MIN_RUST_MAJOR}.${MIN_RUST_MINOR}+)"
-    rustup toolchain install stable --profile minimal || true
-    rustup default stable >/dev/null 2>&1 || true
-  else
-    info "installing Rust via rustup (needs ${MIN_RUST_MAJOR}.${MIN_RUST_MINOR}+)"
-    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
-      | sh -s -- -y --profile minimal
+# --- source build -------------------------------------------------------------
+# Only when no release asset could be used. Rust, a C linker and (on Linux) the
+# ALSA headers are installed here, so a release install never touches them.
+if [[ -z "$BIN_SRC" ]]; then
+  if [[ "$OS" == Darwin ]]; then
+    command -v cc >/dev/null 2>&1 || die "no C compiler for the source build: run xcode-select --install"
+    ok "build deps present (Xcode command line tools)"
+  elif [[ "$PM" != unknown ]]; then
+    missing=()
+    if [[ "$PM" == apt ]]; then
+      for p in "${BUILD_DEPS[@]}"; do
+        dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")
+      done
+    else
+      # Cheap heuristic: a working compiler + pkg-config + ALSA headers.
+      command -v cc >/dev/null 2>&1 || missing+=("${BUILD_DEPS[@]}")
+      command -v pkg-config >/dev/null 2>&1 || missing+=("${BUILD_DEPS[@]}")
+      [[ -e /usr/include/alsa/asoundlib.h ]] || missing+=("${BUILD_DEPS[@]}")
+    fi
+    if ((${#missing[@]})); then
+      info "installing build deps: ${missing[*]}"
+      pm_install "${missing[@]}" || warn "some build deps failed to install"
+    else
+      ok "build deps present"
+    fi
   fi
-  # shellcheck disable=SC1091
+
+  # Debian/Raspberry Pi OS ships a rustc that is much older than the crates
+  # expect. rustup gives a current toolchain and keeps the old system one out of
+  # the way.
+  MIN_RUST_MAJOR=1
+  MIN_RUST_MINOR=83
+
+  rust_is_new_enough() {
+    command -v rustc >/dev/null 2>&1 || return 1
+    local v major minor
+    v="$(rustc --version 2>/dev/null | awk '{print $2}')"
+    major="${v%%.*}"
+    minor="${v#*.}"
+    minor="${minor%%.*}"
+    [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+    ((major > MIN_RUST_MAJOR || (major == MIN_RUST_MAJOR && minor >= MIN_RUST_MINOR)))
+  }
+
+  # Prefer a rustup toolchain if one is already installed but not first in PATH.
   [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
   [[ -x "$HOME/.cargo/bin/cargo" ]] && export PATH="$HOME/.cargo/bin:$PATH"
   hash -r
-fi
 
-if ! rust_is_new_enough; then
-  die "Rust ${MIN_RUST_MAJOR}.${MIN_RUST_MINOR}+ is required; run 'rustup default stable' or see https://rustup.rs"
-fi
-ok "rustc $(rustc --version | cut -d' ' -f2) · cargo $(cargo --version | cut -d' ' -f2)"
+  if ! rust_is_new_enough; then
+    if command -v rustup >/dev/null 2>&1; then
+      info "updating the Rust toolchain (needs ${MIN_RUST_MAJOR}.${MIN_RUST_MINOR}+)"
+      rustup toolchain install stable --profile minimal || true
+      rustup default stable >/dev/null 2>&1 || true
+    else
+      info "installing Rust via rustup (needs ${MIN_RUST_MAJOR}.${MIN_RUST_MINOR}+)"
+      curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal
+    fi
+    # shellcheck disable=SC1091
+    [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+    [[ -x "$HOME/.cargo/bin/cargo" ]] && export PATH="$HOME/.cargo/bin:$PATH"
+    hash -r
+  fi
 
-# --- build -------------------------------------------------------------------
-info "building ytui (the first build downloads crates, 1-3 min)"
-(cd "$DIR" && cargo build --release)
+  if ! rust_is_new_enough; then
+    die "Rust ${MIN_RUST_MAJOR}.${MIN_RUST_MINOR}+ is required; run 'rustup default stable' or see https://rustup.rs"
+  fi
+  ok "rustc $(rustc --version | cut -d' ' -f2) · cargo $(cargo --version | cut -d' ' -f2)"
+
+  info "building ytui (the first build downloads crates, 1-3 min)"
+  (cd "$DIR" && cargo build --release)
+  BIN_SRC="$DIR/target/release/ytui"
+fi
 
 if [[ "$OS" == Darwin ]]; then
   # macOS takes the app name and icon shown in Now Playing, Control Center and
@@ -286,7 +354,7 @@ if [[ "$OS" == Darwin ]]; then
   info "creating the ytui app bundle"
   rm -rf "$APP_BUNDLE"
   mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-  cp "$DIR/target/release/ytui" "$APP_BUNDLE/Contents/MacOS/ytui"
+  cp "$BIN_SRC" "$APP_BUNDLE/Contents/MacOS/ytui"
   chmod 755 "$APP_BUNDLE/Contents/MacOS/ytui"
   cp "$DIR/assets/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
   cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
@@ -320,8 +388,13 @@ else
   # `install -D` is GNU-only, and the release build has to land next to the
   # launcher on Linux too.
   mkdir -p "$(dirname "$BIN_REAL")"
-  cp "$DIR/target/release/ytui" "$BIN_REAL"
+  cp "$BIN_SRC" "$BIN_REAL"
   chmod 755 "$BIN_REAL"
+fi
+
+# The binary is in place; the download directory is no longer needed.
+if [[ -n "$release_tmp" ]]; then
+  rm -rf "$release_tmp"
 fi
 
 # Launcher, not the binary: on WSL the ALSA pulse plugin may only exist as an
@@ -380,8 +453,14 @@ fi
 
 # --- config ------------------------------------------------------------------
 mkdir -p "$CFG_DIR"
-# Remember the checkout so `ytui update` can pull and rebuild it later.
-printf '%s\n' "$DIR" > "$CFG_DIR/source"
+if [[ "$FROM_RELEASE" == 1 ]]; then
+  # A release install updates by downloading the next release, so a checkout
+  # from an earlier source install must not steer `ytui update` back to it.
+  rm -f "$CFG_DIR/source"
+else
+  # Remember the checkout so `ytui update` can pull and rebuild it later.
+  printf '%s\n' "$DIR" > "$CFG_DIR/source"
+fi
 if [[ ! -f "$CFG_DIR/config.json" ]]; then
   cp "$DIR/config.example.json" "$CFG_DIR/config.json"
   ok "seeded config -> $CFG_DIR/config.json"

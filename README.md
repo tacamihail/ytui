@@ -78,9 +78,13 @@ cd ytui
 ./install.sh
 ```
 
-`install.sh` installs a current Rust (via rustup when the system one is too
-old), `yt-dlp`, `deno` and the ALSA headers when needed, then builds and
-installs `~/.local/bin/ytui`. Verify it:
+`install.sh` downloads the release binary for your platform, also installing
+`yt-dlp`, `deno` and the ALSA runtime when they are missing, then puts
+`~/.local/bin/ytui` in place. If the release cannot be used — a fork, an
+unreleased commit, an unsupported platform or a binary that does not run on
+your system — it builds from source instead, installing a current Rust (via
+rustup when the system one is too old) and the build dependencies first. Verify
+it:
 
 ```bash
 ytui doctor
@@ -101,19 +105,20 @@ cd ytui
 From cmd.exe, run `install.cmd` instead; it calls the same script with a
 process-local execution policy. If PowerShell refuses to run `install.ps1`,
 that wrapper (or `powershell -ExecutionPolicy Bypass -File .\install.ps1`) is
-the way around it. The script installs Rust via rustup when
-needed, downloads `yt-dlp.exe` and Deno, builds the release binary and copies
-`ytui.exe` to `%USERPROFILE%\.local\bin`, adding that directory to the user
-`PATH`. Open a new terminal afterwards and run:
+the way around it. The script downloads `ytui.exe` from the latest release,
+installs the standalone `yt-dlp.exe` and Deno, copies the binary to
+`%USERPROFILE%\.local\bin` and adds that directory to the user `PATH`. Open a
+new terminal afterwards and run:
 
 ```powershell
 ytui doctor
 ```
 
-The build needs the MSVC linker: install "Visual Studio Build Tools" with the
-"Desktop development with C++" workload if you do not have Visual Studio.
-Windows Terminal is recommended over legacy `conhost` for the box drawing and
-mouse support.
+A source build (`.\install.ps1 -FromSource`, or when no release asset can be
+used) needs the MSVC linker: install "Visual Studio Build Tools" with the
+"Desktop development with C++" workload if you do not have Visual Studio. A
+release install does not need Rust or a linker at all. Windows Terminal is
+recommended over legacy `conhost` for the box drawing and mouse support.
 
 ### 2. Connect your YouTube account (optional)
 
@@ -217,16 +222,23 @@ public resolver is not found by the scan: set `resolver_url` and
 ## Install details
 
 The installer is safe to rerun. It keeps an existing config and updates the
-binary in place. On Linux the build needs a C linker and the ALSA headers
+binary in place. Both installers try the release asset for the platform first
+and verify it against the published `SHA256SUMS`. A platform with no asset, a
+download that does not verify, or a binary that cannot run falls back to a
+source build.
+
+On Linux the source build needs a C linker and the ALSA headers
 (`libasound2-dev`, `alsa-lib` or `alsa-lib-devel`); the script installs them
 when it can, and prints the package names when it cannot. On macOS it checks
-for the Xcode command line tools and installs the deno build for your
-architecture.
+for the Xcode command line tools. The ALSA runtime is still installed for a
+release build, because the binary links it dynamically.
 
 On Windows, `install.ps1` also downloads the standalone `yt-dlp.exe`, so no
-Python is needed, and Deno is unpacked into `%USERPROFILE%\.deno\bin`. It
-writes the checkout path to `%USERPROFILE%\.config\ytui\source`, so
-`ytui update` rebuilds from the same place.
+Python is needed, and Deno is unpacked into `%USERPROFILE%\.deno\bin`. A source
+build writes the checkout path to `%USERPROFILE%\.config\ytui\source`; a
+release install removes that file, so `ytui update` knows to download a release
+instead of rebuilding. `install.sh --from-source` (or
+`YTUI_FROM_SOURCE=1`) and `install.ps1 -FromSource` skip the download.
 
 When no resolver is configured, the installer also scans the local network for
 up to 10 seconds and saves a tokenless one if it finds it. Set
@@ -235,18 +247,36 @@ up to 10 seconds and saves a tokenless one if it finds it. Set
 To update later:
 
 ```bash
-ytui update          # pull and rebuild when a newer version is published
+ytui update          # install the newer version from github
 ytui update --check  # only report whether one exists
 ```
 
-The version is the `[package] version` in `Cargo.toml`; commits that do not
-change it are not installed. `ytui update` refuses to touch a checkout with
-uncommitted changes or local commits. It updates the checkout the installer ran
-from; set `YTUI_SRC` to point elsewhere. On macOS the updater replaces the
-binary inside the `ytui.app` bundle and re-signs it, so Now Playing keeps its
-name and icon. Inside the player, `?` checks github
-and `u` installs a newer version; a clickable `↑ 0.4.0` chip appears when one
-is waiting.
+A release install downloads the asset for the platform. A source install pulls
+and rebuilds the checkout. In both cases the version is the `[package] version`
+in `Cargo.toml`; commits that do not change it are not installed. `ytui update`
+refuses to touch a checkout with uncommitted changes or local commits. It
+updates the checkout the installer ran from; set `YTUI_SRC` to point elsewhere.
+On macOS the updater replaces the binary inside the `ytui.app` bundle and
+re-signs it, so Now Playing keeps its name and icon. Inside the player, `?`
+checks github and `u` installs a newer version; a clickable `↑ 0.4.0` chip
+appears when one is waiting.
+
+### Releases
+
+Releases are built by `.github/workflows/release.yml`. Bump the `[package]
+version` in `Cargo.toml`, commit, and push a tag that matches it:
+
+```bash
+git tag v0.4.11
+git push origin v0.4.11
+```
+
+The workflow builds and smoke-tests `ytui-x86_64-pc-windows-msvc.exe`,
+`ytui-x86_64-unknown-linux-gnu`, `ytui-aarch64-apple-darwin` and
+`ytui-x86_64-apple-darwin`, publishes them with `SHA256SUMS`, and fails when
+the tag does not match `Cargo.toml`. Running the workflow by hand
+(`workflow_dispatch`) builds the same assets without publishing a release, so
+the installers can be tested before a tag exists.
 
 Manual build:
 
