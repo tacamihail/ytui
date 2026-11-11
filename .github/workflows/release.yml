@@ -40,18 +40,16 @@ jobs:
             asset: ytui-x86_64-unknown-linux-gnu
             rustflags: ''
             smoke: 'yes'
-          - os: macos-14
+          - os: macos-26
             target: aarch64-apple-darwin
             asset: ytui-aarch64-apple-darwin
             rustflags: ''
             smoke: 'yes'
-          # Cross-compiled on an arm64 runner; the x86_64 binary cannot be run
-          # here without Rosetta, and its smoke test would be the only one.
-          - os: macos-14
+          - os: macos-26-intel
             target: x86_64-apple-darwin
             asset: ytui-x86_64-apple-darwin
             rustflags: ''
-            smoke: 'no'
+            smoke: 'yes'
     steps:
       - uses: actions/checkout@v4
 
@@ -67,7 +65,23 @@ jobs:
 
       - name: audio headers
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        shell: bash
+        run: |
+          # The azure mirror this image uses occasionally fails to resolve, so
+          # retry and point apt at the main archive before the last attempt.
+          for attempt in 1 2 3; do
+            if sudo apt-get update -o Acquire::Retries=3 \
+               && sudo apt-get install -y --no-install-recommends libasound2-dev; then
+              exit 0
+            fi
+            if [ "$attempt" = 2 ]; then
+              sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+                /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
+                2>/dev/null || true
+            fi
+            sleep 10
+          done
+          sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
