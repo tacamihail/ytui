@@ -170,6 +170,49 @@ pub fn lock_cookies(cookies: Option<(&str, &str)>) -> Option<CookieLock> {
     }
 }
 
+/// Like [`lock_cookies`], but a jar that stays busy is an error instead of a
+/// reason to run anyway.
+///
+/// Proceeding without the lock is worse than waiting: the run loaded the jar
+/// before the lock holder saved its rotation, so its own save at exit puts that
+/// older token back. Callers that pass `--cookies` must not start without it.
+pub fn lock_cookies_for_run(cookies: Option<(&str, &str)>) -> Result<Option<CookieLock>, String> {
+    match cookies {
+        Some(("--cookies", path)) => CookieLock::acquire(path, COOKIE_LOCK_TIMEOUT)
+            .map(Some)
+            .ok_or_else(|| {
+                format!("another yt-dlp is still writing {path}; try again in a moment")
+            }),
+        _ => Ok(None),
+    }
+}
+
+/// True when a Netscape jar still has a first-party YouTube session cookie.
+///
+/// YouTube does not empty the jar when it signs a session out: it clears `SID`,
+/// `HSID`, `SSID`, the `__Secure-1*` family and their `APISID`/`SAPISID`
+/// partners, while visitor cookies and the third-party `__Secure-3*` copies
+/// stay. A signed-out jar therefore still looks populated, so callers must look
+/// for these names rather than for the file being non-empty.
+pub fn has_session_cookies(txt: &str) -> bool {
+    const FIRST_PARTY: &[&str] = &[
+        "SID",
+        "HSID",
+        "SSID",
+        "APISID",
+        "SAPISID",
+        "__Secure-1PSID",
+        "__Secure-1PAPISID",
+    ];
+    txt.lines().any(|line| {
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+        if line.starts_with('#') {
+            return false;
+        }
+        matches!(line.split('\t').nth(5), Some(name) if FIRST_PARTY.contains(&name))
+    })
+}
+
 fn on_path(name: &str) -> bool {
     // On Windows the file on PATH is `name.exe`; a literal `name` never exists.
     let exe = format!("{name}{}", std::env::consts::EXE_SUFFIX);
@@ -250,7 +293,8 @@ fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Outpu
 pub fn resolve(url: &str, cookies: Option<(&str, &str)>) -> Result<Resolved, String> {
     // One writer at a time keeps the rotating session cookies in the jar
     // current; see [`CookieLock`].
-    let _lock = lock_cookies(cookies);
+    let _lock = lock_cookies_for_run(cookies)?;
+    let had_session = jar_session_state(cookies);
     let mut c = command();
     c.args(["--no-warnings", "-j", url]);
     if let Some((flag, value)) = cookies {
@@ -261,10 +305,32 @@ pub fn resolve(url: &str, cookies: Option<(&str, &str)>) -> Result<Resolved, Str
         io::ErrorKind::TimedOut => "yt-dlp timed out while resolving the stream".to_string(),
         _ => format!("yt-dlp: {e}"),
     })?;
+    if had_session == Some(true) && jar_session_state(cookies) == Some(false) {
+        return Err(SIGNED_OUT.into());
+    }
     if !out.status.success() {
         return Err(friendly(&String::from_utf8_lossy(&out.stderr)));
     }
     parse_info(&out.stdout)
+}
+
+/// What YouTube does when it rejects a session that is still being replayed:
+/// the first-party cookies are cleared, so the jar looks populated but the
+/// account is gone.
+pub const SIGNED_OUT: &str = "youtube signed this session out (the first-party cookies were cleared). \
+Another copy of the same export is the usual cause: a second ytui (WSL counts), a browser tab \
+still using that session, or a resolver started with --cookies. Re-export once and use it on one \
+client only, then run `ytui auth <cookies.txt>`.";
+
+/// `Some(true)` when a file-backed jar still signs in, `Some(false)` when it is
+/// signed out, `None` for browser cookies or an unreadable file.
+fn jar_session_state(cookies: Option<(&str, &str)>) -> Option<bool> {
+    match cookies {
+        Some(("--cookies", path)) => std::fs::read_to_string(path)
+            .ok()
+            .map(|txt| has_session_cookies(&txt)),
+        _ => None,
+    }
 }
 
 /// Parses the JSON printed by `yt-dlp -j`. Split out so the ranking can be
@@ -413,6 +479,28 @@ mod tests {
     fn browser_cookies_need_no_lock() {
         assert!(lock_cookies(Some(("--cookies-from-browser", "chrome"))).is_none());
         assert!(lock_cookies(None).is_none());
+        assert!(lock_cookies_for_run(Some(("--cookies-from-browser", "chrome"))).is_ok());
+        assert!(lock_cookies_for_run(None).unwrap().is_none());
+    }
+
+    /// YouTube empties the first-party cookies on sign-out but leaves visitor
+    /// and `__Secure-3*` rows, which is what made the old "does it mention
+    /// SID?" check pass on a dead jar.
+    #[test]
+    fn a_signed_out_jar_has_no_session_cookies() {
+        let signed_in = "\
+# Netscape HTTP Cookie File
+.youtube.com\tTRUE\t/\tTRUE\t1900000000\t__Secure-1PSID\tabc
+#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1900000000\tSID\tdef
+";
+        assert!(has_session_cookies(signed_in));
+        let signed_out = "\
+# Netscape HTTP Cookie File
+.youtube.com\tTRUE\t/\tTRUE\t1900000000\t__Secure-3PSID\tabc
+.youtube.com\tTRUE\t/\tTRUE\t1900000000\t__Secure-1PSIDTS\tabc
+.youtube.com\tTRUE\t/\tTRUE\t1900000000\tVISITOR_INFO1_LIVE\tabc
+";
+        assert!(!has_session_cookies(signed_out));
     }
 
     fn format(id: &str, ext: &str, codec: &str, abr: f64) -> serde_json::Value {

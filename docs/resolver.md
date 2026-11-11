@@ -291,7 +291,7 @@ ytui-resolver --root … --version <older>` (or `--no-auto-update` first).
 
 ```text
 GET /v1/health
-  -> 200 { "ok": true, "version": "0.4.9",
+  -> 200 { "ok": true, "version": "0.4.10",
            "ytdlp": "2026.10.26", "deno": "deno 2.9.8",
            "auth": false, "cookies": false, "resolve_ms": 812 }
 

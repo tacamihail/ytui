@@ -12,7 +12,6 @@ mod listcache;
 mod remote;
 mod ui;
 mod update;
-mod ytapi;
 mod ytdl;
 
 use crossterm::event::{
@@ -218,18 +217,31 @@ fn doctor() -> i32 {
 
     match cfg.cookie_args() {
         Some((flag, value)) => {
-            // The saved account name can be months old; ask YouTube once so
-            // doctor catches cookies that no longer sign in instead of
-            // reporting a healthy account.
-            match ytdl::account(&cfg) {
-                Ok((name, _)) => {
-                    println!("✔ cookies: {value} ({flag})");
-                    println!("✔ account: {name}");
-                }
-                Err(e) => {
-                    println!("✗ cookies could not be verified: {value} ({flag})");
-                    println!("  {e}");
-                    healthy = false;
+            // A file export that lost its first-party cookies was signed out
+            // by YouTube; it is not an expiry problem, and running yt-dlp
+            // again would only replay the dead session.
+            let signed_out = flag == "--cookies"
+                && std::fs::read_to_string(&value)
+                    .map(|txt| !ytui_resolve::has_session_cookies(&txt))
+                    .unwrap_or(false);
+            if signed_out {
+                println!("✗ cookies: signed out ({value})");
+                println!("  {}", ytui_resolve::SIGNED_OUT);
+                healthy = false;
+            } else {
+                // The saved account name can be months old; ask YouTube once so
+                // doctor catches cookies that no longer sign in instead of
+                // reporting a healthy account.
+                match ytdl::account(&cfg) {
+                    Ok((name, _)) => {
+                        println!("✔ cookies: {value} ({flag})");
+                        println!("✔ account: {name}");
+                    }
+                    Err(e) => {
+                        println!("✗ cookies could not be verified: {value} ({flag})");
+                        println!("  {e}");
+                        healthy = false;
+                    }
                 }
             }
         }

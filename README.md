@@ -332,6 +332,19 @@ and the next request would sign the account out. The runs now share a
 `ytui auth`. A second machine with its own copy of the same session cannot
 share that lock — see the resolver note below.
 
+The subscriptions tab used to be fetched with a raw `Cookie:` header. That read
+the stored `__Secure-1PSIDTS` but threw away the rotated value YouTube sent
+back, so the jar aged faster than the clock and could be rejected as a replay.
+Subscriptions now go through the same yt-dlp listing as the other tabs, which
+saves the rotation. They also work with `--browser` cookies now.
+
+One export is one client. Installing the same `cookies.txt` on a second
+machine, or importing it inside WSL, gives that copy the same session; the two
+then rotate the token independently and Google signs both out. If you want
+ytui on two machines, sign in to each one in its own private window and export
+separately. A resolver started with `--cookies` is a third client; leave it
+anonymous (playback falls back to local yt-dlp for age-restricted tracks).
+
 The export has to include the HttpOnly cookies: without them the file is
 signed out, and `ytui auth` refuses it rather than overwriting a working
 `~/.config/ytui/cookies.txt`. `ytui auth` checks the cookies against YouTube,
@@ -341,14 +354,12 @@ saves the channel in `~/.config/ytui/account.json` and copies them to
 ### Reading cookies from the browser
 
 `ytui auth --browser <name>` skips the export: yt-dlp reads the browser's
-cookie database on every run, so there is nothing in a file to go stale. Two
-limits:
+cookie database on every run, so there is nothing in a file to go stale. The
+browser has to stay signed in to YouTube. One limit:
 
 - on Linux, Chrome-family browsers encrypt their cookies with the system
   keyring. It works only if the keyring is unlocked and yt-dlp can decrypt
   them, otherwise `ytui auth` reports that it could not verify the account.
-- subscriptions still need a file, because ytui parses that page itself.
-  `--browser` alone leaves tab 3 empty.
 
 Search and playback work without an account.
 
@@ -562,9 +573,8 @@ installer or a later scan.
 `resolver_fallback` on, a dead server falls back to local yt-dlp and shows
 one toast per session; with it off, playback fails with the resolver error.
 
-Only stream resolution moves. Search and playlists still use the local
-`yt-dlp`, and subscriptions keep their existing API path, so the client keeps
-its own yt-dlp and cookies.
+Only stream resolution moves. Search, playlists and the subscriptions feed
+still use the local `yt-dlp`, so the client keeps its own yt-dlp and cookies.
 
 There is deliberately no TLS in the server: run it on a LAN or a
 Tailscale/WireGuard network, or put Caddy in front. The server learns which
@@ -650,13 +660,18 @@ scrolling. Under tmux or screen, enable it with `set -g focus-events on`.
 or is otherwise not served to this account. Nothing in ytui can fix it; the
 track stays in the list until you unlike it on YouTube.
 
-"private: sign-in required": the cookies expired. Export them again.
+"private: sign-in required": the session has no account cookies. Export them
+again and import them on this machine only.
 
-"playlist not found" on Liked Music or Watch Later: the export is signed out or
-incomplete. Netscape exports need the HttpOnly cookies too ("Get cookies.txt
-LOCALLY" includes them), so export while <https://music.youtube.com> is open in
-a signed-in browser and run `ytui auth <file>` again. `ytui doctor` and
-`ytui auth --status` check the cookies against YouTube.
+"playlist not found" on Liked Music or Watch Later: the export is signed out,
+revoked or incomplete. Netscape exports need the HttpOnly cookies too ("Get
+cookies.txt LOCALLY" includes them), so export while
+<https://music.youtube.com> is open in a signed-in browser and run
+`ytui auth <file>` again. If the export was fresh, check for a second copy:
+another ytui (WSL counts), a browser tab still using that session, or a
+resolver started with `--cookies`. `ytui doctor` and `ytui auth --status` check
+the cookies against YouTube and now say "signed out" instead of "expired" when
+YouTube cleared the first-party cookies.
 
 Search returns nothing or a 403: `yt-dlp` is too old.
 

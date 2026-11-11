@@ -30,8 +30,12 @@ getting cookies.txt:
      (inside WSL: ytui auth /mnt/c/Users/<you>/Downloads/cookies.txt)
 
 supported browsers: firefox, chromium, chrome, brave, edge, vivaldi, opera
-  reading cookies from a browser skips the export, but subscriptions still
-  need a cookies.txt file, because ytui parses that page itself
+  in that mode yt-dlp reads the browser database directly and stores nothing
+
+one export, one client:
+  importing the same cookies.txt on a second machine (or inside WSL) gives it
+  a copy of the same YouTube session. Both copies rotate the session token,
+  and Google signs the account out when the two rotations disagree.
 ";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,7 +76,7 @@ fn import(path: &str) -> i32 {
         eprintln!("✗ {path} does not look like a YouTube cookies.txt export");
         return 1;
     }
-    if !looks_signed_in(&txt) {
+    if !ytui_resolve::has_session_cookies(&txt) {
         eprintln!("✗ {path} has no signed-in YouTube cookies");
         eprintln!("  it is missing the first-party session cookie (SID or __Secure-1PSID),");
         eprintln!("  so the export came from a signed-out browser or lost its HttpOnly");
@@ -121,6 +125,16 @@ fn browser(name: &str) -> i32 {
 }
 
 fn verify(cfg: &Config) -> i32 {
+    // A file export can be stale before it reaches yt-dlp; say so without
+    // presenting the dead cookies to YouTube again.
+    if let Some(path) = cfg.cookie_path() {
+        if let Ok(txt) = fs::read_to_string(&path) {
+            if !ytui_resolve::has_session_cookies(&txt) {
+                eprintln!("✗ {}", ytui_resolve::SIGNED_OUT);
+                return 1;
+            }
+        }
+    }
     println!("checking account…");
     match ytdl::account(cfg) {
         Ok((name, id)) => {
@@ -141,7 +155,6 @@ fn verify(cfg: &Config) -> i32 {
             if cfg.cookies_file.is_empty() {
                 eprintln!("  the cookies are read from the browser on every run, so nothing is");
                 eprintln!("  stored yet. Check that the browser is signed in to youtube.com");
-                eprintln!("  and then run `ytui auth <cookies.txt>` with a file export instead");
             } else {
                 eprintln!("  cookies were saved to {}", cfg.cookies_file);
                 eprintln!("  search and playback already work; Liked Music, Playlists and");
@@ -166,6 +179,19 @@ pub fn status() -> i32 {
         }
         None => {
             println!("cookies: none (run `ytui auth <cookies.txt>`)");
+            return 1;
+        }
+    }
+
+    // A jar that lost its first-party cookies is signed out, not expired.
+    // Asking YouTube again would only replay the dead token.
+    if let Some(path) = cfg.cookie_path() {
+        if fs::read_to_string(&path)
+            .map(|t| !ytui_resolve::has_session_cookies(&t))
+            .unwrap_or(false)
+        {
+            println!("✗ cookies: signed out ({})", path.display());
+            println!("  {}", ytui_resolve::SIGNED_OUT);
             return 1;
         }
     }
@@ -214,34 +240,16 @@ fn restrict_permissions(path: &Path) {
     let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
 }
 
-/// Signed-in YouTube cookies always include a first-party session cookie.
-/// Exports with only the `__Secure-3P*` variants come from a signed-out
-/// browser, or from a tool that skipped the HttpOnly half of the jar.
-fn looks_signed_in(txt: &str) -> bool {
-    txt.lines().any(|line| {
-        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
-        if line.starts_with('#') {
-            return false;
-        }
-        matches!(
-            line.split('\t').nth(5),
-            Some("SID" | "__Secure-1PSID" | "SAPISID" | "APISID" | "__Secure-1PAPISID")
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     const SIGNED_IN: &str = "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1999999999\t__Secure-1PSID\tx\n";
     const SIGNED_OUT: &str = ".youtube.com\tTRUE\t/\tTRUE\t1999999999\t__Secure-3PSID\tx\n";
 
     #[test]
     fn incomplete_exports_are_not_imported() {
-        assert!(looks_signed_in(SIGNED_IN));
-        assert!(!looks_signed_in(SIGNED_OUT));
-        assert!(!looks_signed_in("# comment\n"));
+        assert!(ytui_resolve::has_session_cookies(SIGNED_IN));
+        assert!(!ytui_resolve::has_session_cookies(SIGNED_OUT));
+        assert!(!ytui_resolve::has_session_cookies("# comment\n"));
     }
 }
 

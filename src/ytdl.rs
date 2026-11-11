@@ -21,6 +21,11 @@ pub(crate) use ytui_resolve::{command, tool_path, UA};
 pub const LIKED_MUSIC_URL: &str = "https://music.youtube.com/playlist?list=LM";
 /// System playlist owned by the account; unlike `LM` it exposes the owner.
 pub const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
+/// The subscriptions feed. yt-dlp has an extractor for this tab, and using it
+/// (instead of fetching the page with a raw `Cookie:` header) is important:
+/// YouTube rotates `__Secure-1PSIDTS` on responses, and a reader that throws
+/// that rotation away ages the stored token until it is treated as replayed.
+pub const SUBSCRIPTIONS_URL: &str = "https://www.youtube.com/feed/subscriptions";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -59,16 +64,19 @@ pub fn label(kind: Kind) -> &'static str {
 pub fn spawn(seq: u64, kind: Kind, target: String, cfg: Config, tx: Sender<Msg>) {
     thread::spawn(move || {
         let _ = tx.send(Msg::Begin(seq, kind));
-        let res = match kind {
-            Kind::Subscriptions => crate::ytapi::subscription_feed(&cfg).map(|list| {
-                let n = list.len();
-                for e in list {
-                    let _ = tx.send(Msg::Add(seq, kind, e));
-                }
-                n
-            }),
-            _ => run(seq, kind, &target, &cfg, &tx),
+        // The feed is a fixed tab, whatever target the caller passed.
+        let target = if kind == Kind::Subscriptions {
+            SUBSCRIPTIONS_URL.to_string()
+        } else {
+            target
         };
+        let res = run(seq, kind, &target, &cfg, &tx).and_then(|n| {
+            if kind == Kind::Subscriptions && n == 0 {
+                Err("subscriptions feed came back empty, are you signed in?".into())
+            } else {
+                Ok(n)
+            }
+        });
         match res {
             Ok(n) => {
                 let _ = tx.send(Msg::Done(seq, kind, format!("{}: {} items", label(kind), n)));
@@ -80,24 +88,46 @@ pub fn spawn(seq: u64, kind: Kind, target: String, cfg: Config, tx: Sender<Msg>)
     });
 }
 
+/// `Some(true)` while a file-backed jar still signs in, `Some(false)` after
+/// YouTube cleared the first-party cookies, `None` for browser cookies or an
+/// unreadable file.
+fn jar_signed_in(flag: &str, value: &str) -> Option<bool> {
+    if flag != "--cookies" {
+        return None;
+    }
+    std::fs::read_to_string(value)
+        .ok()
+        .map(|txt| ytui_resolve::has_session_cookies(&txt))
+}
+
 fn run(seq: u64, kind: Kind, target: &str, cfg: &Config, tx: &Sender<Msg>) -> Result<usize, String> {
     let mut c = command();
     c.args([
         "--flat-playlist",
-        // Print rows page by page instead of collecting the whole playlist
-        // first: the first screen is on screen in about a second even when
-        // the list has thousands of entries.
-        "--lazy-playlist",
         "--no-warnings",
         "--print",
         TEMPLATE,
         &format!("--playlist-items=1-{}", cfg.fetch_limit.max(1)),
     ]);
+    // A feed is a single page, so lazy pagination buys nothing there.
+    if kind != Kind::Subscriptions {
+        // Print rows page by page instead of collecting the whole playlist
+        // first: the first screen is on screen in about a second even when
+        // the list has thousands of entries.
+        c.arg("--lazy-playlist");
+    }
     let cookies = cfg.cookie_args();
     // yt-dlp saves the jar when it exits, so only one run may touch it at a
-    // time or a stale rotating token can overwrite a fresh one.
-    let _cookie_lock =
-        ytui_resolve::lock_cookies(cookies.as_ref().map(|(flag, value)| (*flag, value.as_str())));
+    // time or a stale rotating token can overwrite a fresh one. A busy jar is
+    // an error: running unlocked is the write this lock exists to prevent.
+    let _cookie_lock = ytui_resolve::lock_cookies_for_run(
+        cookies
+            .as_ref()
+            .map(|(flag, value)| (*flag, value.as_str())),
+    )?;
+    let before = cookies
+        .as_ref()
+        .and_then(|(flag, value)| jar_signed_in(flag, value));
     if let Some((flag, value)) = &cookies {
         c.arg(flag).arg(value);
     }
@@ -133,6 +163,14 @@ fn run(seq: u64, kind: Kind, target: &str, cfg: &Config, tx: &Sender<Msg>) -> Re
 
     let status = child.wait().map_err(|e| e.to_string())?;
     let errtxt = errth.join().unwrap_or_default();
+    // The run that gets the rejection is the one that writes the cleared jar,
+    // so report it here instead of showing "playlist not found" forever.
+    let after = cookies
+        .as_ref()
+        .and_then(|(flag, value)| jar_signed_in(flag, value));
+    if before == Some(true) && after == Some(false) {
+        return Err(ytui_resolve::SIGNED_OUT.to_string());
+    }
     if !status.success() && n == 0 {
         Err(friendly(&errtxt))
     } else {
@@ -303,7 +341,8 @@ pub fn account(cfg: &Config) -> Result<(String, String), String> {
         return Err("no cookies configured".into());
     };
     // Same jar as the player's listings and resolves; serialize with them.
-    let _cookie_lock = ytui_resolve::lock_cookies(Some((flag, value.as_str())));
+    let _cookie_lock = ytui_resolve::lock_cookies_for_run(Some((flag, value.as_str())))?;
+    let before = jar_signed_in(flag, &value);
     let mut last_err = String::new();
     for url in [WATCH_LATER_URL, LIKED_MUSIC_URL] {
         let out = command()
@@ -349,6 +388,8 @@ pub fn account(cfg: &Config) -> Result<(String, String), String> {
     }
     if last_err.is_empty() {
         Err("could not read the account: cookies are accepted but YouTube returned no owner".into())
+    } else if before == Some(true) && jar_signed_in(flag, &value) == Some(false) {
+        Err(ytui_resolve::SIGNED_OUT.to_string())
     } else {
         Err(last_err)
     }
