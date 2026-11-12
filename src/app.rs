@@ -45,11 +45,6 @@ pub const TAB_SEARCH: usize = 5;
 /// anywhere in a few hundred tracks.
 const WHEEL_ROWS: i32 = 5;
 
-/// How often playback position is pushed to the OS media session. Metadata and
-/// transport changes still go out immediately; this only paces the progress
-/// bar, so a paused player does not chatter on D-Bus.
-const MEDIA_INTERVAL: Duration = Duration::from_millis(1000);
-
 /// Clickable transport control in the player bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayerBtn {
@@ -176,12 +171,9 @@ pub struct App {
     upd_rx: Receiver<UpdMsg>,
     pub cmd_tx: Sender<Cmd>,
     pub fetch_tx: Sender<Msg>,
-    /// OS media session (SMTC / MPRIS / Now Playing). `None` when unavailable
-    /// or disabled in the config; the player works either way.
-    media: Option<media::Controls>,
-    /// Last state published to the session, so only real changes cost a call.
-    media_sent: Option<media::NowPlaying>,
-    media_at: Instant,
+    /// OS media session (SMTC / MPRIS / Now Playing); a no-op when the config
+    /// disables it or the platform has no session.
+    media: media::Media,
     pub account: Option<String>,
     pub last_click: Option<(Instant, usize)>,
     // Geometry captured while drawing, used for mouse hit-testing.
@@ -207,6 +199,7 @@ impl App {
         let history = config::load_json(&config::history_path()).unwrap_or_default();
         let account = auth::account().map(|a| a.name);
         let (upd_tx, upd_rx) = mpsc::channel();
+        let media_keys = cfg.media_keys;
         let mut app = Self {
             cfg,
             tab: TAB_LIKED,
@@ -249,9 +242,7 @@ impl App {
             upd_rx,
             cmd_tx: player.tx_clone(),
             fetch_tx,
-            media: None,
-            media_sent: None,
-            media_at: Instant::now(),
+            media: media::Media::new(player.tx_clone(), media_keys),
             account,
             last_click: None,
             tab_hits: Vec::new(),
@@ -267,9 +258,6 @@ impl App {
             notice_seq: 0,
             pending_playlist_title: String::new(),
         };
-        if app.cfg.media_keys {
-            app.media = media::Controls::start();
-        }
         // Opening the player on Liked Music loads it right away.
         app.set_tab(TAB_LIKED);
         app
@@ -283,14 +271,10 @@ impl App {
         fetch_rx: Receiver<Msg>,
     ) -> io::Result<()> {
         loop {
-            if app.media.is_some() {
-                media::pump();
-            }
-            app.poll_media();
-            app.sync_media();
             app.sync_queue_cache();
             app.pick_up_notice();
             app.poll_scan();
+            app.sync_media();
             terminal.draw(|f| ui::draw(f, app))?;
             // While a list is streaming in, a track is being resolved or the
             // selected row is scrolling its title, redraw often enough that
@@ -335,6 +319,23 @@ impl App {
                 return Ok(());
             }
         }
+    }
+
+    /// Keep the system Now Playing entry in step with the player, and let
+    /// macOS deliver any pending media-key events. Publishing only happens
+    /// when a field changed, so calling this every frame is cheap.
+    fn sync_media(&mut self) {
+        let st = lock(&self.player);
+        self.media.sync(&st);
+        drop(st);
+        if self.media.quit() {
+            self.should_quit = true;
+        }
+    }
+
+    /// Remove the Now Playing entry before the terminal is restored.
+    pub fn shutdown(&mut self) {
+        self.media.shutdown();
     }
 
     fn sync_queue_cache(&mut self) {
@@ -390,86 +391,6 @@ impl App {
                 config::save_json(&config::history_path(), &self.history);
             }
         }
-    }
-
-    // ---------------- media session ----------------
-
-    /// Apply buttons pressed in the OS media widget. The sender is a channel,
-    /// so a slow D-Bus call can never block the player.
-    fn poll_media(&mut self) {
-        loop {
-            let event = self
-                .media
-                .as_ref()
-                .and_then(|controls| controls.try_event());
-            let Some(event) = event else {
-                break;
-            };
-            match event {
-                media::Event::Play => self.cmd(Cmd::Resume),
-                media::Event::Pause => self.cmd(Cmd::Pause),
-                media::Event::Toggle => self.cmd(Cmd::Toggle),
-                media::Event::Next => self.cmd(Cmd::Next),
-                media::Event::Prev => self.cmd(Cmd::Prev),
-                media::Event::Stop => self.cmd(Cmd::Stop),
-                media::Event::Mute => {
-                    let muted = lock(&self.player).muted;
-                    self.cmd(Cmd::Mute(!muted));
-                }
-                media::Event::Seek(seconds) => self.seek(seconds),
-                media::Event::SeekAbs(seconds) => self.cmd(Cmd::SeekAbs(seconds)),
-                media::Event::Volume(volume) => {
-                    let level = (volume.clamp(0.0, 1.0) * 100.0).round() as i64;
-                    self.cmd(Cmd::Volume(level));
-                }
-                media::Event::Shuffle(on) => self.cmd(Cmd::Shuffle(on)),
-                media::Event::Quit => self.should_quit = true,
-            }
-        }
-    }
-
-    /// Publish the current track, state and position to the OS. Track changes
-    /// go out at once; the position is refreshed once a second so the desktop
-    /// slider moves without flooding the session bus.
-    fn sync_media(&mut self) {
-        if self.media.is_none() {
-            return;
-        }
-        let now = {
-            let st = lock(&self.player);
-            let playback = match st.status {
-                Status::Playing | Status::Loading => media::Playback::Playing,
-                Status::Paused => media::Playback::Paused,
-                Status::Stopped | Status::Error => media::Playback::Stopped,
-            };
-            media::NowPlaying {
-                playback,
-                title: st.title.clone(),
-                artist: st.channel.clone(),
-                duration: st.dur,
-                position: st.pos,
-                volume: st.volume,
-                muted: st.muted,
-                shuffle: st.shuffle,
-            }
-        };
-        let same = self.media_sent.as_ref().is_some_and(|last| {
-            last.playback == now.playback
-                && last.title == now.title
-                && last.artist == now.artist
-                && last.duration == now.duration
-                && last.volume == now.volume
-                && last.muted == now.muted
-                && last.shuffle == now.shuffle
-        });
-        if same && self.media_at.elapsed() < MEDIA_INTERVAL {
-            return;
-        }
-        if let Some(controls) = &mut self.media {
-            controls.update(now.clone());
-        }
-        self.media_sent = Some(now);
-        self.media_at = Instant::now();
     }
 
     // ---------------- messages ----------------
@@ -906,7 +827,7 @@ impl App {
     }
 
     /// Media keys that the terminal itself forwards. Most desktops send them
-    /// to the media session instead; `poll_media` handles those.
+    /// to the media session instead; `media::Media::sync` handles those.
     fn on_media_key(&mut self, key: MediaKeyCode) {
         match key {
             MediaKeyCode::Play => self.cmd(Cmd::Resume),

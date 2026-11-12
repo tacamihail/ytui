@@ -1,6 +1,6 @@
 [package]
 name = "ytui"
-version = "0.4.10"
+version = "0.4.11"
 edition = "2021"
 rust-version = "1.89"
 description = "A YouTube Music player for the terminal"
@@ -31,8 +31,8 @@ ytui-resolve = { path = "crates/resolve" }
 if-addrs = "0.15"
 
 # OS media sessions, so the keyboard media keys and headphone buttons control
-# ytui without the terminal having focus. Souvlaki speaks SMTC on Windows,
-# MPRIS on Linux and Now Playing on macOS.
+# ytui without the terminal having focus. Souvlaki speaks SMTC on Windows and
+# MPRIS on Linux; macOS talks to MediaPlayer directly (see below).
 [target.'cfg(target_os = "windows")'.dependencies]
 souvlaki = "0.9.3"
 # A hidden window gives SMTC an HWND without borrowing the console's.
@@ -53,13 +53,6 @@ souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"
 # XF86 keys directly gives those setups working media keys.
 x11rb = { version = "0.13", features = ["xtest"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-souvlaki = "0.9.3"
-# A hidden accessory NSApplication plus a non-blocking event pump; macOS only
-# delivers Now Playing/media-key events to a process with an AppKit run loop.
-objc = "0.2.7"
-core-graphics = "0.25"
-
 # Standalone crate. Without this, cargo walks up the directory tree looking for
 # a workspace root and trips over any Cargo.toml in a parent directory (for
 # example an unrelated or half-finished one in ~/Downloads).
@@ -71,6 +64,15 @@ core-graphics = "0.25"
 members = ["crates/resolve", "crates/resolver"]
 default-members = ["."]
 resolver = "2"
+
+# macOS Now Playing / media keys. Kept out of the Linux and WSL builds: cpal
+# talks to CoreAudio there, so nothing else is Apple-specific.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-media-player = "0.3"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSImage"] }
+block2 = "0.6"
 
 [profile.release]
 opt-level = 3

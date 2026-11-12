@@ -104,9 +104,10 @@ pub enum Cmd {
     /// Replace the queue with `tracks` and start at `index`.
     Play(Vec<Track>, usize),
     Append(Track),
-    /// Resume, or start the current queue entry when stopped.
+    /// Start or resume without toggling: the OS play button must not pause a
+    /// track that is already playing.
     Resume,
-    /// Pause without toggling, so a repeated media-key press stays paused.
+    /// Pause without toggling, for the OS pause button.
     Pause,
     Toggle,
     Seek(f64),
@@ -716,26 +717,29 @@ impl Engine {
                     // Space on a failed track is the natural "try again".
                     self.fails = 0;
                     self.start(index);
-                } else {
-                    let paused = self.sink.as_ref().map(|s| !s.is_paused()).unwrap_or(false);
-                    self.set_paused(paused);
+                } else if let Some(pause) = self.sink.as_ref().map(|s| !s.is_paused()) {
+                    self.set_paused(pause);
                 }
             }
-            Cmd::Pause => self.set_paused(true),
             Cmd::Resume => {
-                let (status, queued, index) = {
+                let (status, index) = {
                     let st = self.lock();
-                    (st.status, !st.queue.is_empty(), st.index)
+                    (st.status, st.index)
                 };
-                if status == Status::Stopped && queued {
-                    // Media keys should start the queue again after `x`.
-                    self.fails = 0;
-                    self.start(index);
-                } else if status == Status::Error {
-                    self.fails = 0;
-                    self.start(index);
-                } else {
-                    self.set_paused(false);
+                match status {
+                    Status::Paused => self.set_paused(false),
+                    // After a stop or a failed track, play means "start this
+                    // one again"; `start` is a no-op on an empty queue.
+                    Status::Stopped | Status::Error => {
+                        self.fails = 0;
+                        self.start(index);
+                    }
+                    _ => {}
+                }
+            }
+            Cmd::Pause => {
+                if self.lock().status == Status::Playing {
+                    self.set_paused(true);
                 }
             }
             Cmd::Seek(delta) => {
@@ -813,28 +817,15 @@ impl Engine {
         }
     }
 
-    /// Pause or resume the open stream. Shared by the keyboard, the player bar
-    /// and the OS media keys, which send explicit Play/Pause rather than a
-    /// toggle (a held media key must not flap the player).
-    fn set_paused(&mut self, paused: bool) {
-        let (status, index) = {
-            let st = self.lock();
-            (st.status, st.index)
-        };
-        if status == Status::Error {
-            // Play on a failed track is the natural "try again"; pausing one
-            // is meaningless.
-            if !paused {
-                self.fails = 0;
-                self.start(index);
-            }
-            return;
-        }
-        let Some(s) = &self.sink else {
+    /// Pause or resume the output without touching the queue. The status is
+    /// only changed for a track that is actually playing or paused, so a
+    /// media key during a resolve cannot fake a playback state.
+    fn set_paused(&mut self, pause: bool) {
+        let Some(sink) = &self.sink else {
             return;
         };
-        s.set_paused(paused);
-        if paused {
+        sink.set_paused(pause);
+        if pause {
             // The end may now be hours away, so a link solved before the
             // pause could expire. Let the next tick request it again after
             // resuming.
@@ -842,7 +833,7 @@ impl Engine {
         }
         let mut st = self.lock();
         if matches!(st.status, Status::Playing | Status::Paused) {
-            st.status = if paused {
+            st.status = if pause {
                 Status::Paused
             } else {
                 Status::Playing

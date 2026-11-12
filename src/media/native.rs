@@ -1,4 +1,4 @@
-//! Linux (MPRIS) and macOS (Now Playing) backends, both through souvlaki.
+//! Linux MPRIS backend, through souvlaki.
 //!
 //! The desktop owns the media keys and asks the active media session to act.
 //! Publishing playback state here is what makes the keys work: there is no
@@ -24,10 +24,7 @@ struct Meta {
 pub struct Backend {
     controls: MediaControls,
     meta: Option<Meta>,
-    #[cfg(target_os = "linux")]
     volume: Option<i64>,
-    #[cfg(target_os = "macos")]
-    shuffle: Option<bool>,
 }
 
 impl Backend {
@@ -48,19 +45,12 @@ impl Backend {
         Some(Self {
             controls,
             meta: None,
-            #[cfg(target_os = "linux")]
             volume: None,
-            #[cfg(target_os = "macos")]
-            shuffle: None,
         })
     }
 
     pub fn mode(&self) -> String {
-        if cfg!(target_os = "macos") {
-            "macOS Now Playing".to_string()
-        } else {
-            "MPRIS".to_string()
-        }
+        "MPRIS".to_string()
     }
 
     pub fn update(&mut self, now: NowPlaying) {
@@ -108,27 +98,14 @@ impl Backend {
 
         // MPRIS clients (playerctl, desktop sliders) set the volume through the
         // session, and the spec asks the player to confirm it.
-        #[cfg(target_os = "linux")]
-        {
-            let volume = if now.muted {
-                0
-            } else {
-                now.volume.clamp(0, 100)
-            };
-            if self.volume != Some(volume) {
-                if self.controls.set_volume(volume as f64 / 100.0).is_ok() {
-                    self.volume = Some(volume);
-                }
-            }
-        }
-
-        // macOS exposes shuffle as a remote command, unlike the other backends.
-        #[cfg(target_os = "macos")]
-        {
-            if self.shuffle != Some(now.shuffle) {
-                if self.controls.set_shuffle(Some(now.shuffle)).is_ok() {
-                    self.shuffle = Some(now.shuffle);
-                }
+        let volume = if now.muted {
+            0
+        } else {
+            now.volume.clamp(0, 100)
+        };
+        if self.volume != Some(volume) {
+            if self.controls.set_volume(volume as f64 / 100.0).is_ok() {
+                self.volume = Some(volume);
             }
         }
     }

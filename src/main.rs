@@ -94,6 +94,7 @@ fn run_tui() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let res = app::App::run(&mut terminal, &mut app, fetch_rx);
+    app.shutdown();
 
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, DisableFocusChange);
@@ -219,13 +220,7 @@ fn doctor() -> i32 {
         }
     }
 
-    match media::Controls::start() {
-        Some(controls) => println!("✔ media keys: {}", controls.mode()),
-        None => println!(
-            "· media keys: {} (could not register right now)",
-            media::status()
-        ),
-    }
+    println!("{}", media::doctor_line());
 
     match cfg.cookie_args() {
         Some((flag, value)) => {
@@ -444,8 +439,8 @@ usage:
   ytui doctor             check yt-dlp, audio device and config
   ytui discover [--save]  scan the LAN for an optional resolver
   ytui discover --url U   check a resolver by address, e.g. over a VPN
-  ytui update             pull the latest source and rebuild
-  ytui update --check     only report whether newer commits exist
+  ytui update             install the newer version from github
+  ytui update --check     only report whether a newer version exists
   ytui --version          print version
 
 inside the player: ? for the full key map
