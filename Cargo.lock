@@ -2754,7 +2754,7 @@ dependencies = [
 
 [[package]]
 name = "ytui"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "block2",
  "cpal",
@@ -2779,7 +2779,7 @@ dependencies = [
 
 [[package]]
 name = "ytui-resolve"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -2787,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "ytui-resolver"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "getrandom 0.2.17",
  "serde",
