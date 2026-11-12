@@ -274,6 +274,14 @@ points at card 0, so ytui asks for the `pulse` PCM first and only falls back to
 sudo apt-get install -y libasound2-plugins
 ```
 
+Media keys in WSL come from the native Windows build: put `ytui.exe` on
+`PATH` (the [Windows install](#1-install-the-player) does this) and the WSL
+build will start it as a hidden media-session bridge. See
+[Media keys](#media-keys). If WSL interop is disabled
+(`/proc/sys/fs/binfmt_misc/WSLInterop` missing), ytui grabs the media keys
+from WSLg's X server instead, so they still work under the default WSLg
+setup.
+
 No `~/.asoundrc` edit is needed. `ytui doctor` prints the PCM it picked, for
 example `✔ audio output: pulse @ 44100 Hz stereo`.
 
@@ -409,6 +417,34 @@ so in the status line and moves to the next one. It gives up after five dead
 tracks in a row, which usually means the problem is cookies or the network
 rather than the list; `space` retries.
 
+## Media keys
+
+ytui registers with the operating system's media session, so the keyboard's
+play/pause, next and previous keys, and headphone buttons, control playback
+even while the terminal is in the background:
+
+- **Windows**: System Media Transport Controls (the volume flyout and lock
+  screen).
+- **Linux**: MPRIS as `org.mpris.MediaPlayer2.ytui`, which GNOME, KDE and
+  `playerctl` use for their media widgets and key bindings.
+- **macOS**: Now Playing (`MPRemoteCommandCenter` and
+  `MPNowPlayingInfoCenter`), which also feeds Control Center and, on Touch Bar
+  Macs, the Control Strip's Now Playing tile. ytui creates a hidden accessory
+  app and pumps AppKit's run loop from the TUI; no window or Dock icon appears.
+  macOS does not let a terminal program draw custom Touch Bar buttons, so the
+  system's Now Playing tile is where those controls appear.
+- **WSL**: Windows delivers the keys to Windows programs only, so the WSL
+  build starts the native Windows build (`ytui.exe --media-bridge`) and drives
+  its media session over a pipe. Install the Windows build (see
+  [WSL](#wsl)) or point `YTUI_MEDIA_BRIDGE` at `ytui.exe`. If WSL interop is
+  disabled, ytui falls back to grabbing the XF86 keys from WSLg's X server,
+  which needs no Windows helper.
+
+The keys work while the help or search overlay is open, and terminals that
+forward media keys as input are handled too. `ytui doctor` prints which
+session was selected. Set `media_keys` to `false` in the config to turn the
+integration off.
+
 ## Config
 
 `~/.config/ytui/config.json` (on Windows
@@ -432,6 +468,7 @@ the installer:
 | `resolver_token_file` | `""` | token file; empty = `~/.config/ytui/resolver.token` when it exists |
 | `resolver_timeout_secs` | `20` | how long to wait for the resolver |
 | `resolver_fallback` | `true` | use local yt-dlp when the resolver fails |
+| `media_keys` | `true` | register with the OS media session for media keys |
 
 ## Remote resolver
 
@@ -683,6 +720,19 @@ did not answer and the client fell back. `ytui doctor` shows the reason.
 
 "resolver: bad token": the client and server tokens differ. Regenerate with
 `ytui-resolver --gen-token` and point `resolver_token_file` at the result.
+
+Media keys do nothing: `ytui doctor` prints the media session it selected.
+On Linux the keys go to the focused player through MPRIS, so check
+`playerctl -l` and that `DBUS_SESSION_BUS_ADDRESS` is set (it is not under
+plain `ssh` or `sudo -i`). On Windows make sure `media_keys` is not `false`
+and that another player is not holding the session; the volume flyout should
+list ytui while a track is loaded. On macOS the keys follow the current Now
+Playing app, so quit Music if it keeps claiming them, and make sure ytui runs
+in a GUI login session (over plain SSH there is no WindowServer to register
+with). Under WSL, the native Windows build should serve the session
+(`which ytui.exe`, or `YTUI_MEDIA_BRIDGE=/mnt/c/.../ytui.exe`); without
+interop, ytui uses WSLg's X server, so check that `DISPLAY` is set.
+`ytui doctor` names the backend that actually registered.
 
 Mouse does nothing: the terminal has to forward mouse events. Windows Terminal
 and most Linux terminals do; in tmux add `set -g mouse on` and restart ytui.

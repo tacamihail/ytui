@@ -39,6 +39,9 @@ pub struct Config {
     pub resolver_timeout_secs: u64,
     /// Fall back to local yt-dlp when the resolver is unreachable or fails.
     pub resolver_fallback: bool,
+    /// Publish playback to the OS media session, so the keyboard's media keys
+    /// and headphone buttons control ytui (SMTC/MPRIS/Now Playing).
+    pub media_keys: bool,
 }
 
 impl Default for Config {
@@ -59,6 +62,7 @@ impl Default for Config {
             resolver_token_file: String::new(),
             resolver_timeout_secs: 20,
             resolver_fallback: true,
+            media_keys: true,
         }
     }
 }

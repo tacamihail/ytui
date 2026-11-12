@@ -30,6 +30,36 @@ ytui-resolve = { path = "crates/resolve" }
 # Local interface enumeration for the help-menu resolver scan.
 if-addrs = "0.15"
 
+# OS media sessions, so the keyboard media keys and headphone buttons control
+# ytui without the terminal having focus. Souvlaki speaks SMTC on Windows,
+# MPRIS on Linux and Now Playing on macOS.
+[target.'cfg(target_os = "windows")'.dependencies]
+souvlaki = "0.9.3"
+# A hidden window gives SMTC an HWND without borrowing the console's.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The pure-Rust zbus backend avoids adding libdbus headers to install.sh.
+souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
+# WSLg and bare X sessions have no desktop media-key daemon. Grabbing the
+# XF86 keys directly gives those setups working media keys.
+x11rb = { version = "0.13", features = ["xtest"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+souvlaki = "0.9.3"
+# A hidden accessory NSApplication plus a non-blocking event pump; macOS only
+# delivers Now Playing/media-key events to a process with an AppKit run loop.
+objc = "0.2.7"
+core-graphics = "0.25"
+
 # Standalone crate. Without this, cargo walks up the directory tree looking for
 # a workspace root and trips over any Cargo.toml in a parent directory (for
 # example an unrelated or half-finished one in ~/Downloads).

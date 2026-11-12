@@ -13,5 +13,6 @@
   "resolver_token": "",
   "resolver_token_file": "",
   "resolver_timeout_secs": 20,
-  "resolver_fallback": true
+  "resolver_fallback": true,
+  "media_keys": true
 }

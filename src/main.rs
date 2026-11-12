@@ -9,6 +9,7 @@ mod auth;
 mod config;
 mod entry;
 mod listcache;
+mod media;
 mod remote;
 mod ui;
 mod update;
@@ -44,6 +45,9 @@ fn main() {
             "doctor" => std::process::exit(doctor()),
             "discover" => std::process::exit(discover(&args[1..])),
             "update" => std::process::exit(update::cli(&args[1..])),
+            // Internal: the Windows half of the WSL media bridge. Kept out of
+            // the help text because users never start it themselves.
+            "--media-bridge" => std::process::exit(media::serve_bridge()),
             other => {
                 eprintln!("unknown command: {other}\n");
                 help();
@@ -213,6 +217,14 @@ fn doctor() -> i32 {
             println!("✗ audio output: {e}");
             healthy = false;
         }
+    }
+
+    match media::Controls::start() {
+        Some(controls) => println!("✔ media keys: {}", controls.mode()),
+        None => println!(
+            "· media keys: {} (could not register right now)",
+            media::status()
+        ),
     }
 
     match cfg.cookie_args() {
@@ -437,6 +449,10 @@ usage:
   ytui --version          print version
 
 inside the player: ? for the full key map
+
+media keys (play/pause, next, previous) are handled by the OS media session:
+SMTC on Windows, MPRIS on Linux, Now Playing on macOS. In WSL, install the
+native Windows build so ytui.exe can serve the Windows session.
 ",
         env!("CARGO_PKG_VERSION")
     );

@@ -104,6 +104,10 @@ pub enum Cmd {
     /// Replace the queue with `tracks` and start at `index`.
     Play(Vec<Track>, usize),
     Append(Track),
+    /// Resume, or start the current queue entry when stopped.
+    Resume,
+    /// Pause without toggling, so a repeated media-key press stays paused.
+    Pause,
     Toggle,
     Seek(f64),
     SeekAbs(f64),
@@ -712,23 +716,26 @@ impl Engine {
                     // Space on a failed track is the natural "try again".
                     self.fails = 0;
                     self.start(index);
-                } else if let Some(s) = &self.sink {
-                    let paused = !s.is_paused();
-                    s.set_paused(paused);
-                    if paused {
-                        // The end may now be hours away, so a link solved
-                        // before the pause could expire. Let the next tick
-                        // request it again after resuming.
-                        self.prefetched = None;
-                    }
-                    let mut st = self.lock();
-                    if matches!(st.status, Status::Playing | Status::Paused) {
-                        st.status = if paused {
-                            Status::Paused
-                        } else {
-                            Status::Playing
-                        };
-                    }
+                } else {
+                    let paused = self.sink.as_ref().map(|s| !s.is_paused()).unwrap_or(false);
+                    self.set_paused(paused);
+                }
+            }
+            Cmd::Pause => self.set_paused(true),
+            Cmd::Resume => {
+                let (status, queued, index) = {
+                    let st = self.lock();
+                    (st.status, !st.queue.is_empty(), st.index)
+                };
+                if status == Status::Stopped && queued {
+                    // Media keys should start the queue again after `x`.
+                    self.fails = 0;
+                    self.start(index);
+                } else if status == Status::Error {
+                    self.fails = 0;
+                    self.start(index);
+                } else {
+                    self.set_paused(false);
                 }
             }
             Cmd::Seek(delta) => {
@@ -803,6 +810,43 @@ impl Engine {
                 let mut st = self.lock();
                 st.repeat = mode;
             }
+        }
+    }
+
+    /// Pause or resume the open stream. Shared by the keyboard, the player bar
+    /// and the OS media keys, which send explicit Play/Pause rather than a
+    /// toggle (a held media key must not flap the player).
+    fn set_paused(&mut self, paused: bool) {
+        let (status, index) = {
+            let st = self.lock();
+            (st.status, st.index)
+        };
+        if status == Status::Error {
+            // Play on a failed track is the natural "try again"; pausing one
+            // is meaningless.
+            if !paused {
+                self.fails = 0;
+                self.start(index);
+            }
+            return;
+        }
+        let Some(s) = &self.sink else {
+            return;
+        };
+        s.set_paused(paused);
+        if paused {
+            // The end may now be hours away, so a link solved before the
+            // pause could expire. Let the next tick request it again after
+            // resuming.
+            self.prefetched = None;
+        }
+        let mut st = self.lock();
+        if matches!(st.status, Status::Playing | Status::Paused) {
+            st.status = if paused {
+                Status::Paused
+            } else {
+                Status::Playing
+            };
         }
     }
 
