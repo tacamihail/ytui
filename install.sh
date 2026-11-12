@@ -226,27 +226,48 @@ esac
 BIN_SRC=""
 FROM_RELEASE=0
 release_tmp=""
+want=""
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+# SHA256SUMS is tiny, so fetching it first lets a rerun whose binary is already
+# current skip the multi-megabyte asset download entirely.
 if [[ -n "$release_asset" && "$FROM_SOURCE" == 0 ]]; then
+  sums_tmp="$(mktemp)"
+  if curl -fsSL "$RELEASE_BASE/SHA256SUMS" -o "$sums_tmp" 2>/dev/null; then
+    want="$(awk -v a="$release_asset" '$2 == a {print $1; exit}' "$sums_tmp")"
+    [[ -z "$want" ]] && warn "SHA256SUMS has no entry for $release_asset"
+  fi
+  rm -f "$sums_tmp"
+fi
+
+if [[ -n "$want" && -x "$BIN_REAL" && "$(sha256_of "$BIN_REAL")" == "$want" ]]; then
+  FROM_RELEASE=1
+  BIN_SRC="$BIN_REAL"
+  ok "ytui $("$BIN_REAL" --version 2>/dev/null | awk '{print $2}') is already the latest release"
+elif [[ -n "$release_asset" && "$FROM_SOURCE" == 0 ]]; then
   release_tmp="$(mktemp -d)"
   if curl -fsSL "$RELEASE_BASE/$release_asset" -o "$release_tmp/ytui"; then
-    if curl -fsSL "$RELEASE_BASE/SHA256SUMS" -o "$release_tmp/SHA256SUMS" 2>/dev/null; then
-      want="$(awk -v a="$release_asset" '$2 == a {print $1; exit}' "$release_tmp/SHA256SUMS")"
-      if [[ -z "$want" ]]; then
-        warn "SHA256SUMS has no entry for $release_asset"
+    if [[ -z "$want" ]]; then
+      # The checksum fetch above failed (or the asset is not listed); try again
+      # now that the binary is here rather than installing it unverified.
+      if curl -fsSL "$RELEASE_BASE/SHA256SUMS" -o "$release_tmp/SHA256SUMS" 2>/dev/null; then
+        want="$(awk -v a="$release_asset" '$2 == a {print $1; exit}' "$release_tmp/SHA256SUMS")"
+        [[ -z "$want" ]] && warn "SHA256SUMS has no entry for $release_asset"
       else
-        if command -v sha256sum >/dev/null 2>&1; then
-          got="$(sha256sum "$release_tmp/ytui" | awk '{print $1}')"
-        else
-          got="$(shasum -a 256 "$release_tmp/ytui" | awk '{print $1}')"
-        fi
-        if [[ "$want" != "$got" ]]; then
-          warn "the downloaded binary did not match SHA256SUMS, discarding it"
-          rm -rf "$release_tmp"
-          release_tmp=""
-        fi
+        warn "could not verify the download (SHA256SUMS unavailable)"
       fi
-    else
-      warn "could not verify the download (SHA256SUMS unavailable)"
+    fi
+    if [[ -n "$want" && "$want" != "$(sha256_of "$release_tmp/ytui")" ]]; then
+      warn "the downloaded binary did not match SHA256SUMS, discarding it"
+      rm -rf "$release_tmp"
+      release_tmp=""
     fi
     if [[ -n "$release_tmp" ]]; then
       chmod 755 "$release_tmp/ytui" 2>/dev/null || true
@@ -386,10 +407,12 @@ PLIST
     -f "$APP_BUNDLE" >/dev/null 2>&1 || true
 else
   # `install -D` is GNU-only, and the release build has to land next to the
-  # launcher on Linux too.
-  mkdir -p "$(dirname "$BIN_REAL")"
-  cp "$BIN_SRC" "$BIN_REAL"
-  chmod 755 "$BIN_REAL"
+  # launcher on Linux too. A current binary is left untouched.
+  if [[ "$BIN_SRC" != "$BIN_REAL" ]]; then
+    mkdir -p "$(dirname "$BIN_REAL")"
+    cp "$BIN_SRC" "$BIN_REAL"
+    chmod 755 "$BIN_REAL"
+  fi
 fi
 
 # The binary is in place; the download directory is no longer needed.
@@ -461,8 +484,10 @@ else
   # Remember the checkout so `ytui update` can pull and rebuild it later.
   printf '%s\n' "$DIR" > "$CFG_DIR/source"
 fi
+seeded=0
 if [[ ! -f "$CFG_DIR/config.json" ]]; then
   cp "$DIR/config.example.json" "$CFG_DIR/config.json"
+  seeded=1
   ok "seeded config -> $CFG_DIR/config.json"
 else
   ok "config already present"
@@ -471,8 +496,12 @@ fi
 # --- resolver discovery ------------------------------------------------------
 # Optional: a resolver on the LAN/tailnet removes the yt-dlp/deno spike from
 # this machine. Keep it short (10 s) and never overwrite a resolver the user
-# already configured, including a public one with a token.
-if [[ "${YTUI_SKIP_DISCOVER:-0}" != "1" ]] \
+# already configured, including a public one with a token. Only a fresh install
+# probes; set YTUI_DISCOVER=1 to run it on a rerun as well.
+scan=0
+[[ "$seeded" == 1 ]] && scan=1
+[[ "${YTUI_DISCOVER:-0}" == "1" ]] && scan=1
+if [[ "${YTUI_SKIP_DISCOVER:-0}" != "1" && "$scan" == 1 ]] \
    && ! grep -Eq '"resolver_url"[[:space:]]*:[[:space:]]*"[^"]+"' "$CFG_DIR/config.json" 2>/dev/null; then
   info "looking for a resolver on the local network (optional, up to 10s)"
   "$BIN_REAL" discover --save --timeout 10 --quiet || true

@@ -8,12 +8,19 @@
 #
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1
 #   .\install.ps1 -SkipDiscover     # do not scan the LAN for a resolver
+#   .\install.ps1 -Discover         # scan even when a config already exists
 #   .\install.ps1 -FromSource       # ignore the release, build the checkout
+#
+# Reruns are cheap: when the installed ytui.exe already matches the release
+# checksum only SHA256SUMS is fetched, and the LAN resolver probe only runs on a
+# fresh install. Downloads use curl.exe when it is present (Windows 10+), which
+# is considerably faster than Invoke-WebRequest under Windows PowerShell 5.1.
 #
 # Windows PowerShell 5.1 and PowerShell 7+ are both supported.
 [CmdletBinding()]
 param(
     [switch]$SkipDiscover,
+    [switch]$Discover,
     [switch]$FromSource
 )
 
@@ -25,6 +32,17 @@ try {
         [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch {
     # PowerShell 7 ignores this and uses the system default.
+}
+
+# curl.exe ships with Windows 10 1803+ and downloads far faster than
+# Invoke-WebRequest does under Windows PowerShell 5.1. An old system without it
+# falls back to Invoke-WebRequest.
+$Curl = $null
+try {
+    $found = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($found) { $Curl = $found.Source }
+} catch {
+    # Windows PowerShell 5.1 aliases curl to Invoke-WebRequest, hence curl.exe.
 }
 
 $Dir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -56,7 +74,14 @@ function Have([string]$name) {
 
 function Download([string]$url, [string]$dst) {
     Info "downloading $url"
-    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $dst
+    if ($script:Curl) {
+        & $script:Curl -fsSL --retry 2 --retry-delay 1 --connect-timeout 20 -o $dst $url
+        if ($LASTEXITCODE -ne 0) {
+            throw "curl exited with $LASTEXITCODE while downloading $url"
+        }
+    } else {
+        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $dst
+    }
 }
 
 # Prefer USERPROFILE: the HOME a Git Bash session exports is a POSIX path that
@@ -137,9 +162,28 @@ $Asset = if ($Arch -eq 'aarch64') {
     'ytui-x86_64-pc-windows-msvc.exe'
 }
 
-function Get-ReleaseBinary {
-    $tmp = Join-Path $env:TEMP "ytui-$PID.exe"
+# SHA256SUMS is tiny, so fetching it first lets a rerun whose binary is already
+# current skip the ~3.5 MB asset download entirely.
+function Get-ReleaseChecksum {
     $sums = Join-Path $env:TEMP "ytui-sums-$PID.txt"
+    try {
+        Download "$ReleaseBase/SHA256SUMS" $sums
+        $line = Select-String -Path $sums -Pattern "\s$([regex]::Escape($Asset))$" | Select-Object -First 1
+        if (-not $line) {
+            Warn "SHA256SUMS has no entry for $Asset"
+            return $null
+        }
+        return ($line.Line -split '\s+')[0].ToLowerInvariant()
+    } catch {
+        # Most likely there is no release at all: a fork or an unreleased commit.
+        return $null
+    } finally {
+        Remove-Item $sums -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-ReleaseBinary([string]$Expected) {
+    $tmp = Join-Path $env:TEMP "ytui-$PID.exe"
     try {
         Download "$ReleaseBase/$Asset" $tmp
     } catch {
@@ -147,26 +191,22 @@ function Get-ReleaseBinary {
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
         return $null
     }
-    try {
-        Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseBase/SHA256SUMS" -OutFile $sums
-        $line = Select-String -Path $sums -Pattern "\s$([regex]::Escape($Asset))$" | Select-Object -First 1
-        if ($line) {
-            $want = ($line.Line -split '\s+')[0].ToLowerInvariant()
-            $got = (Get-FileHash -Path $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($want -ne $got) {
-                Warn 'the downloaded ytui.exe did not match SHA256SUMS, discarding it'
-                Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-                return $null
-            }
-            Ok "checksum $($want.Substring(0, 12))… verified"
-        } else {
-            Warn "SHA256SUMS has no entry for $Asset"
-        }
-    } catch {
-        Warn 'could not verify the download (SHA256SUMS unavailable)'
-    } finally {
-        Remove-Item $sums -Force -ErrorAction SilentlyContinue
+
+    if (-not $Expected) {
+        $Expected = Get-ReleaseChecksum
     }
+    if ($Expected) {
+        $got = (Get-FileHash -Path $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($Expected -ne $got) {
+            Warn 'the downloaded ytui.exe did not match SHA256SUMS, discarding it'
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+            return $null
+        }
+        Ok "checksum $($Expected.Substring(0, 12))… verified"
+    } else {
+        Warn 'could not verify the download (SHA256SUMS unavailable)'
+    }
+
     # A binary that cannot print its version would not run here either.
     try {
         $v = (& $tmp --version 2>$null)
@@ -185,9 +225,22 @@ function Get-ReleaseBinary {
 }
 
 $prebuilt = $null
+$current = $false
 if (-not $FromSource) {
-    $prebuilt = Get-ReleaseBinary
+    $want = Get-ReleaseChecksum
+    if ($want -and (Test-Path $Installed)) {
+        $have = (Get-FileHash -Path $Installed -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($have -eq $want) {
+            $current = $true
+            $v = (& $Installed --version | Select-Object -First 1)
+            Ok "$v is already the latest release"
+        }
+    }
+    if (-not $current) {
+        $prebuilt = Get-ReleaseBinary $want
+    }
 }
+$ReleaseInstall = [bool]($prebuilt -or $current)
 if ($prebuilt) {
     New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
     try {
@@ -205,7 +258,7 @@ if ($prebuilt) {
 # link.exe, which Rust finds through Visual Studio rather than PATH. A missing
 # VC toolset is the most common first-build failure, so point at the fix before
 # spending minutes on a build that cannot link.
-if (-not $prebuilt) {
+if (-not $ReleaseInstall) {
     $MinMajor = 1
     $MinMinor = 83
 
@@ -305,7 +358,8 @@ if (-not $prebuilt) {
 
 # --- config ------------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null
-if ($prebuilt) {
+$seeded = $false
+if ($ReleaseInstall) {
     # A release install updates by downloading the next release, so a checkout
     # from an earlier source install must not steer `ytui update` back to it.
     Remove-Item (Join-Path $CfgDir 'source') -Force -ErrorAction SilentlyContinue
@@ -316,6 +370,7 @@ if ($prebuilt) {
 $cfg = Join-Path $CfgDir 'config.json'
 if (-not (Test-Path $cfg)) {
     Copy-Item (Join-Path $Dir 'config.example.json') $cfg
+    $seeded = $true
     Ok "seeded config -> $cfg"
 } else {
     Ok 'config already present'
@@ -324,8 +379,9 @@ if (-not (Test-Path $cfg)) {
 # --- resolver discovery ------------------------------------------------------
 # Optional: a resolver on the LAN/tailnet removes the yt-dlp/deno spike from
 # this machine. Keep it short (10 s) and never overwrite a resolver the user
-# already configured, including a public one with a token.
-if (-not $SkipDiscover -and $env:YTUI_SKIP_DISCOVER -ne '1') {
+# already configured, including a public one with a token. Only a fresh install
+# probes: a rerun should not spend ten seconds on it again (-Discover forces it).
+if (-not $SkipDiscover -and ($seeded -or $Discover) -and $env:YTUI_SKIP_DISCOVER -ne '1') {
     $configured = $false
     try {
         $json = Get-Content -Raw -Path $cfg | ConvertFrom-Json

@@ -241,8 +241,11 @@ instead of rebuilding. `install.sh --from-source` (or
 `YTUI_FROM_SOURCE=1`) and `install.ps1 -FromSource` skip the download.
 
 When no resolver is configured, the installer also scans the local network for
-up to 10 seconds and saves a tokenless one if it finds it. Set
-`YTUI_SKIP_DISCOVER=1` (or pass `-SkipDiscover` on Windows) to skip that scan.
+up to 10 seconds on a fresh install and saves a tokenless one if it finds it.
+Reruns skip that scan and only fetch `SHA256SUMS` when the installed binary is
+already the latest release, so reinstalling is quick. Set
+`YTUI_SKIP_DISCOVER=1` (or pass `-SkipDiscover` on Windows) to skip the scan, or
+`YTUI_DISCOVER=1` (or `-Discover` on Windows) to run it again.
 
 To update later:
 
