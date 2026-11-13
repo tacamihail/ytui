@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use ytui_resolve::{Candidate, Resolved};
@@ -95,7 +95,7 @@ fn run() -> Result<(), String> {
         token,
         allow_private: args.allow_private,
         cookies: args.cookies,
-        cache: Mutex::new(Cache::new(args.cache_cap, args.cache_ttl)),
+        cache: Mutex::new(Cache::new(args.cache_cap, args.cache_ttl, args.cache_file)),
         rate: Mutex::new(RateLimit::new(RATE_MAX, RATE_WINDOW)),
         tools: Mutex::new(None),
         speed: Mutex::new(Speed::default()),
@@ -149,6 +149,10 @@ struct Args {
     cookies: Option<PathBuf>,
     cache_ttl: Duration,
     cache_cap: usize,
+    /// Where resolved URLs are kept between runs. On by default, because the
+    /// resolver restarts on every auto-update; `--no-cache-file` keeps the
+    /// cache in memory only.
+    cache_file: Option<PathBuf>,
     max_concurrency: usize,
     allow_private: bool,
     gen_token: bool,
@@ -168,6 +172,7 @@ impl Args {
             cookies: None,
             cache_ttl: DEFAULT_TTL,
             cache_cap: DEFAULT_CACHE_CAP,
+            cache_file: Some(default_cache_path()),
             max_concurrency: DEFAULT_CONCURRENCY,
             allow_private: false,
             gen_token: false,
@@ -200,6 +205,8 @@ impl Args {
                         .parse()
                         .map_err(|_| "--cache-cap must be a number")?;
                 }
+                "--cache-file" => a.cache_file = Some(PathBuf::from(value("--cache-file")?)),
+                "--no-cache-file" => a.cache_file = None,
                 "--max-concurrency" => {
                     a.max_concurrency = value("--max-concurrency")?
                         .parse::<usize>()
@@ -296,6 +303,14 @@ fn service_args(args: &Args, token_path: Option<PathBuf>) -> Vec<String> {
         out.push("--cache-cap".into());
         out.push(args.cache_cap.to_string());
     }
+    match &args.cache_file {
+        None => out.push("--no-cache-file".into()),
+        Some(p) if *p != default_cache_path() => {
+            out.push("--cache-file".into());
+            out.push(p.display().to_string());
+        }
+        Some(_) => {}
+    }
     if args.max_concurrency != DEFAULT_CONCURRENCY {
         out.push("--max-concurrency".into());
         out.push(args.max_concurrency.to_string());
@@ -328,6 +343,9 @@ options:
   --cookies PATH          pass cookies.txt to yt-dlp (age-restricted tracks)
   --cache-ttl-secs N      how long resolved URLs are reused (default 14400)
   --cache-cap N           cached videos kept (default 512)
+  --cache-file PATH       keep the cache across restarts (default
+                          ~/.cache/ytui-resolver/urls.json)
+  --no-cache-file         keep resolved URLs in memory only
   --max-concurrency N     simultaneous yt-dlp runs (default 2)
   --auto-update           check github every 4 hours and reinstall (default)
   --no-auto-update        do not update the server on its own
@@ -499,7 +517,7 @@ fn resolve_request(request: Request, url: &str, ctx: &Ctx) {
     if !refresh {
         let hit = ctx.cache.lock().unwrap_or_else(|e| e.into_inner()).get(&id);
         if let Some(track) = hit {
-            send_json(request, 200, resolve_json(&track, 0));
+            send_json(request, 200, resolve_json(&track, 0, true));
             return;
         }
     }
@@ -528,7 +546,7 @@ fn resolve_request(request: Request, url: &str, ctx: &Ctx) {
                 "resolve {id} ok ({ms} ms, {} candidates)",
                 track.candidates.len()
             );
-            send_json(request, 200, resolve_json(&track, ms));
+            send_json(request, 200, resolve_json(&track, ms, false));
         }
         Err(e) => {
             eprintln!("resolve {id} failed: {e}");
@@ -649,7 +667,7 @@ fn version_of(bin: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn resolve_json(track: &Resolved, ms: u64) -> String {
+fn resolve_json(track: &Resolved, ms: u64, cached: bool) -> String {
     #[derive(Serialize)]
     struct Body<'a> {
         v: u8,
@@ -658,6 +676,9 @@ fn resolve_json(track: &Resolved, ms: u64) -> String {
         channel: &'a str,
         duration: f64,
         ms: u64,
+        /// True when this answer came from the cache; the player shows it as a
+        /// marker in the footer instead of the cold-resolve time.
+        cached: bool,
         candidates: &'a [Candidate],
     }
     serde_json::to_string(&Body {
@@ -667,6 +688,7 @@ fn resolve_json(track: &Resolved, ms: u64) -> String {
         channel: &track.channel,
         duration: track.duration,
         ms,
+        cached,
         candidates: &track.candidates,
     })
     .unwrap_or_else(|_| r#"{"error":"cannot serialize response"}"#.into())
@@ -695,15 +717,104 @@ struct Cache {
     entries: HashMap<String, (Instant, Resolved)>,
     cap: usize,
     ttl: Duration,
+    /// Where the cache is written between runs; `None` keeps it in memory.
+    file: Option<PathBuf>,
+}
+
+/// One cache entry as it is kept on disk. `Instant` cannot be serialized, so
+/// the wall-clock time is stored instead and turned back into an age on load;
+/// that keeps the TTL honest across a restart.
+#[derive(Serialize, Deserialize)]
+struct SavedEntry {
+    id: String,
+    /// Unix seconds when the resolve happened.
+    at: u64,
+    track: Resolved,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedCache {
+    v: u8,
+    entries: Vec<SavedEntry>,
 }
 
 impl Cache {
-    fn new(cap: usize, ttl: Duration) -> Self {
-        Self {
+    fn new(cap: usize, ttl: Duration, file: Option<PathBuf>) -> Self {
+        let mut cache = Self {
             entries: HashMap::new(),
             cap: cap.max(1),
             ttl,
+            file,
+        };
+        cache.load();
+        cache
+    }
+
+    /// Reads what an earlier run left behind. A missing or corrupt file just
+    /// starts the cache empty: it is an accelerator, never a source of truth.
+    fn load(&mut self) {
+        let Some(path) = &self.file else { return };
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(saved) = serde_json::from_str::<SavedCache>(&text) else {
+            eprintln!("cache: ignoring unreadable {}", path.display());
+            return;
+        };
+        if saved.v != 1 {
+            return;
         }
+        let now = unix_now();
+        let mut kept = 0;
+        for entry in saved.entries {
+            let Some(age) = now.checked_sub(entry.at) else {
+                continue;
+            };
+            if Duration::from_secs(age) > self.ttl || kept >= self.cap {
+                continue;
+            }
+            kept += 1;
+            self.entries
+                .insert(entry.id, (Instant::now() - Duration::from_secs(age), entry.track));
+        }
+        if kept > 0 {
+            eprintln!("cache: restored {kept} entries from {}", path.display());
+        }
+    }
+
+    /// Writes the live entries back. Best-effort and only on a cold resolve, so
+    /// a full file (~750 KiB at the default cap) never sits on the hot path.
+    fn save(&self) {
+        let Some(path) = &self.file else { return };
+        let now = unix_now();
+        let mut entries: Vec<SavedEntry> = self
+            .entries
+            .iter()
+            .map(|(id, (at, track))| SavedEntry {
+                id: id.clone(),
+                at: now.saturating_sub(at.elapsed().as_secs()),
+                track: track.clone(),
+            })
+            .collect();
+        entries.sort_by_key(|e| std::cmp::Reverse(e.at));
+        let Ok(text) = serde_json::to_string(&SavedCache { v: 1, entries }) else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, text).is_err() {
+            return;
+        }
+        // The file says what has been played on this machine; keep it to the
+        // owner where the platform allows it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+        }
+        let _ = fs::rename(&tmp, path);
     }
 
     fn get(&mut self, id: &str) -> Option<Resolved> {
@@ -731,7 +842,24 @@ impl Cache {
             }
         }
         self.entries.insert(id.to_string(), (Instant::now(), track));
+        self.save();
     }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// `~/.cache/ytui-resolver/urls.json`: resolved links expire in hours, so the
+/// file is also the thing that makes a resolver restart cheap.
+fn default_cache_path() -> PathBuf {
+    home()
+        .join(".cache")
+        .join("ytui-resolver")
+        .join("urls.json")
 }
 
 // ---------------- resolve speed ----------------
@@ -1001,7 +1129,7 @@ mod tests {
 
     #[test]
     fn cache_expires_and_evicts() {
-        let mut cache = Cache::new(1, Duration::from_millis(20));
+        let mut cache = Cache::new(1, Duration::from_millis(20), None);
         let track = Resolved {
             id: "a".into(),
             title: "t".into(),
@@ -1017,6 +1145,78 @@ mod tests {
         assert!(cache.get("b").is_some());
         thread::sleep(Duration::from_millis(30));
         assert!(cache.get("b").is_none());
+    }
+
+    fn track(id: &str) -> Resolved {
+        Resolved {
+            id: id.into(),
+            title: format!("title {id}"),
+            channel: "c".into(),
+            duration: 1.0,
+            candidates: Vec::new(),
+            cached: false,
+        }
+    }
+
+    fn cache_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ytui-cache-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The resolver restarts on every auto-update; the cache has to survive it
+    /// or every restart pays for a cold resolve.
+    #[test]
+    fn a_restart_keeps_the_cache() {
+        let file = cache_dir("restart").join("urls.json");
+        {
+            let mut cache = Cache::new(8, Duration::from_secs(3600), Some(file.clone()));
+            cache.put("a", track("a"));
+        }
+        let mut cache = Cache::new(8, Duration::from_secs(3600), Some(file));
+        assert_eq!(cache.get("a").map(|t| t.id), Some("a".to_string()));
+    }
+
+    #[test]
+    fn stale_entries_are_dropped_on_load() {
+        let file = cache_dir("stale").join("urls.json");
+        let now = unix_now();
+        let saved = SavedCache {
+            v: 1,
+            entries: vec![
+                SavedEntry {
+                    id: "old".into(),
+                    at: now.saturating_sub(1000),
+                    track: track("old"),
+                },
+                SavedEntry {
+                    id: "new".into(),
+                    at: now,
+                    track: track("new"),
+                },
+            ],
+        };
+        fs::write(&file, serde_json::to_string(&saved).unwrap()).unwrap();
+        let mut cache = Cache::new(8, Duration::from_secs(60), Some(file));
+        assert!(cache.get("old").is_none());
+        assert!(cache.get("new").is_some());
+    }
+
+    #[test]
+    fn an_unreadable_cache_file_is_not_fatal() {
+        let file = cache_dir("corrupt").join("urls.json");
+        fs::write(&file, "{not json").unwrap();
+        let mut cache = Cache::new(8, Duration::from_secs(60), Some(file));
+        assert!(cache.get("anything").is_none());
+    }
+
+    #[test]
+    fn a_cache_hit_is_marked_in_the_response() {
+        let body = resolve_json(&track("a"), 0, true);
+        assert!(body.contains(r#""cached":true"#), "{body}");
+        let body = resolve_json(&track("a"), 120, false);
+        assert!(body.contains(r#""cached":false"#), "{body}");
     }
 
     #[test]

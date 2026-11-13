@@ -108,6 +108,7 @@ Options:
 | `--cookies PATH` | none | cookies for age-restricted/members-only tracks |
 | `--cache-ttl-secs` | `14400` | how long a resolved URL is reused |
 | `--cache-cap` | `512` | cached videos |
+| `--cache-file` | `~/.cache/ytui-resolver/urls.json` | where the cache survives restarts |
 | `--max-concurrency` | `2` | simultaneous yt-dlp runs |
 | `--auto-update` | on | check github every 4 hours and reinstall |
 | `--no-auto-update` | - | keep the running version |
@@ -330,6 +331,16 @@ GET /v1/resolve?url=<watch-url>[&refresh=1]
 
 - 4 h TTL, 512 entries. googlevideo links normally stay valid for about 6 h.
 - `refresh=1` skips the cache but still stores the new answer.
+- An answer served from the cache carries `"cached": true`; the client shows it
+  as a marker in the footer, so a hit is visible without guessing from the
+  timing. Cold answers omit nothing and carry `false`.
+- The cache is written to `~/.cache/ytui-resolver/urls.json` (0600) and read
+  back at startup, so the four-hourly auto-update does not cost a cold resolve
+  for the first track after it. `--cache-file PATH` moves it, `--no-cache-file`
+  keeps the cache in memory only. Expired entries are dropped on load, and the
+  file is rewritten only when a resolve misses, never on the hot path.
+- Because the file lists the video ids this resolver has served, treat it as
+  playback history: it is readable by the account the service runs as.
 - At most `--max-concurrency` yt-dlp processes run at once; further requests
   wait in the socket queue.
 - 60 requests per minute per peer IP, including cache hits. Health is exempt.
