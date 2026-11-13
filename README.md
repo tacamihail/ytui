@@ -35,7 +35,9 @@ running while you listen.
 ytui only downloads an audio stream, so the video resolution on YouTube does
 not matter. It asks for AAC (`itag` 141, then 140, then 139) and probes each
 URL with a 1 KiB request, because YouTube sometimes returns 403 for one of
-them.
+them. The same itag can appear more than once, once per YouTube player client:
+their URLs are not equally usable, so the first copy that answers wins. The
+`visionos` client goes first because its URLs need no PO token.
 
 The output stream is opened at the track's own sample rate. YouTube AAC is
 44.1 kHz, so on a 44.1 kHz device nothing is resampled. If the device refuses
@@ -838,7 +840,9 @@ Windows:
 
 Tracks that sound muffled only had 48 kbps HE-AAC (`itag 139`). Symphonia
 decodes the AAC core but not the SBR band, so the highs are missing. ytui
-prefers AAC-LC when YouTube offers it.
+prefers AAC-LC when YouTube offers it, and tries every player client's URL for
+that itag before accepting 139: the `tv` client's 128 kbps link is the one that
+usually answers with 403.
 
 ## Uninstall
 

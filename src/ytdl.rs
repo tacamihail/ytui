@@ -10,7 +10,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::entry::Entry;
@@ -331,7 +331,16 @@ fn local_stream(
 }
 
 /// Probes the candidates best-first and returns the first one the CDN serves.
+///
+/// The list can hold several copies of one itag, one per player client (see
+/// [`ytui_resolve::EXTRACTOR_ARGS`]); only one of them may answer, so probing
+/// stops after enough candidates rather than after one per bitrate. The budget
+/// keeps a string of connection timeouts from holding the load far longer than
+/// the four probes this used to try.
 fn playable(resolved: ytui_resolve::Resolved, cancel: Option<&AtomicBool>) -> Result<Stream, String> {
+    const MAX_PROBES: usize = 8;
+    const PROBE_BUDGET: Duration = Duration::from_secs(20);
+    let started = Instant::now();
     let mut stream = Stream {
         url: String::new(),
         title: resolved.title,
@@ -340,7 +349,7 @@ fn playable(resolved: ytui_resolve::Resolved, cancel: Option<&AtomicBool>) -> Re
         cached: resolved.cached,
     };
     let mut last = String::from("no candidate answered");
-    for candidate in resolved.candidates.iter().take(4) {
+    for candidate in resolved.candidates.iter().take(MAX_PROBES) {
         if cancelled(cancel) {
             return Err(CANCELLED.into());
         }
@@ -350,6 +359,9 @@ fn playable(resolved: ytui_resolve::Resolved, cancel: Option<&AtomicBool>) -> Re
                 return Ok(stream);
             }
             Err(e) => last = e,
+        }
+        if started.elapsed() >= PROBE_BUDGET {
+            break;
         }
     }
     Err(format!("YouTube refused every AAC stream ({last})"))

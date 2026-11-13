@@ -312,7 +312,12 @@ GET /v1/resolve?url=<watch-url>[&refresh=1]
   id and rebuilds a canonical watch URL. Extra query parameters are dropped,
   so nothing from the wire reaches yt-dlp verbatim.
 - Candidates are ordered 141 (256 kbps) -> 140 (128 kbps) -> 139 (48 kbps
-  HE-AAC), higher bitrate first.
+  HE-AAC), higher bitrate first. An itag can be listed more than once because
+  yt-dlp is asked for `player_client=visionos,default;formats=duplicate`: each
+  player client's URL for that itag is a separate candidate, and the client on
+  the other end probes them in order, since one client's URL can answer while
+  another's returns 403. `visionos` is first for that reason, and DASH/HLS
+  manifest variants are dropped because they are not plain files.
 - `auth` says whether this particular peer would need a token for
   `/v1/resolve`. A private peer of a server started with `--allow-private`
   sees `false`.

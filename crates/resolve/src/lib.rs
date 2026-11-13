@@ -318,6 +318,17 @@ pub fn resolve(url: &str, cookies: Option<(&str, &str)>) -> Result<Resolved, Str
     resolve_cancellable(url, cookies, None)
 }
 
+/// The `youtube:` extractor arguments every resolve uses.
+///
+/// The itag is not the whole story: every player client hands out its own URL
+/// for the same itag, and those URLs are not equally usable. The `tv` client's
+/// 128 kbps URL is a plain HTTP file that Google Video refuses with 403 (its
+/// formats want a PO token), while `visionos` serves the same 128 kbps AAC at a
+/// URL that answers. So `visionos` goes first, and `formats=duplicate` keeps
+/// the other clients' URLs as extra candidates: a refused URL then costs one
+/// probe instead of a drop to 48 kbps HE-AAC, which symphonia renders muffled.
+pub const EXTRACTOR_ARGS: &str = "youtube:player_client=visionos,default;formats=duplicate";
+
 /// Like [`resolve`], but kills the yt-dlp child as soon as `cancel` is raised
 /// and returns [`CANCELLED`]. Used by the player's foreground load, where a
 /// newer selection must not wait for the abandoned track.
@@ -332,6 +343,7 @@ pub fn resolve_cancellable(
     let had_session = jar_session_state(cookies);
     let mut c = command();
     c.args(["--no-warnings", "-j", url]);
+    c.args(["--extractor-args", EXTRACTOR_ARGS]);
     if let Some((flag, value)) = cookies {
         c.arg(flag).arg(value);
     }
@@ -403,6 +415,16 @@ fn resolved_from_json(info: &serde_json::Value) -> Result<Resolved, String> {
         let Some(url) = f.get("url").and_then(|v| v.as_str()) else {
             continue;
         };
+        // `formats=duplicate` also lists the same itag as a DASH/HLS stream.
+        // Those are manifests for yt-dlp's segment downloader, not files the
+        // decoder can open, so only plain HTTP entries are candidates.
+        let proto = f
+            .get("protocol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("https");
+        if proto != "https" && proto != "http" {
+            continue;
+        }
         let ext = f.get("ext").and_then(|v| v.as_str()).unwrap_or("");
         let codec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("");
         if ext != "m4a" && !codec.starts_with("mp4a") {
@@ -414,8 +436,12 @@ fn resolved_from_json(info: &serde_json::Value) -> Result<Resolved, String> {
             .unwrap_or("")
             .to_string();
         // Lower rank = preferred. 141 is 256 kbps (Music Premium), 140 is
-        // 128 kbps, 139 is 48 kbps HE-AAC.
-        let rank = match itag.as_str() {
+        // 128 kbps, 139 is 48 kbps HE-AAC. Duplicates of one itag carry a
+        // numeric suffix ("140-1") or a DRC tag ("140-drc"), so rank the part
+        // before the first dash; matching the whole id put a second client's
+        // 128 kbps copy below 48 kbps HE-AAC.
+        let base = itag.split('-').next().unwrap_or("");
+        let rank = match base {
             "141" => 0,
             "140" => 1,
             "139" => 2,
@@ -579,7 +605,14 @@ mod tests {
             "ext": ext,
             "acodec": codec,
             "abr": abr,
+            "protocol": "https",
         })
+    }
+
+    fn format_proto(id: &str, abr: f64, proto: &str) -> serde_json::Value {
+        let mut f = format(id, "m4a", "mp4a.40.2", abr);
+        f["protocol"] = serde_json::json!(proto);
+        f
     }
 
     #[test]
@@ -612,6 +645,27 @@ mod tests {
             "formats": [format("140", "m4a", "mp4a.40.2", 128.0)],
         });
         assert_eq!(resolved_from_json(&info).unwrap().channel, "Uploader");
+    }
+
+    /// `formats=duplicate` repeats an itag once per player client. Every copy
+    /// must rank with its itag, not below 139, and the DASH manifest copies
+    /// must be dropped: they are not files the decoder can open.
+    #[test]
+    fn duplicate_client_urls_rank_by_itag_and_skip_manifests() {
+        let info = serde_json::json!({
+            "formats": [
+                format_proto("139", 48.0, "http_dash_segments"),
+                format("139", "m4a", "mp4a.40.5", 48.0),
+                format_proto("140-dashy-0", 129.0, "http_dash_segments"),
+                format_proto("140-dashy-1", 129.0, "http_dash_segments"),
+                format("140-0", "m4a", "mp4a.40.2", 129.0),
+                format("140-1", "m4a", "mp4a.40.2", 129.0),
+                format_proto("140-drc", 128.0, "https"),
+            ],
+        });
+        let r = resolved_from_json(&info).unwrap();
+        let ids: Vec<_> = r.candidates.iter().map(|c| c.itag.as_str()).collect();
+        assert_eq!(ids, ["140-0", "140-1", "140-drc", "139"]);
     }
 
     #[test]
