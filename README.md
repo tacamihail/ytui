@@ -48,13 +48,21 @@ every two seconds: connecting Bluetooth headphones mid-song reopens the stream
 on them and carries the unplayed seconds over, instead of leaving the music on
 the speakers the stream was opened on.
 
-Working out a stream URL takes `yt-dlp` about four seconds, which used to be
-dead air between songs. The next track is resolved in the last ten seconds of
-the current one and only its URL is kept (a few hundred bytes, no audio), so
-the handover costs about 0.2 s without holding links for songs that are still
-far away. A resolve that hangs is killed after 30 seconds, and a failed one is
-retried once: otherwise a transient error would leave the next track to be
-resolved at the handover, which is heard as a three-second pause.
+Working out a stream URL takes `yt-dlp` about four seconds locally and up to
+twenty on a cold resolver. The next track is requested once the current one is
+within twice the measured resolve time (never less than twenty seconds), and
+only its URL is kept (a few hundred bytes, no audio), so the handover costs
+about 0.2 s without holding links for songs that are still far away. A resolve
+that hangs is killed after 30 seconds, and a failed one is retried once:
+otherwise a transient error would leave the next track to be resolved at the
+handover, which is heard as a pause.
+
+When a track ends in seven seconds or more of silence, ytui moves to the next
+one at the start of that silence instead of playing it out. Finding it costs no
+audio buffer: a short-lived second decoder reads the last twelve seconds once,
+keeps one RMS number per 100 ms (under half a kilobyte) and throws the samples
+away. The verdict needs both an absolute floor (−45 dBFS) and a relative gate,
+so a quiet song keeps its ending.
 
 The audio is pulled in 256 KiB HTTP ranges by a background thread that keeps
 about a minute of encoded sound ready ahead of the decoder. The decoded ring is
@@ -721,17 +729,24 @@ that index, memory is a roughly 1 MB audio ring, up to six 256 KiB range chunks
 (four queued ahead of the decoder and two in flight, about 1.5 MB), the packet
 being decoded and up to 16 resolved URLs (about 25 KiB).
 
-Only the next track's URL is resolved, and only once the current one has about
-ten seconds left. Resolving runs at `nice 10`, so it does not compete with the
-decoder. A track you choose yourself is resolved immediately and never waits
-behind that queue. On a machine where audio still crackles during playback,
-`YTUI_PREFETCH=0 ytui` disables background resolution.
+Only the next track's URL is resolved, and only once the current one is within
+twice the measured resolve time (at least twenty seconds) of its end. Resolving
+runs at `nice 10`, so it does not compete with the decoder. A track you choose
+yourself is resolved immediately and never waits behind that queue. On a machine
+where audio still crackles during playback, `YTUI_PREFETCH=0 ytui` disables
+background resolution.
+
+A tail scan borrows a second decoder for a moment at the end of a track: about
+0.4 MB of transient RSS, and under 1 KiB of RMS levels. It does not change the
+steady-state numbers above.
 
 These are ytui's own numbers. Resolving a track also runs `yt-dlp`, which
 starts deno to solve YouTube's JavaScript challenge: about 110 MB plus 300 MB
 for two or three seconds, once per track. That is the spike a system monitor
 shows when a track is resolved, and it belongs to those processes, not to the
-player. Skipping to the track that is already being resolved waits for that
+player; on Windows the yt-dlp child alone measures about 70 MB of working set
+before deno starts, which is not comparable to the `VmRSS` figures above.
+Skipping to the track that is already being resolved waits for that
 resolution instead of starting a second one.
 
 The [remote resolver](#remote-resolver) exists for that spike: with

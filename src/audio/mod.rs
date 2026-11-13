@@ -6,6 +6,7 @@ mod decode;
 mod http;
 mod resample;
 mod sink;
+mod tail;
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -273,6 +274,18 @@ struct Engine {
     /// Bumped for every foreground load, so a late answer for an older
     /// selection can be recognised and dropped.
     load_seq: u64,
+    /// How long recent cold resolves took; drives the prefetch lead.
+    resolve_ms: ResolveTimes,
+    /// The tail scan, while it is running.
+    tail: Option<TailScan>,
+    /// Where this track's trailing silence starts, once known.
+    tail_cut: Option<f64>,
+    /// URL and seek generation of the last scan, so a track with no quiet
+    /// tail is not scanned again on every tick.
+    tail_done: Option<(String, u64)>,
+    /// Bumped whenever the playhead jumps, so a verdict is not reused after a
+    /// seek to a different position.
+    seek_gen: u64,
     tmp: Vec<f32>,
     rng: u64,
 }
@@ -283,10 +296,43 @@ struct Engine {
 /// immediately instead of queueing behind this one.
 struct Load {
     seq: u64,
+    /// When the resolve started, for the footer and the adaptive lead.
+    started: Instant,
     /// Raised when a newer selection takes over. The worker kills the yt-dlp
     /// child (and its deno) instead of running to completion.
     token: Arc<AtomicBool>,
     rx: Receiver<Result<ytdl::Stream, String>>,
+}
+
+/// A tail scan on its own thread; the answer is one number, or nothing.
+struct TailScan {
+    token: Arc<AtomicBool>,
+    rx: Receiver<Option<f64>>,
+}
+
+/// Recent cold resolves, so the next track can be requested early enough for
+/// the machine it is resolved on.
+#[derive(Default)]
+struct ResolveTimes {
+    samples: VecDeque<Duration>,
+}
+
+impl ResolveTimes {
+    fn record(&mut self, took: Duration) {
+        if self.samples.len() == RESOLVE_SAMPLES {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(took);
+    }
+
+    fn median(&self) -> Option<Duration> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let mut sorted: Vec<Duration> = self.samples.iter().copied().collect();
+        sorted.sort();
+        Some(sorted[sorted.len() / 2])
+    }
 }
 
 /// Works out stream URLs in the background, one at a time, and keeps a small
@@ -305,10 +351,15 @@ struct Prefetch {
 
 /// Resolved links kept for replays. Sixteen googlevideo URLs are ~25 KiB.
 const URL_CACHE_MAX: usize = 16;
-/// Resolve the next track only in the last seconds of the current one. yt-dlp
-/// needs about four seconds, so ten leaves a margin for the handover without
-/// holding a link (or running yt-dlp) for the whole song.
-const PREFETCH_WINDOW_SECS: f64 = 10.0;
+/// Start resolving the next track this long before the current one ends at the
+/// least. A cold resolver takes about twenty seconds; a warm one a fraction of
+/// that, and this floor is what keeps the handover free of dead air.
+const RESOLVE_LEAD_MIN_SECS: f64 = 20.0;
+/// Extra room on top of twice the measured resolve time: enough for the
+/// handover itself, and for the next track's own start-up.
+const RESOLVE_LEAD_MARGIN_SECS: f64 = 5.0;
+/// Resolve times kept for the median.
+const RESOLVE_SAMPLES: usize = 8;
 /// Stop using a link this long before YouTube's own expiry, so there is time
 /// to re-resolve when a track is played from an old cache entry.
 const URL_EXPIRY_MARGIN_SECS: u64 = 5 * 60;
@@ -582,6 +633,11 @@ impl Engine {
             prefetched: None,
             load: None,
             load_seq: 0,
+            resolve_ms: ResolveTimes::default(),
+            tail: None,
+            tail_cut: None,
+            tail_done: None,
+            seek_gen: 0,
             tmp: Vec::with_capacity(16384),
             rng: seed(),
         };
@@ -678,24 +734,34 @@ impl Engine {
             self.complete(res);
             return;
         }
-        self.load = Some(Load { seq, token, rx });
+        self.load = Some(Load {
+            seq,
+            started: Instant::now(),
+            token,
+            rx,
+        });
     }
 
     /// Applies a finished foreground resolve. Called from `tick`, so the engine
     /// loop keeps running while the answer is on its way.
     fn poll_load(&mut self) {
-        let (seq, res) = {
+        let (seq, started, res) = {
             let Some(load) = &self.load else { return };
             match load.rx.try_recv() {
-                Ok(res) => (load.seq, res),
+                Ok(res) => (load.seq, load.started, res),
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => {
-                    (load.seq, Err("the resolver stopped".into()))
+                    (load.seq, load.started, Err("the resolver stopped".into()))
                 }
             }
         };
         if seq != self.load_seq {
             return;
+        }
+        if res.is_ok() {
+            // What this machine really pays for a resolve, remote or local:
+            // the prefetch lead follows it instead of a constant.
+            self.resolve_ms.record(started.elapsed());
         }
         self.load = None;
         self.complete(res);
@@ -822,6 +888,79 @@ impl Engine {
     /// Moves a remote-resolver failure into the player state, where the UI
     /// shows it as a single toast. The notice is consumed, so a server that
     /// stays down does not produce one per track.
+    /// How early the next track is requested. Twice the measured cold resolve
+    /// covers the handover and a retry; the floor covers the first track of a
+    /// session, when there is nothing measured yet.
+    fn resolve_lead(&self) -> f64 {
+        resolve_lead(self.resolve_ms.median())
+    }
+
+    /// Scans the tail of the current track for a long run of silence, so the
+    /// track can end there instead of playing it out. Runs once per position,
+    /// on its own thread: the decoder must keep running.
+    fn scan_tail(&mut self) {
+        if self.tail.is_some() || self.tail_cut.is_some() {
+            return;
+        }
+        let Some(loaded) = &self.loaded else { return };
+        let dur = loaded.duration;
+        if dur <= tail::SPAN_SECS {
+            return;
+        }
+        let Some(sink) = &self.sink else { return };
+        if sink.is_paused() {
+            return;
+        }
+        let pos = sink.played_frames() as f64 / f64::from(sink.rate());
+        if dur - pos > tail::SPAN_SECS {
+            return;
+        }
+        let key = (self.lock().url.clone(), self.seek_gen);
+        if self.tail_done.as_ref() == Some(&key) {
+            return;
+        }
+        self.tail_done = Some(key.clone());
+        let token = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let chunk = self.cfg.cache_kib as usize * 1024;
+        let cancel = Arc::clone(&token);
+        let url = key.0;
+        let spawned = thread::Builder::new()
+            .name("ytui-tail".into())
+            .spawn(move || {
+                let _ = tx.send(tail::scan(&url, dur, chunk, &cancel));
+            });
+        if spawned.is_ok() {
+            self.tail = Some(TailScan { token, rx });
+        }
+    }
+
+    fn poll_tail(&mut self) {
+        let Some(scan) = &self.tail else { return };
+        match scan.rx.try_recv() {
+            Ok(cut) => {
+                self.tail = None;
+                self.tail_cut = cut;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                // The scan died; do not stand in the way of a later one.
+                self.tail = None;
+                self.tail_done = None;
+            }
+        }
+    }
+
+    /// Forgets the tail verdict: a new track or a seek lands somewhere else.
+    fn reset_tail(&mut self) {
+        if let Some(scan) = self.tail.take() {
+            scan.token.store(true, Ordering::Relaxed);
+        }
+        self.tail_cut = None;
+        self.tail_done = None;
+        self.seek_gen = self.seek_gen.wrapping_add(1);
+    }
+
     fn surface_note(&self) {
         if let Some(msg) = crate::remote::take_note() {
             self.note(msg);
@@ -838,10 +977,13 @@ impl Engine {
 
     /// Ask for the next track's URL once the current one is about to end.
     ///
-    /// Resolving during the last ten seconds keeps the wait for the handover
-    /// short without running yt-dlp (and holding a link) for the whole song.
-    /// Only one track is solved ahead: a link that is not used soon would
-    /// expire and have to be resolved again anyway.
+    /// The lead is what this machine actually needs: a cold resolver takes
+    /// about twenty seconds, so a fixed ten-second window would hand the next
+    /// track to a resolver that has not finished yet. Twice the measured
+    /// median plus a margin covers the handover, and the floor keeps a slow
+    /// first resolve from being asked for too late even before there are
+    /// samples. Only one track is solved ahead: a link that is not used soon
+    /// would expire and have to be resolved again anyway.
     fn prefetch_next_near_end(&mut self) {
         // Escape hatch for slow machines (or for A/B testing a stutter):
         // `YTUI_PREFETCH=0 ytui` resolves every track on demand only.
@@ -857,6 +999,7 @@ impl Engine {
         if sink.is_paused() {
             return;
         }
+        let lead = self.resolve_lead();
         let pos = sink.played_frames() as f64 / f64::from(sink.rate());
         let (index, len, repeat, shuffle, state_dur) = {
             let st = self.lock();
@@ -868,7 +1011,7 @@ impl Engine {
             .map(|l| l.duration)
             .filter(|d| *d > 0.0)
             .unwrap_or(state_dur);
-        if dur <= 0.0 || pos >= dur || dur - pos > PREFETCH_WINDOW_SECS {
+        if dur <= 0.0 || pos >= dur || dur - pos > lead {
             return;
         }
         // Repeat-one rewinds the same stream; shuffle picks its next track
@@ -1153,6 +1296,7 @@ impl Engine {
         };
         self.eof = false;
         self.hold_at(actual);
+        self.reset_tail();
         self.lock().activity = Some(Activity::new(ActivityKind::Seek, mmss(actual)));
     }
 
@@ -1184,6 +1328,7 @@ impl Engine {
         self.loaded = None;
         self.eof = false;
         self.prefetched = None;
+        self.reset_tail();
         if let Some(s) = &self.sink {
             s.set_paused(false);
         }
@@ -1248,6 +1393,7 @@ impl Engine {
         // A finished foreground resolve is opened here, where the decoder and
         // sink live.
         self.poll_load();
+        self.poll_tail();
 
         // Pump the decoder while the ring buffer has room. After a start or a
         // seek only a short pre-roll is needed to let go of the output, so do
@@ -1308,6 +1454,23 @@ impl Engine {
         // short. This runs every tick; the function itself is a no-op until
         // the last seconds and only requests each next track once.
         self.prefetch_next_near_end();
+        self.scan_tail();
+
+        // A track whose ending is silence stops at the start of that run. The
+        // cut is always inside a run below -45 dBFS that lasts at least seven
+        // seconds, so there is nothing audible at the boundary to click.
+        if let Some(cut) = self.tail_cut {
+            let pos = self
+                .sink
+                .as_ref()
+                .map(|s| s.played_frames() as f64 / f64::from(s.rate()))
+                .unwrap_or(0.0);
+            if pos >= cut {
+                self.tail_cut = None;
+                self.advance();
+                return;
+            }
+        }
 
         // Track finished?
         let drained = self
@@ -1348,6 +1511,7 @@ impl Engine {
                 if loaded.seek(0.0).is_ok() {
                     self.eof = false;
                     self.hold_at(0.0);
+                    self.reset_tail();
                     let mut st = self.lock();
                     st.status = Status::Playing;
                     return;
@@ -1412,6 +1576,18 @@ impl Engine {
 /// Preferred rate of the default output device, for the memory estimate.
 pub fn output_rate() -> u32 {
     sink::Sink::default_rate().unwrap_or(OUT_RATE)
+}
+
+/// How early the next track is requested, from the median cold resolve time.
+///
+/// A fixed ten-second window assumed a local yt-dlp; a resolver on the LAN or
+/// over Tailscale can take twenty seconds cold, and asking late is heard as a
+/// gap between songs. Twice the measured time plus a margin covers the
+/// resolve, the probe and the handover; the floor keeps the first track of a
+/// session from being asked for too late.
+fn resolve_lead(median: Option<Duration>) -> f64 {
+    let measured = median.map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    (measured * 2.0 + RESOLVE_LEAD_MARGIN_SECS).max(RESOLVE_LEAD_MIN_SECS)
 }
 
 /// Index of the track that plays after `index`, or `None` when playback stops
@@ -1591,6 +1767,17 @@ mod tests {
             done.at = Instant::now() - Duration::from_secs(4);
         }
         assert!(a.line().is_none());
+    }
+
+    #[test]
+    fn the_resolve_lead_follows_what_this_machine_measures() {
+        // Nothing measured yet: the cold-resolver floor.
+        assert_eq!(resolve_lead(None), 20.0);
+        // A fast local yt-dlp does not bring the lead below the floor.
+        assert_eq!(resolve_lead(Some(Duration::from_secs(3))), 20.0);
+        // Twenty seconds cold: ask forty-five seconds ahead.
+        assert_eq!(resolve_lead(Some(Duration::from_secs(20))), 45.0);
+        assert_eq!(resolve_lead(Some(Duration::from_secs(60))), 125.0);
     }
 
     #[test]
