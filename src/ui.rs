@@ -733,6 +733,12 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     let loading = app.loading.map(|(k, t)| {
         (spinner(t.elapsed()), ytdl::label(k), app.fetch_count)
     });
+    let activity = {
+        let st = app.player.lock().unwrap_or_else(|e| e.into_inner());
+        st.activity
+            .as_ref()
+            .and_then(|a| a.line().map(|line| (line, a.done.is_some())))
+    };
     let toast = app
         .toast
         .as_ref()
@@ -747,6 +753,12 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
         };
         let detail = truncate(&detail, area.width as usize);
         Line::from(Span::styled(detail, Style::new().fg(ACCENT)))
+    } else if let Some((text, done)) = activity {
+        let text = truncate(&format!(" {text}"), area.width as usize);
+        Line::from(Span::styled(
+            text,
+            Style::new().fg(if done { GREEN } else { ACCENT }),
+        ))
     } else if let Some((msg, err)) = toast {
         let msg = truncate(&format!(" {msg}"), area.width as usize);
         Line::from(Span::styled(

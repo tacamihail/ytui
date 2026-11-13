@@ -253,6 +253,10 @@ pub struct Stream {
     pub title: String,
     pub channel: String,
     pub duration: f64,
+    /// True when this link came from a cache (the player's LRU or the
+    /// resolver's) instead of a fresh yt-dlp run. The footer shows a marker
+    /// for it, and nothing at all for a cold resolve.
+    pub cached: bool,
 }
 
 /// Resolves a watch URL to a direct audio URL that our decoder can stream.
@@ -333,6 +337,7 @@ fn playable(resolved: ytui_resolve::Resolved, cancel: Option<&AtomicBool>) -> Re
         title: resolved.title,
         channel: resolved.channel,
         duration: resolved.duration,
+        cached: resolved.cached,
     };
     let mut last = String::from("no candidate answered");
     for candidate in resolved.candidates.iter().take(4) {

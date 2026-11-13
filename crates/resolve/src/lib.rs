@@ -62,6 +62,11 @@ pub struct Resolved {
     pub channel: String,
     pub duration: f64,
     pub candidates: Vec<Candidate>,
+    /// Set by the resolver when the answer came from its cache. The player
+    /// only uses it to mark a resolve in the footer, so older servers that
+    /// omit it are fine.
+    #[serde(default)]
+    pub cached: bool,
 }
 
 /// `yt-dlp` plus the directories the installer uses, so a binary installed by
@@ -438,6 +443,7 @@ fn resolved_from_json(info: &serde_json::Value) -> Result<Resolved, String> {
         channel,
         duration: info.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0),
         candidates: ranked.into_iter().map(|(_, _, c)| c).collect(),
+        cached: false,
     })
 }
 

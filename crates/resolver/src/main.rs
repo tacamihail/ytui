@@ -1008,6 +1008,7 @@ mod tests {
             channel: "c".into(),
             duration: 1.0,
             candidates: Vec::new(),
+            cached: false,
         };
         cache.put("a", track.clone());
         assert!(cache.get("a").is_some());

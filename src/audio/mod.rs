@@ -67,6 +67,9 @@ pub struct State {
     pub shuffle: bool,
     pub repeat: Repeat,
     pub err: Option<String>,
+    /// What the footer shows while a track is being resolved or a seek is
+    /// landing. `None` when nothing is in flight or the last one aged out.
+    pub activity: Option<Activity>,
     /// Set after a track is skipped because it would not resolve; the UI
     /// shows it once as a toast.
     pub notice: Option<String>,
@@ -93,12 +96,106 @@ impl Default for State {
             shuffle: false,
             repeat: Repeat::Off,
             err: None,
+            activity: None,
             notice: None,
             notice_err: false,
             notice_seq: 0,
             version: 1,
         }
     }
+}
+
+/// What the footer is doing right now, so a slow resolve or seek is visible
+/// instead of looking like a hang. One slot: a newer event replaces it.
+#[derive(Debug, Clone)]
+pub struct Activity {
+    pub kind: ActivityKind,
+    /// Track title for a resolve, `m:ss` target for a seek.
+    pub label: String,
+    pub started: Instant,
+    pub done: Option<Done>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKind {
+    Resolve,
+    Seek,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Done {
+    /// When it finished; the footer keeps the line for three seconds after.
+    pub at: Instant,
+    /// Time from the command to the sound.
+    pub elapsed: Duration,
+    /// Served from a cache instead of a fresh yt-dlp run. Shown as a marker,
+    /// and shown *only* on a hit: a cold resolve stays silent.
+    pub cached: bool,
+}
+
+const ACTIVITY_DONE_FOR: Duration = Duration::from_secs(3);
+
+impl Activity {
+    fn new(kind: ActivityKind, label: String) -> Self {
+        Self {
+            kind,
+            label,
+            started: Instant::now(),
+            done: None,
+        }
+    }
+
+    fn finish(&mut self, cached: bool) {
+        if self.done.is_none() {
+            self.done = Some(Done {
+                at: Instant::now(),
+                elapsed: self.started.elapsed(),
+                cached,
+            });
+        }
+    }
+
+    /// The footer line, or `None` once a finished one has had its three
+    /// seconds. Emoji are two cells wide in most terminals, so callers size
+    /// the line by display width rather than by char count.
+    pub fn line(&self) -> Option<String> {
+        match &self.done {
+            None => Some(format!("{} {}", self.pending_icon(), self.label)),
+            Some(done) => {
+                if done.at.elapsed() > ACTIVITY_DONE_FOR {
+                    return None;
+                }
+                let mut line = format!("✅ {} · {}", self.label, seconds(done.elapsed));
+                if done.cached {
+                    line.push_str(" · 📦");
+                }
+                Some(line)
+            }
+        }
+    }
+
+    fn pending_icon(&self) -> &'static str {
+        match self.kind {
+            ActivityKind::Resolve => "⏳",
+            ActivityKind::Seek => "⏩",
+        }
+    }
+}
+
+/// One decimal below ten seconds, whole seconds above: enough to tell a warm
+/// resolve from a cold one without eating the footer.
+fn seconds(d: Duration) -> String {
+    let s = d.as_secs_f64();
+    if s < 10.0 {
+        format!("{s:.1}s")
+    } else {
+        format!("{}s", s.round() as u64)
+    }
+}
+
+fn mmss(secs: f64) -> String {
+    let total = secs.max(0.0) as u64;
+    format!("{}:{:02}", total / 60, total % 60)
 }
 
 pub enum Cmd {
@@ -386,7 +483,9 @@ fn load_stream(
     if cancel.load(Ordering::Relaxed) {
         return Err(ytdl::CANCELLED.into());
     }
-    if let Some(stream) = prefetch.take(url) {
+    if let Some(mut stream) = prefetch.take(url) {
+        // Coming from the LRU is exactly the case the footer marks.
+        stream.cached = true;
         return Ok(stream);
     }
     let waited = prefetch.running(url).then(|| prefetch.wait(url, Duration::from_secs(20)));
@@ -608,7 +707,9 @@ impl Engine {
             return;
         }
         self.surface_note();
+        let mut cached = false;
         let opened = res.and_then(|stream| {
+            cached = stream.cached;
             // Entries created from a bare URL start out with no title or
             // duration; yt-dlp just told us both, so adopt them.
             self.adopt_metadata(&stream);
@@ -635,6 +736,9 @@ impl Engine {
                 };
                 if l.duration > 0.0 {
                     st.dur = l.duration;
+                }
+                if let Some(activity) = &mut st.activity {
+                    activity.finish(cached);
                 }
                 drop(st);
                 self.loaded = Some(l);
@@ -676,6 +780,16 @@ impl Engine {
         }
     }
 
+    /// Marks the seek in the footer as done once the sound is back.
+    fn finish_seek(&mut self) {
+        let mut st = self.lock();
+        if let Some(activity) = &mut st.activity {
+            if activity.kind == ActivityKind::Seek {
+                activity.finish(false);
+            }
+        }
+    }
+
     fn failed(&mut self, e: String) {
         // One dead upload should not end the evening. Walk past tracks YouTube
         // refuses to serve, but stop short of hammering through a whole list.
@@ -700,6 +814,9 @@ impl Engine {
         } else {
             e
         });
+        // Failures are the red toast's job; the footer goes quiet instead of
+        // inventing a second vocabulary for them.
+        st.activity = None;
     }
 
     /// Moves a remote-resolver failure into the player state, where the UI
@@ -989,6 +1106,7 @@ impl Engine {
                 st.title.clear();
                 st.channel.clear();
                 st.url.clear();
+                st.activity = None;
             }
             Cmd::Shuffle(on) => {
                 let mut st = self.lock();
@@ -1035,6 +1153,7 @@ impl Engine {
         };
         self.eof = false;
         self.hold_at(actual);
+        self.lock().activity = Some(Activity::new(ActivityKind::Seek, mmss(actual)));
     }
 
     fn skip(&mut self, dir: i32) {
@@ -1079,6 +1198,15 @@ impl Engine {
             st.pos = 0.0;
             st.dur = track.duration as f64;
             st.err = None;
+            // A pasted link has no title yet; the footer still needs a name.
+            st.activity = Some(Activity::new(
+                ActivityKind::Resolve,
+                if track.title.trim().is_empty() {
+                    "track".to_string()
+                } else {
+                    track.title.clone()
+                },
+            ));
         }
 
         self.begin_load(track.url);
@@ -1171,6 +1299,7 @@ impl Engine {
                     s.set_played_frames((at * f64::from(s.rate())) as u64);
                     s.set_hold(false);
                     self.holding = None;
+                    self.finish_seek();
                 }
             }
         }
@@ -1376,6 +1505,7 @@ mod tests {
             title: "track".into(),
             channel: "channel".into(),
             duration: 180.0,
+            cached: false,
         }
     }
 
@@ -1423,6 +1553,44 @@ mod tests {
         assert_eq!(next_index(2, 3, Repeat::Off), None);
         assert_eq!(next_index(2, 3, Repeat::All), Some(0));
         assert_eq!(next_index(0, 0, Repeat::All), None);
+    }
+
+    #[test]
+    fn the_footer_shows_a_resolve_and_how_long_it_took() {
+        let mut a = Activity::new(ActivityKind::Resolve, "Nightcall".into());
+        assert_eq!(a.line().as_deref(), Some("⏳ Nightcall"));
+
+        a.started = Instant::now() - Duration::from_secs(2);
+        a.finish(false);
+        assert_eq!(a.line().as_deref(), Some("✅ Nightcall · 2.0s"));
+    }
+
+    #[test]
+    fn the_cache_marker_only_shows_on_a_hit() {
+        let mut a = Activity::new(ActivityKind::Resolve, "Nightcall".into());
+        a.started = Instant::now() - Duration::from_secs(13);
+        a.finish(true);
+        assert_eq!(a.line().as_deref(), Some("✅ Nightcall · 13s · 📦"));
+    }
+
+    #[test]
+    fn a_seek_shows_its_target_and_then_its_time() {
+        let mut a = Activity::new(ActivityKind::Seek, mmss(84.6));
+        assert_eq!(a.line().as_deref(), Some("⏩ 1:24"));
+        a.started = Instant::now() - Duration::from_millis(320);
+        a.finish(false);
+        assert_eq!(a.line().as_deref(), Some("✅ 1:24 · 0.3s"));
+    }
+
+    #[test]
+    fn a_finished_line_ages_out() {
+        let mut a = Activity::new(ActivityKind::Seek, "1:24".into());
+        a.finish(false);
+        assert!(a.line().is_some());
+        if let Some(done) = &mut a.done {
+            done.at = Instant::now() - Duration::from_secs(4);
+        }
+        assert!(a.line().is_none());
     }
 
     #[test]
