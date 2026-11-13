@@ -8,7 +8,8 @@ mod resample;
 mod sink;
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -169,8 +170,26 @@ struct Engine {
     /// Keyed by URL so a queue edit or a repeat-mode change still triggers a
     /// resolve for the new next track.
     prefetched: Option<String>,
+    /// The foreground resolve, while it is running. `None` once its answer has
+    /// been applied (or the selection was superseded).
+    load: Option<Load>,
+    /// Bumped for every foreground load, so a late answer for an older
+    /// selection can be recognised and dropped.
+    load_seq: u64,
     tmp: Vec<f32>,
     rng: u64,
+}
+
+/// A resolve running for the selection the listener just made, off the audio
+/// thread. `tick` polls `rx`, so a slow yt-dlp or resolver cannot stall the
+/// engine loop: the previous sound keeps playing and a newer ENTER wins
+/// immediately instead of queueing behind this one.
+struct Load {
+    seq: u64,
+    /// Raised when a newer selection takes over. The worker kills the yt-dlp
+    /// child (and its deno) instead of running to completion.
+    token: Arc<AtomicBool>,
+    rx: Receiver<Result<ytdl::Stream, String>>,
 }
 
 /// Works out stream URLs in the background, one at a time, and keeps a small
@@ -352,6 +371,41 @@ impl Prefetch {
     }
 }
 
+/// The foreground resolve, run off the audio thread.
+///
+/// A URL the background worker is already on is waited for instead of starting
+/// a second yt-dlp: skipping early is the usual case, and two runs would double
+/// the ~135 MiB yt-dlp + deno peak for no gain. Anything solved here is left in
+/// the cache, so going back to it starts instantly.
+fn load_stream(
+    url: &str,
+    cfg: &Config,
+    prefetch: &Prefetch,
+    cancel: &AtomicBool,
+) -> Result<ytdl::Stream, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(ytdl::CANCELLED.into());
+    }
+    if let Some(stream) = prefetch.take(url) {
+        return Ok(stream);
+    }
+    let waited = prefetch.running(url).then(|| prefetch.wait(url, Duration::from_secs(20)));
+    let res = match waited {
+        Some(Some(stream)) => Ok(stream),
+        Some(None) if cancel.load(Ordering::Relaxed) => Err(ytdl::CANCELLED.into()),
+        _ => {
+            // The request now belongs to the foreground; do not also solve it
+            // on the background queue.
+            prefetch.drop_queued(url);
+            ytdl::stream_url_cancelled(url, cfg, Some(cancel))
+        }
+    };
+    if let Ok(stream) = &res {
+        prefetch.remember(url, stream);
+    }
+    res
+}
+
 fn cached_index(g: &Job, url: &str) -> Option<usize> {
     g.cache.iter().position(|(u, _)| u == url)
 }
@@ -427,6 +481,8 @@ impl Engine {
             last_rebuild: Instant::now(),
             prefetch,
             prefetched: None,
+            load: None,
+            load_seq: 0,
             tmp: Vec::with_capacity(16384),
             rng: seed(),
         };
@@ -490,33 +546,160 @@ impl Engine {
         self.lock().pos = at;
     }
 
-    /// The stream for `url`: from the cache when it is a replay or a skip
-    /// back, from the background thread when that is already resolving this
-    /// exact URL, otherwise straight from yt-dlp. A click never waits behind
-    /// the prefetch queue.
-    fn resolve(&self, url: &str) -> Result<ytdl::Stream, String> {
-        self.surface_note();
-        if let Some(s) = self.prefetch.take(url) {
-            return Ok(s);
+    /// Cancel the foreground resolve in flight, if any, killing its yt-dlp.
+    fn supersede(&mut self) {
+        if let Some(load) = self.load.take() {
+            load.token.store(true, Ordering::Relaxed);
+            drop(load.rx);
         }
-        // This is the usual case when a song is skipped early: waiting for the
-        // resolver that is already on this URL is faster than starting a
-        // second one, and it keeps only one yt-dlp alive.
-        if self.prefetch.running(url) {
-            if let Some(s) = self.prefetch.wait(url, Duration::from_secs(20)) {
-                return Ok(s);
+    }
+
+    /// Start resolving `url` off the audio thread. The caller has already put
+    /// the UI into `Loading` with the track's metadata.
+    fn begin_load(&mut self, url: String) {
+        self.supersede();
+        self.load_seq = self.load_seq.wrapping_add(1);
+        let seq = self.load_seq;
+        let token = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let cfg = self.cfg.clone();
+        let prefetch = Arc::clone(&self.prefetch);
+        let cancel = Arc::clone(&token);
+        let target = url.clone();
+        let spawned = thread::Builder::new()
+            .name("ytui-load".into())
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let _ = tx.send(load_stream(&target, &cfg, &prefetch, &cancel));
+            });
+        if spawned.is_err() {
+            // Out of threads: do it here rather than not at all. Rare enough
+            // that losing the responsiveness is the right trade.
+            let res = load_stream(&url, &self.cfg.clone(), &self.prefetch, &token);
+            self.complete(res);
+            return;
+        }
+        self.load = Some(Load { seq, token, rx });
+    }
+
+    /// Applies a finished foreground resolve. Called from `tick`, so the engine
+    /// loop keeps running while the answer is on its way.
+    fn poll_load(&mut self) {
+        let (seq, res) = {
+            let Some(load) = &self.load else { return };
+            match load.rx.try_recv() {
+                Ok(res) => (load.seq, res),
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    (load.seq, Err("the resolver stopped".into()))
+                }
             }
+        };
+        if seq != self.load_seq {
+            return;
         }
-        // The requested track is not the one being prefetched: resolve it on
-        // this thread so the user hears it now, even if that means two yt-dlp
-        // processes overlap for a moment.
-        self.prefetch.drop_queued(url);
-        let res = ytdl::stream_url(url, &self.cfg);
+        self.load = None;
+        self.complete(res);
+    }
+
+    fn complete(&mut self, res: Result<ytdl::Stream, String>) {
+        if matches!(&res, Err(e) if e == ytdl::CANCELLED) {
+            // A newer selection took over; its own load reports anything real.
+            return;
+        }
         self.surface_note();
-        if let Ok(stream) = &res {
-            self.prefetch.remember(url, stream);
+        let opened = res.and_then(|stream| {
+            // Entries created from a bare URL start out with no title or
+            // duration; yt-dlp just told us both, so adopt them.
+            self.adopt_metadata(&stream);
+            Loaded::open(&stream.url, self.cfg.cache_kib as usize * 1024)
+        });
+        match opened {
+            Ok(mut l) => {
+                self.fails = 0;
+                // Play at the track's rate when the device takes it; this
+                // avoids resampling 44.1 kHz AAC up to 48 kHz and back.
+                self.retune_sink(l.rate());
+                l.set_target_rate(self.sink_rate());
+                // A rate change replaces the sink, which starts out released.
+                self.hold_at(0.0);
+
+                // A pause pressed while the track was resolving must survive
+                // the handover, so take the state from the sink, not Loading.
+                let paused = self.sink.as_ref().map(|s| s.is_paused()).unwrap_or(false);
+                let mut st = self.lock();
+                st.status = if paused {
+                    Status::Paused
+                } else {
+                    Status::Playing
+                };
+                if l.duration > 0.0 {
+                    st.dur = l.duration;
+                }
+                drop(st);
+                self.loaded = Some(l);
+            }
+            Err(e) => self.failed(e),
         }
-        res
+    }
+
+    /// Fills in a placeholder entry from what the resolve returned.
+    fn adopt_metadata(&mut self, stream: &ytdl::Stream) {
+        let mut changed = false;
+        let mut st = self.lock();
+        if st.title.is_empty() && !stream.title.is_empty() {
+            st.title = stream.title.clone();
+            changed = true;
+        }
+        if st.channel.is_empty() && !stream.channel.is_empty() {
+            st.channel = stream.channel.clone();
+            changed = true;
+        }
+        if st.dur <= 0.0 && stream.duration > 0.0 {
+            st.dur = stream.duration;
+            changed = true;
+        }
+        if changed {
+            let index = st.index;
+            if let Some(t) = st.queue.get_mut(index) {
+                if t.title.is_empty() {
+                    t.title = stream.title.clone();
+                }
+                if t.channel.is_empty() {
+                    t.channel = stream.channel.clone();
+                }
+                if t.duration == 0 {
+                    t.duration = stream.duration.max(0.0) as u64;
+                }
+            }
+            st.version = st.version.wrapping_add(1);
+        }
+    }
+
+    fn failed(&mut self, e: String) {
+        // One dead upload should not end the evening. Walk past tracks YouTube
+        // refuses to serve, but stop short of hammering through a whole list.
+        let (index, len) = {
+            let st = self.lock();
+            (st.index, st.queue.len())
+        };
+        if len > 1 && self.fails + 1 < MAX_SKIPS && track_is_gone(&e) {
+            self.fails += 1;
+            let mut st = self.lock();
+            st.notice = Some(format!("{e}, skipped {}", st.title));
+            st.notice_err = true;
+            st.notice_seq = st.notice_seq.wrapping_add(1);
+            drop(st);
+            self.start((index + 1) % len);
+            return;
+        }
+        let mut st = self.lock();
+        st.status = Status::Error;
+        st.err = Some(if self.fails > 0 {
+            format!("{} tracks in a row would not play: {e}", self.fails + 1)
+        } else {
+            e
+        });
     }
 
     /// Moves a remote-resolver failure into the player state, where the UI
@@ -789,6 +972,7 @@ impl Engine {
                 }
             }
             Cmd::Stop => {
+                self.supersede();
                 self.loaded = None;
                 self.eof = false;
                 self.holding = None;
@@ -897,85 +1081,11 @@ impl Engine {
             st.err = None;
         }
 
-        let loaded = self.resolve(&track.url).and_then(|stream| {
-            // Entries created from a bare URL start out with no title or
-            // duration; yt-dlp just told us both, so adopt them.
-            if track.title.is_empty() || track.duration == 0 {
-                let mut st = self.lock();
-                if st.title.is_empty() {
-                    st.title = stream.title.clone();
-                }
-                if st.channel.is_empty() {
-                    st.channel = stream.channel.clone();
-                }
-                if st.dur <= 0.0 && stream.duration > 0.0 {
-                    st.dur = stream.duration;
-                }
-                if let Some(t) = st.queue.get_mut(index) {
-                    if t.title.is_empty() {
-                        t.title = stream.title.clone();
-                    }
-                    if t.channel.is_empty() {
-                        t.channel = stream.channel.clone();
-                    }
-                    if t.duration == 0 {
-                        t.duration = stream.duration.max(0.0) as u64;
-                    }
-                }
-                st.version = st.version.wrapping_add(1);
-            }
-            Loaded::open(&stream.url, self.cfg.cache_kib as usize * 1024)
-        });
-
-        match loaded {
-            Ok(mut l) => {
-                self.fails = 0;
-                // Play at the track's rate when the device takes it; this
-                // avoids resampling 44.1 kHz AAC up to 48 kHz and back.
-                self.retune_sink(l.rate());
-                l.set_target_rate(self.sink_rate());
-                // A rate change replaces the sink, which starts out released.
-                self.hold_at(0.0);
-
-                let mut st = self.lock();
-                st.status = if st.status == Status::Paused {
-                    Status::Paused
-                } else {
-                    Status::Playing
-                };
-                if l.duration > 0.0 {
-                    st.dur = l.duration;
-                }
-                drop(st);
-                self.loaded = Some(l);
-            }
-            Err(e) => {
-                // One dead upload should not end the evening. Walk past
-                // tracks YouTube refuses to serve, but stop short of
-                // hammering through a whole list.
-                let len = self.lock().queue.len();
-                if len > 1 && self.fails + 1 < MAX_SKIPS && track_is_gone(&e) {
-                    self.fails += 1;
-                    let mut st = self.lock();
-                    st.notice = Some(format!("{e}, skipped {}", st.title));
-                    st.notice_err = true;
-                    st.notice_seq = st.notice_seq.wrapping_add(1);
-                    drop(st);
-                    self.start((index + 1) % len);
-                    return;
-                }
-                let mut st = self.lock();
-                st.status = Status::Error;
-                st.err = Some(if self.fails > 0 {
-                    format!("{} tracks in a row would not play: {e}", self.fails + 1)
-                } else {
-                    e
-                });
-            }
-        }
+        self.begin_load(track.url);
     }
 
     fn fail(&mut self, err: String) {
+        self.supersede();
         self.loaded = None;
         self.eof = false;
         self.holding = None;
@@ -1007,6 +1117,9 @@ impl Engine {
             }
         }
         self.follow_default_output();
+        // A finished foreground resolve is opened here, where the decoder and
+        // sink live.
+        self.poll_load();
 
         // Pump the decoder while the ring buffer has room. After a start or a
         // seek only a short pre-roll is needed to let go of the output, so do
@@ -1310,6 +1423,34 @@ mod tests {
         assert_eq!(next_index(2, 3, Repeat::Off), None);
         assert_eq!(next_index(2, 3, Repeat::All), Some(0));
         assert_eq!(next_index(0, 0, Repeat::All), None);
+    }
+
+    #[test]
+    fn a_cancelled_load_never_starts_ytdlp() {
+        let p = Prefetch {
+            inner: Mutex::new(Job::default()),
+            cv: Condvar::new(),
+            cfg: Mutex::new(Config::default()),
+        };
+        let cancel = AtomicBool::new(true);
+        assert_eq!(
+            load_stream("x", &Config::default(), &p, &cancel).unwrap_err(),
+            ytdl::CANCELLED
+        );
+    }
+
+    #[test]
+    fn a_cached_url_loads_without_the_network() {
+        let p = Prefetch {
+            inner: Mutex::new(Job::default()),
+            cv: Condvar::new(),
+            cfg: Mutex::new(Config::default()),
+        };
+        let link = link(now() + 3600);
+        remember(&mut p.lock(), "x", stream(&link));
+        let cancel = AtomicBool::new(false);
+        let got = load_stream("x", &Config::default(), &p, &cancel).unwrap();
+        assert_eq!(got.url, link);
     }
 
     #[test]

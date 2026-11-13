@@ -9,6 +9,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -231,11 +232,22 @@ fn on_path(name: &str) -> bool {
 /// resolver slot on the server.
 pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Runs `cmd` and collects its output, killing it at `timeout`.
+/// What a caller sees when its own cancel flag ended the run. The player drops
+/// these results silently: a newer selection already took over.
+pub const CANCELLED: &str = "resolve cancelled";
+
+/// Runs `cmd` and collects its output, killing it at `timeout` or as soon as
+/// `cancel` is raised.
 ///
 /// Both pipes are drained on their own threads so a large JSON answer cannot
-/// fill a pipe and make the process look hung.
-fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Output> {
+/// fill a pipe and make the process look hung. The flag is checked on the same
+/// 40 ms tick as the timeout, so a superseded resolve stops burning CPU
+/// (yt-dlp plus deno is ~135 MiB) almost immediately.
+fn output_with_timeout(
+    cmd: &mut Command,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+) -> io::Result<Output> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -259,6 +271,13 @@ fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Outpu
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
+            Ok(None) if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out.join();
+                let _ = err.join();
+                return Err(io::Error::new(io::ErrorKind::Interrupted, CANCELLED));
+            }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(40)),
             Ok(None) => {
                 let _ = child.kill();
@@ -291,6 +310,17 @@ fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Outpu
 /// `itag=139` (HE-AAC, 48 kbps) almost always works. Callers probe the list
 /// in order instead of trusting the first URL `-g` prints.
 pub fn resolve(url: &str, cookies: Option<(&str, &str)>) -> Result<Resolved, String> {
+    resolve_cancellable(url, cookies, None)
+}
+
+/// Like [`resolve`], but kills the yt-dlp child as soon as `cancel` is raised
+/// and returns [`CANCELLED`]. Used by the player's foreground load, where a
+/// newer selection must not wait for the abandoned track.
+pub fn resolve_cancellable(
+    url: &str,
+    cookies: Option<(&str, &str)>,
+    cancel: Option<&AtomicBool>,
+) -> Result<Resolved, String> {
     // One writer at a time keeps the rotating session cookies in the jar
     // current; see [`CookieLock`].
     let _lock = lock_cookies_for_run(cookies)?;
@@ -300,9 +330,10 @@ pub fn resolve(url: &str, cookies: Option<(&str, &str)>) -> Result<Resolved, Str
     if let Some((flag, value)) = cookies {
         c.arg(flag).arg(value);
     }
-    let out = output_with_timeout(&mut c, RESOLVE_TIMEOUT).map_err(|e| match e.kind() {
+    let out = output_with_timeout(&mut c, RESOLVE_TIMEOUT, cancel).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => "yt-dlp not found, install it and run: ytui doctor".to_string(),
         io::ErrorKind::TimedOut => "yt-dlp timed out while resolving the stream".to_string(),
+        io::ErrorKind::Interrupted => CANCELLED.to_string(),
         _ => format!("yt-dlp: {e}"),
     })?;
     if had_session == Some(true) && jar_session_state(cookies) == Some(false) {
@@ -456,6 +487,38 @@ fn first_lines(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A superseded resolve must stop the child instead of letting it run to
+    /// completion; on a Pi that is a whole yt-dlp + deno pair.
+    #[test]
+    fn a_cancelled_run_kills_the_child_early() {
+        let mut cmd = if cfg!(windows) {
+            // Direct child: `cmd /C ping` would leave ping holding the pipes
+            // after cmd is killed, and the drain threads would wait it out.
+            let mut c = Command::new("ping");
+            c.args(["-n", "10", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = Command::new("sleep");
+            c.arg("10");
+            c
+        };
+        let cancel = AtomicBool::new(false);
+        let started = Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(150));
+                cancel.store(true, Ordering::Relaxed);
+            });
+            let err = output_with_timeout(&mut cmd, Duration::from_secs(20), Some(&cancel))
+                .expect_err("a cancelled run does not return output");
+            assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        });
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the child should die on the next poll, not at the timeout"
+        );
+    }
 
     /// The whole point: two yt-dlp runs must not rewrite the same jar at the
     /// same time, or one can save a stale `__Secure-1PSIDTS` over the other.

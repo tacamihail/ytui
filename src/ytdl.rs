@@ -7,6 +7,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
@@ -17,6 +18,10 @@ use crate::remote;
 use ytui_resolve::friendly;
 
 pub(crate) use ytui_resolve::{command, tool_path, UA};
+
+/// A resolve that was superseded by a newer selection. Callers drop it without
+/// showing an error: nothing went wrong, the user moved on.
+pub const CANCELLED: &str = ytui_resolve::CANCELLED;
 
 pub const LIKED_MUSIC_URL: &str = "https://music.youtube.com/playlist?list=LM";
 /// System playlist owned by the account; unlike `LM` it exposes the owner.
@@ -257,40 +262,72 @@ pub struct Stream {
 /// googlevideo URLs can be bound to the requesting IP. On a resolver failure
 /// the client falls back to local yt-dlp unless `resolver_fallback` is off.
 pub fn stream_url(url: &str, cfg: &Config) -> Result<Stream, String> {
+    stream_url_cancelled(url, cfg, None)
+}
+
+/// Like [`stream_url`], but gives up as soon as `cancel` is raised. The local
+/// yt-dlp child is killed; a remote resolver call cannot be interrupted once it
+/// is in flight, so the flag is checked around it instead.
+pub fn stream_url_cancelled(
+    url: &str,
+    cfg: &Config,
+    cancel: Option<&AtomicBool>,
+) -> Result<Stream, String> {
+    if cancelled(cancel) {
+        return Err(CANCELLED.into());
+    }
     if let Some(settings) = remote::settings(cfg) {
-        match remote_stream(url, &settings) {
+        match remote_stream(url, &settings, cancel) {
             Ok(stream) => return Ok(stream),
+            Err(e) if cancelled(cancel) => return Err(e),
             Err(e) if settings.fallback => remote::note_fallback(&e),
             Err(e) => return Err(format!("resolver: {e}")),
         }
     }
-    local_stream(url, cfg)
+    local_stream(url, cfg, cancel)
 }
 
-fn remote_stream(url: &str, settings: &remote::Settings) -> Result<Stream, String> {
+/// True when the request was superseded by a newer one.
+fn cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+}
+
+fn remote_stream(
+    url: &str,
+    settings: &remote::Settings,
+    cancel: Option<&AtomicBool>,
+) -> Result<Stream, String> {
     let first = remote::resolve(settings, url, false)?;
-    if let Ok(stream) = playable(first) {
+    if let Ok(stream) = playable(first, cancel) {
         return Ok(stream);
+    }
+    if cancelled(cancel) {
+        return Err(CANCELLED.into());
     }
     // A cached URL can expire while the client still has it. Ask once more
     // with the server cache bypassed before giving up.
     let refreshed = remote::resolve(settings, url, true)?;
-    playable(refreshed).map_err(|e| format!("refreshed URLs still failed ({e})"))
+    playable(refreshed, cancel).map_err(|e| format!("refreshed URLs still failed ({e})"))
 }
 
-fn local_stream(url: &str, cfg: &Config) -> Result<Stream, String> {
+fn local_stream(
+    url: &str,
+    cfg: &Config,
+    cancel: Option<&AtomicBool>,
+) -> Result<Stream, String> {
     let cookies = cfg.cookie_args();
-    let resolved = ytui_resolve::resolve(
+    let resolved = ytui_resolve::resolve_cancellable(
         url,
         cookies
             .as_ref()
             .map(|(flag, value)| (*flag, value.as_str())),
+        cancel,
     )?;
-    playable(resolved)
+    playable(resolved, cancel)
 }
 
 /// Probes the candidates best-first and returns the first one the CDN serves.
-fn playable(resolved: ytui_resolve::Resolved) -> Result<Stream, String> {
+fn playable(resolved: ytui_resolve::Resolved, cancel: Option<&AtomicBool>) -> Result<Stream, String> {
     let mut stream = Stream {
         url: String::new(),
         title: resolved.title,
@@ -299,6 +336,9 @@ fn playable(resolved: ytui_resolve::Resolved) -> Result<Stream, String> {
     };
     let mut last = String::from("no candidate answered");
     for candidate in resolved.candidates.iter().take(4) {
+        if cancelled(cancel) {
+            return Err(CANCELLED.into());
+        }
         match probe(&candidate.url) {
             Ok(()) => {
                 stream.url = candidate.url.clone();
