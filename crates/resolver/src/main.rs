@@ -738,6 +738,12 @@ struct SavedCache {
     entries: Vec<SavedEntry>,
 }
 
+/// Bump when the shape or the ordering of `Resolved` changes. Entries written
+/// by an older build can name candidates that build would no longer choose
+/// (0.4.14 stopped taking the 48 kbps fallback for a refused 128 kbps URL), and
+/// replaying them keeps the old quality until they age out.
+const SAVED_VERSION: u8 = 2;
+
 impl Cache {
     fn new(cap: usize, ttl: Duration, file: Option<PathBuf>) -> Self {
         let mut cache = Self {
@@ -761,7 +767,7 @@ impl Cache {
             eprintln!("cache: ignoring unreadable {}", path.display());
             return;
         };
-        if saved.v != 1 {
+        if saved.v != SAVED_VERSION {
             return;
         }
         let now = unix_now();
@@ -797,7 +803,10 @@ impl Cache {
             })
             .collect();
         entries.sort_by_key(|e| std::cmp::Reverse(e.at));
-        let Ok(text) = serde_json::to_string(&SavedCache { v: 1, entries }) else {
+        let Ok(text) = serde_json::to_string(&SavedCache {
+            v: SAVED_VERSION,
+            entries,
+        }) else {
             return;
         };
         if let Some(dir) = path.parent() {
@@ -1183,7 +1192,7 @@ mod tests {
         let file = cache_dir("stale").join("urls.json");
         let now = unix_now();
         let saved = SavedCache {
-            v: 1,
+            v: SAVED_VERSION,
             entries: vec![
                 SavedEntry {
                     id: "old".into(),
@@ -1201,6 +1210,24 @@ mod tests {
         let mut cache = Cache::new(8, Duration::from_secs(60), Some(file));
         assert!(cache.get("old").is_none());
         assert!(cache.get("new").is_some());
+    }
+
+    /// 0.4.14 stopped accepting the 48 kbps fallback when a 128 kbps URL is
+    /// refused, so entries it never wrote are not what this build would serve.
+    #[test]
+    fn a_cache_from_an_older_build_is_ignored() {
+        let file = cache_dir("old-version").join("urls.json");
+        let saved = SavedCache {
+            v: SAVED_VERSION - 1,
+            entries: vec![SavedEntry {
+                id: "a".into(),
+                at: unix_now(),
+                track: track("a"),
+            }],
+        };
+        fs::write(&file, serde_json::to_string(&saved).unwrap()).unwrap();
+        let mut cache = Cache::new(8, Duration::from_secs(3600), Some(file));
+        assert!(cache.get("a").is_none());
     }
 
     #[test]
