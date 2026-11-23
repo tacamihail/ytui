@@ -178,18 +178,17 @@ button.busy::after {
   padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
 }
 #player[hidden] { display: none; }
-/* The current cover, blurred and faded out to the right, so the centered
-   controls stay readable. */
+/* The current cover, dimmed and faded out to the right, so the centered
+   controls stay readable without hiding the picture. */
 #player .bg {
-  position: absolute; inset: -40px;
+  position: absolute; inset: 0;
   background-position: left center; background-size: cover;
-  opacity: .45;
-  filter: blur(26px) saturate(1.15) brightness(.85);
-  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 12%, transparent 78%);
-          mask-image: linear-gradient(to right, #000 0%, #000 12%, transparent 78%);
+  opacity: .4;
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 6%, transparent 48%);
+          mask-image: linear-gradient(to right, #000 0%, #000 6%, transparent 48%);
   pointer-events: none;
 }
-#player .inner { position: relative; }
+#player .inner { position: relative; text-shadow: 0 1px 3px #000a; }
 #player .line1 { min-width: 0; margin-bottom: 2px; text-align: center; }
 #player .ptitle {
   display: block; font-weight: 600;
@@ -696,6 +695,22 @@ function setSessionMetadata(t) {
     })),
   });
 }
+// The lock screen takes its scrubber length from setPositionState; without it
+// iOS uses the element's doubled duration and draws a bar twice too long.
+let positionAt = 0;
+function updatePositionState(force) {
+  const ms = navigator.mediaSession;
+  if (!ms || !ms.setPositionState) return;
+  const now = performance.now();
+  if (!force && now - positionAt < 1000) return;
+  const duration = realDuration();
+  if (!duration) return;
+  const position = Math.min(Math.max(realTime(), 0), duration);
+  positionAt = now;
+  try {
+    ms.setPositionState({ duration: duration, playbackRate: 1, position: position });
+  } catch {}
+}
 function playIndex(i) {
   if (i < 0 || i >= queue.length) return;
   index = i;
@@ -713,6 +728,7 @@ function playIndex(i) {
   $("bg").style.backgroundImage =
     "url(https://i.ytimg.com/vi/" + t.id + "/hqdefault.jpg)";
   setSessionMetadata(t);
+  updatePositionState(true);
   markPlaying();
 }
 // The open tab is the queue: playing a row from Liked or Search turns that
@@ -763,6 +779,7 @@ audio.addEventListener("play", () => {
   }
   setIcon($("play"), "pause");
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+  updatePositionState(true);
   markPlaying();
 });
 audio.addEventListener("playing", () => {
@@ -772,6 +789,7 @@ audio.addEventListener("playing", () => {
   resetRate();
   const t = current();
   if (t) setSessionMetadata(t); // iOS can drop artwork set before playback
+  updatePositionState(true);
   markPlaying();
   prefetchNext();
 });
@@ -795,6 +813,7 @@ audio.addEventListener("pause", () => {
   $("buffering").hidden = true;
   loading = false;
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+  updatePositionState(true);
   markPlaying();
 });
 // Safari can keep "playing" silence past the real length when it reports a
@@ -807,6 +826,7 @@ function endTrack() {
     audio.currentTime = 0;
     audio.play().catch(() => {});
     ended = false;
+    updatePositionState(true);
     return;
   }
   const n = nextIndex();
@@ -838,6 +858,7 @@ $("seek").addEventListener("change", () => {
   seeking = false;
   ended = false; // seeking back into a finished track plays it again
   resetRate();
+  updatePositionState(true);
 });
 audio.addEventListener("timeupdate", () => {
   const total = realDuration();
@@ -852,11 +873,12 @@ audio.addEventListener("timeupdate", () => {
     $("seek").style.setProperty("--fill", ($("seek").value / 10) + "%");
   }
   $("time").textContent = fmt(pos) + " / " + fmt(total);
+  updatePositionState(false);
 });
 // A new stream starts at 1x; the rate sample below proves otherwise.
 audio.addEventListener("loadedmetadata", () => { mediaScale = 1; resetRate(); });
 audio.addEventListener("durationchange", resetRate);
-audio.addEventListener("seeked", resetRate);
+audio.addEventListener("seeked", () => { resetRate(); updatePositionState(true); });
 if ("mediaSession" in navigator) {
   const ms = navigator.mediaSession;
   try {
@@ -865,7 +887,11 @@ if ("mediaSession" in navigator) {
     ms.setActionHandler("previoustrack", () => playIndex(index - 1));
     ms.setActionHandler("nexttrack", () => playIndex(nextIndex()));
     ms.setActionHandler("seekto", (d) => {
-      if (d.seekTime != null) audio.currentTime = d.seekTime;
+      if (d.seekTime != null) {
+        // the lock screen works in the timeline we advertise (real seconds)
+        audio.currentTime = d.seekTime * mediaScale;
+        updatePositionState(true);
+      }
     });
   } catch {}
 }
