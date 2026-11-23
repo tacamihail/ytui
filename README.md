@@ -8,13 +8,7 @@
 > credentials and use it at your own risk. There is no warranty; see
 > [LICENSE](LICENSE).
 
-A terminal player for YouTube Music. Audio only: no browser and no video
-window.
-
-ytui asks yt-dlp for the stream URL, then pulls the AAC file over HTTP Range,
-decodes it with `symphonia` and writes to `cpal` (ALSA on Linux, CoreAudio on
-macOS, WASAPI on Windows). yt-dlp exits after resolving, so nothing else is
-running while you listen.
+A terminal player for YouTube Music. Audio only: no browser, no video window.
 
 ```
 ┌─ 1 Liked Music·412 ─ 2 Playlists ─ 3 Subscriptions ─ 4 History ─ 5 Queue·2 ─ 6 Search·30 ─ ◉ you ┐
@@ -30,833 +24,134 @@ running while you listen.
 
 ![ytui playing the Liked Music tab](docs/screenshot.png)
 
-## Audio
+Your Liked Music, playlists, subscriptions, history and search in six tabs,
+with keyboard and mouse control. The OS media keys work too, even while the
+terminal is in the background. Press `?` in the player for the full key list.
 
-ytui only downloads an audio stream, so the video resolution on YouTube does
-not matter. It asks for AAC (`itag` 141, then 140, then 139) and probes each
-URL with a 1 KiB request, because YouTube sometimes returns 403 for one of
-them. The same itag can appear more than once, once per YouTube player client:
-their URLs are not equally usable, so the first copy that answers wins. The
-`visionos` client goes first because its URLs need no PO token.
+## 1. Install
 
-The output stream is opened at the track's own sample rate. YouTube AAC is
-44.1 kHz, so on a 44.1 kHz device nothing is resampled. If the device refuses
-that rate, ytui falls back to 48 kHz and resamples. Windows WASAPI shared mode
-only accepts the device mix format, which is usually 48 kHz, so there the
-44.1 kHz tracks are resampled by default.
-
-On Windows the player also follows the system default output device, checked
-every two seconds: connecting Bluetooth headphones mid-song reopens the stream
-on them and carries the unplayed seconds over, instead of leaving the music on
-the speakers the stream was opened on.
-
-Working out a stream URL takes `yt-dlp` about four seconds locally and up to
-twenty on a cold resolver. The next track is requested once the current one is
-within twice the measured resolve time (never less than twenty seconds), and
-only its URL is kept (a few hundred bytes, no audio), so the handover costs
-about 0.2 s without holding links for songs that are still far away. A resolve
-that hangs is killed after 30 seconds, and a failed one is retried once:
-otherwise a transient error would leave the next track to be resolved at the
-handover, which is heard as a pause.
-
-When a track ends in seven seconds or more of silence, ytui moves to the next
-one at the start of that silence instead of playing it out. Finding it costs no
-audio buffer: a short-lived second decoder reads the last twelve seconds once,
-keeps one RMS number per 100 ms (under half a kilobyte) and throws the samples
-away. The verdict needs both an absolute floor (−45 dBFS) and a relative gate,
-so a quiet song keeps its ending.
-
-The audio is pulled in 256 KiB HTTP ranges by a background thread that keeps
-about a minute of encoded sound ready ahead of the decoder. The decoded ring is
-only two seconds, so earlier a range request that stalled for a few seconds was
-an audible hole in the middle of a track; now the music plays on while the
-request catches up. The ranges reuse one keep-alive connection instead of
-opening a new TLS session every sixteen seconds.
-
-Opus (`itag` 251) would be a bit better than 128 kbps AAC, but `symphonia` has
-no Opus decoder, so those uploads are skipped with a message.
-
-## Quick start
-
-### 1. Install the player
-
-Linux, WSL and macOS use the same commands:
+**Linux, WSL or macOS:**
 
 ```bash
 git clone https://github.com/tacamihail/ytui.git
 cd ytui
 ./install.sh
-```
-
-`install.sh` downloads the release binary for your platform, also installing
-`yt-dlp`, `deno` and the ALSA runtime when they are missing, then puts
-`~/.local/bin/ytui` in place. If the release cannot be used — a fork, an
-unreleased commit, an unsupported platform or a binary that does not run on
-your system — it builds from source instead, installing a current Rust (via
-rustup when the system one is too old) and the build dependencies first. Verify
-it:
-
-```bash
 ytui doctor
 ```
 
-On macOS the launcher runs the binary from a minimal agent bundle at
-`~/.local/lib/ytui/ytui.app` instead (see [macOS](#macos)).
+The script downloads the release binary for your platform and adds `yt-dlp`,
+`deno` and the ALSA runtime when they are missing; a fork, an unreleased
+commit or an unsupported platform falls back to building from source (add
+`--from-source` to force that). It is safe to rerun, and `ytui doctor`
+verifies the setup.
 
-Windows runs the player natively, without WSL, so resolver discovery can see
-the LAN and audio goes through WASAPI. In PowerShell:
+**Windows** — the player runs natively, no WSL needed. In PowerShell:
 
 ```powershell
 git clone https://github.com/tacamihail/ytui.git
 cd ytui
 .\install.ps1
-```
-
-From cmd.exe, run `install.cmd` instead; it calls the same script with a
-process-local execution policy. If PowerShell refuses to run `install.ps1`,
-that wrapper (or `powershell -ExecutionPolicy Bypass -File .\install.ps1`) is
-the way around it. The script downloads `ytui.exe` from the latest release,
-installs the standalone `yt-dlp.exe` and Deno, copies the binary to
-`%USERPROFILE%\.local\bin` and adds that directory to the user `PATH`. Open a
-new terminal afterwards and run:
-
-```powershell
 ytui doctor
 ```
 
-A source build (`.\install.ps1 -FromSource`, or when no release asset can be
-used) needs the MSVC linker: install "Visual Studio Build Tools" with the
-"Desktop development with C++" workload if you do not have Visual Studio. A
-release install does not need Rust or a linker at all. Windows Terminal is
+From cmd.exe, run `install.cmd` instead; if PowerShell refuses to run
+`install.ps1`, use `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
+Open a new terminal afterwards so the updated `PATH` is picked up. A release
+install needs neither Rust nor a linker; a source build
+(`.\install.ps1 -FromSource`) needs the MSVC linker ("Visual Studio Build
+Tools" with the "Desktop development with C++" workload). Windows Terminal is
 recommended over legacy `conhost` for the box drawing and mouse support.
 
-### 2. Connect your YouTube account (optional)
+To update later: `ytui update`, or press `u` in the player.
 
-Liked Music, playlists and subscriptions need cookies; search and playback do
-not. Export `cookies.txt` from a private window as described in
-[Account](#account), then import and check it:
+Manual builds, the macOS app bundle, WSL audio and how to uninstall:
+[docs/install.md](docs/install.md). How a release is published:
+[docs/releases.md](docs/releases.md).
+
+## 2. Sign in with cookies (optional)
+
+Search and playback work without an account. Your Liked Music, playlists and
+subscriptions need YouTube cookies — there is no OAuth app and no API key.
 
 ```bash
-ytui auth ~/cookies.txt
-ytui auth --status
+ytui auth ~/cookies.txt      # import a cookies.txt export
+ytui auth --browser chrome   # or read them from a local browser
+ytui auth --status           # check what is connected right now
+ytui logout                  # forget the cookies and the account
 ```
 
-Or let yt-dlp read a local browser profile:
+How to export cookies that keep working:
+
+1. Install the "Get cookies.txt LOCALLY" extension in Chrome or Firefox and
+   allow it in private windows.
+2. Open a **new private/incognito window** and sign in to
+   <https://music.youtube.com>.
+3. In that same tab, open <https://www.youtube.com/robots.txt>.
+4. Export the `youtube.com` cookies to `cookies.txt`.
+5. **Close the private window** and never reopen it.
+
+The export must include the HttpOnly cookies (the extension adds them).
+`ytui auth` verifies the file with YouTube and refuses a signed-out export
+rather than overwriting a working setup. Use one export per machine: two
+copies of the same session rotate independently and Google signs both out.
+
+Why the private window matters, and reading cookies straight from a browser:
+[docs/account.md](docs/account.md).
+
+## 3. Use a resolver on another machine (optional)
+
+Resolving a track briefly runs `yt-dlp` and deno: about 110 MB plus a 300 MB
+peak, once per track. `ytui-resolver` is a small server for another box (a
+NAS, a Raspberry Pi, a VPS on your tailnet), so the spike happens there and
+only the resolved URL crosses the network.
+
+On the server (needs Rust 1.89+, `yt-dlp` and `deno`):
 
 ```bash
-ytui auth --browser chrome
-```
-
-`ytui logout` forgets the cookies and the saved account.
-
-### 3. Install ytui-resolver on another machine (optional)
-
-The resolver moves yt-dlp/deno's memory spike off the player machine. It is a
-separate package: no TUI, no audio crates, no ALSA. On the server:
-
-```bash
-# Option A: build only the resolver (needs Rust 1.89+)
 cargo install --git https://github.com/tacamihail/ytui ytui-resolver
-
-# Option B: no checkout; also installs yt-dlp and deno
-curl -fsSLO https://raw.githubusercontent.com/tacamihail/ytui/main/install-resolver.sh
-bash install-resolver.sh --from-git
+ytui-resolver --bind 0.0.0.0:8787 --allow-private   # trusted LAN or tailnet
 ```
 
-Both options need `yt-dlp` and `deno` on the server. The script installs them;
-`cargo install` does not.
-
-Update it later with `ytui-resolver update` (or `update --check` to only ask
-github); it rebuilds in place and restarts the autostart entry.
-
-The server can also keep itself current: every four hours it checks github and,
-when the version on `main` changed, reinstalls with the same `cargo install`
-and re-executes into the new binary. That is on by default; add
-`--no-auto-update` to the service flags to keep a fixed version. It needs
-`cargo`, `git` and a C toolchain on the server, like a manual update, and is
-Linux/macOS only (Windows cannot replace a running `.exe`).
-
-Launch it on a trusted LAN or tailnet without a token:
-
-```bash
-ytui-resolver --bind 0.0.0.0:8787 --allow-private
-```
-
-Leave `--cookies` off unless you need age-restricted or members-only tracks.
-The resolver never receives the player's cookies, but if you give it a copy of
-the same session, two machines keep their own `cookies.txt` and refresh
-`__Secure-1PSIDTS` independently; when they drift, Google can treat the second
-one as a stolen session and sign the account out. Age-restricted tracks still
-play when the server is anonymous: the client falls back to its own yt-dlp when
-the server answers `502`. `ytui doctor` prints a line when the resolver reports
-that it uses cookies.
-
-For a public address, generate a token and run the same bind **without**
-`--allow-private`:
-
-```bash
-ytui-resolver --gen-token
-ytui-resolver --bind 0.0.0.0:8787
-```
-
-Add `--install-service` to run it at login instead, reusing the same options:
-
-```bash
-ytui-resolver --bind 0.0.0.0:8787 --allow-private --install-service
-```
-
-That writes a systemd user unit on Linux, a LaunchAgent on macOS and a Startup
-entry on Windows. `--uninstall-service` removes it. See
-[Run at login](docs/resolver.md#run-at-login).
-
-On the player machine, discover a tokenless private resolver and save it:
+On the player:
 
 ```bash
 ytui discover --save
 ```
 
-If the resolver is not on the local network (Tailscale, WireGuard, a VPN,
-another subnet, or a client inside WSL), pass its address instead:
-
-```bash
-ytui discover --url http://100.64.0.5:8787 --save
-```
-
-Or open the player and press `?`, then `s`, to scan the local network again. A
-public resolver is not found by the scan: set `resolver_url` and
-`resolver_token_file` in `~/.config/ytui/config.json` (see
-[Client config](#client-config)).
-`ytui doctor` prints the resolver address, version and latency. More detail:
-[Remote resolver](#remote-resolver).
-
-## Install details
-
-The installer is safe to rerun. It keeps an existing config and updates the
-binary in place. Both installers try the release asset for the platform first
-and verify it against the published `SHA256SUMS`. A platform with no asset, a
-download that does not verify, or a binary that cannot run falls back to a
-source build.
-
-On Linux the source build needs a C linker and the ALSA headers
-(`libasound2-dev`, `alsa-lib` or `alsa-lib-devel`); the script installs them
-when it can, and prints the package names when it cannot. On macOS it checks
-for the Xcode command line tools. The ALSA runtime is still installed for a
-release build, because the binary links it dynamically.
-
-On Windows, `install.ps1` also downloads the standalone `yt-dlp.exe`, so no
-Python is needed, and Deno is unpacked into `%USERPROFILE%\.deno\bin`. A source
-build writes the checkout path to `%USERPROFILE%\.config\ytui\source`; a
-release install removes that file, so `ytui update` knows to download a release
-instead of rebuilding. `install.sh --from-source` (or
-`YTUI_FROM_SOURCE=1`) and `install.ps1 -FromSource` skip the download.
-
-When no resolver is configured, the installer also scans the local network for
-up to 10 seconds on a fresh install and saves a tokenless one if it finds it.
-Reruns skip that scan and only fetch `SHA256SUMS` when the installed binary is
-already the latest release, so reinstalling is quick. Set
-`YTUI_SKIP_DISCOVER=1` (or pass `-SkipDiscover` on Windows) to skip the scan, or
-`YTUI_DISCOVER=1` (or `-Discover` on Windows) to run it again.
-
-To update later:
-
-```bash
-ytui update          # install the newer version from github
-ytui update --check  # only report whether one exists
-```
-
-A release install downloads the asset for the platform. A source install pulls
-and rebuilds the checkout. In both cases the version is the `[package] version`
-in `Cargo.toml`; commits that do not change it are not installed. `ytui update`
-refuses to touch a checkout with uncommitted changes or local commits. It
-updates the checkout the installer ran from; set `YTUI_SRC` to point elsewhere.
-On macOS the updater replaces the binary inside the `ytui.app` bundle and
-re-signs it, so Now Playing keeps its name and icon. Inside the player, `?`
-checks github and `u` installs a newer version; a clickable `↑ 0.4.0` chip
-appears when one is waiting.
-
-### Releases
-
-Releases are built by `.github/workflows/release.yml`. Bump the `[package]
-version` in `Cargo.toml`, commit, and push a tag that matches it:
-
-```bash
-git tag v0.4.11
-git push origin v0.4.11
-```
-
-The workflow builds and smoke-tests `ytui-x86_64-pc-windows-msvc.exe`,
-`ytui-x86_64-unknown-linux-gnu`, `ytui-aarch64-apple-darwin` and
-`ytui-x86_64-apple-darwin`, publishes them with `SHA256SUMS`, and fails when
-the tag does not match `Cargo.toml`. If one platform's builder fails, the
-release still gets the other assets and the run is marked failed; the installer
-falls back to a source build on the missing platform. Running the workflow by
-hand (`workflow_dispatch`) builds the same assets without publishing a release,
-so the installers can be tested before a tag exists.
-
-Manual build:
-
-```bash
-cargo build --release
-mkdir -p ~/.local/bin
-cp target/release/ytui ~/.local/bin/ytui
-```
-
-On macOS prefer `./install.sh`: it also creates the app bundle described in
-[macOS](#macos). A binary copied out of the bundle works, but the system shows
-it as an unnamed process with a generic icon.
-
-On Windows the same manual build is:
-
-```powershell
-cargo build --release
-New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.local\bin"
-Copy-Item target\release\ytui.exe "$env:USERPROFILE\.local\bin\"
-```
-
-### macOS
-
-ytui publishes the current track to the system Now Playing panel, so the media
-keys, Control Center, the Touch Bar and headphone buttons control it like any
-other player. Title, channel, artwork and progress come from the track ytui is
-playing; play/pause, seek, next and previous work in both directions. No Dock
-icon or menu bar item appears.
-
-The macOS build runs from a minimal agent bundle, `~/.local/lib/ytui/ytui.app`
-(`LSUIElement`, ad-hoc signed as `dev.tacamihail.ytui`). The bundle is what
-gives the process its name and YouTube Music-style icon in Now Playing, Control
-Center, the Touch Bar and the app lists; the signature gives it a stable
-identity that persists across launches. `install.sh` creates the bundle and
-registers it with LaunchServices, and `ytui update` re-signs it after replacing
-the binary. If the Touch Bar keeps showing a cached icon, restart its agent (it
-relaunches the next time media plays):
-
-```bash
-killall NowPlayingTouchUI
-```
-
-If the keys still go to Music.app, allow the terminal that launched ytui under
-**System Settings → Privacy & Security → Media & Apple Music**.
-
-### WSL
-
-WSL cannot discover a resolver on your LAN: it only sees the WSL virtual
-network. Run the player natively on Windows (see above) if you want discovery,
-or point it at the resolver explicitly with
-`ytui discover --url http://<host>:8787 --save`.
-
-WSL has no sound card, only a PulseAudio socket. ALSA's `default` device still
-points at card 0, so ytui asks for the `pulse` PCM first and only falls back to
-`default` when that fails. You just need the bridge:
-
-```bash
-sudo apt-get install -y libasound2-plugins
-```
-
-Media keys in WSL come from the native Windows build: put `ytui.exe` on
-`PATH` (the [Windows install](#1-install-the-player) does this) and the WSL
-build will start it as a hidden media-session bridge. See
-[Media keys](#media-keys). If WSL interop is disabled
-(`/proc/sys/fs/binfmt_misc/WSLInterop` missing), ytui grabs the media keys
-from WSLg's X server instead, so they still work under the default WSLg
-setup.
-
-No `~/.asoundrc` edit is needed. `ytui doctor` prints the PCM it picked, for
-example `✔ audio output: pulse @ 44100 Hz stereo`.
-
-If you can't use sudo, `install.sh` extracts the package into `~/.local/alsa`
-when apt fails and points the launcher at it with a private ALSA config. Your
-`~/.asoundrc` is not touched. The manual equivalent is:
-
-```bash
-cd /tmp
-apt-get download libasound2-plugins
-dpkg -x libasound2-plugins_*.deb ~/.local/alsa
-```
-
-Then rerun `./install.sh` so it writes `~/.config/ytui/asound.conf` for the
-launcher.
-
-## Account
-
-Liked Music, playlists and subscriptions need cookies from a browser that is
-signed in to YouTube. There is no OAuth app and no API key: YouTube disabled
-OAuth for yt-dlp, so cookies are the only way in.
-
-```bash
-ytui auth ~/cookies.txt      # import a Netscape cookies.txt
-ytui auth --browser chrome   # or read them from a local browser
-ytui auth --status           # what is connected right now
-ytui logout                  # forget the cookies and the account
-```
-
-### Exporting cookies that keep working
-
-YouTube rotates the account cookies on every open YouTube tab, as a security
-measure. An export taken from a normal browser window goes stale within hours
-or days, and exporting again from that same window keeps it stale. The fix is
-to export from a session that is never opened again:
-
-1. install "Get cookies.txt LOCALLY" and allow it in private windows
-   (`chrome://extensions` → Details → *Allow in Incognito*)
-2. open a **new private/incognito window** and sign in to
-   <https://music.youtube.com>
-3. in that same tab, open <https://www.youtube.com/robots.txt>; keep it the
-   only private tab
-4. export the `youtube.com` cookies to `cookies.txt`
-5. **close the private window** and never reopen it
-
-Nothing rotates that session after step 5, so the file keeps working for weeks
-or months instead of expiring. This is the same advice as the "Exporting
-YouTube cookies" section of the yt-dlp wiki.
-
-ytui also serializes its own yt-dlp runs around the `--cookies` file. yt-dlp
-saves the jar when it exits, which is how the rotating `__Secure-1PSIDTS`
-stays current. A listing, a background prefetch and a manual resolve used to be
-able to write the same jar at once; the last save could put a stale token back,
-and the next request would sign the account out. The runs now share a
-`cookies.txt.lock` file next to it, across the player, `ytui doctor` and
-`ytui auth`. A second machine with its own copy of the same session cannot
-share that lock — see the resolver note below.
-
-The subscriptions tab used to be fetched with a raw `Cookie:` header. That read
-the stored `__Secure-1PSIDTS` but threw away the rotated value YouTube sent
-back, so the jar aged faster than the clock and could be rejected as a replay.
-Subscriptions now go through the same yt-dlp listing as the other tabs, which
-saves the rotation. They also work with `--browser` cookies now.
-
-One export is one client. Installing the same `cookies.txt` on a second
-machine, or importing it inside WSL, gives that copy the same session; the two
-then rotate the token independently and Google signs both out. If you want
-ytui on two machines, sign in to each one in its own private window and export
-separately. A resolver started with `--cookies` is a third client; leave it
-anonymous (playback falls back to local yt-dlp for age-restricted tracks).
-
-The export has to include the HttpOnly cookies: without them the file is
-signed out, and `ytui auth` refuses it rather than overwriting a working
-`~/.config/ytui/cookies.txt`. `ytui auth` checks the cookies against YouTube,
-saves the channel in `~/.config/ytui/account.json` and copies them to
-`~/.config/ytui/cookies.txt` with mode `600`.
-
-### Reading cookies from the browser
-
-`ytui auth --browser <name>` skips the export: yt-dlp reads the browser's
-cookie database on every run, so there is nothing in a file to go stale. The
-browser has to stay signed in to YouTube. One limit:
-
-- on Linux, Chrome-family browsers encrypt their cookies with the system
-  keyring. It works only if the keyring is unlocked and yt-dlp can decrypt
-  them, otherwise `ytui auth` reports that it could not verify the account.
-
-Search and playback work without an account.
-
-## Tabs
-
-1. Liked Music (opens here)
-2. Playlists
-3. Subscriptions
-4. History
-5. Queue
-6. Search
-
-`Enter` on a playlist opens it, `Esc` goes back. History is local
-(`~/.local/share/ytui/history.json`); Queue is whatever is playing now.
-
-Liked Music, Playlists and Subscriptions are also cached in
-`~/.config/ytui/cache/`, so switching to a tab paints the last list
-immediately. A cache older than 15 minutes is refreshed in the background while
-the old rows stay on screen; `r` refreshes right away. On a cold start,
-`--lazy-playlist` streams the first page as yt-dlp reads it, so rows fill in
-progressively instead of all appearing at once.
-
-## Keys
-
-`1`-`6`, `Tab` and `Shift+Tab` switch tabs. `Up`/`Down` or `j`/`k` move the
-selection, `PageUp`/`PageDown` jump, `Enter` plays the list from the selected
-row, `a` appends to the queue, `/` searches (a query, video URL or playlist
-URL) and `r` refreshes.
-
-`space` or `p` pauses, `left`/`right` seek 5 seconds, `,` and `.` seek 30,
-`[` `]` change the volume, `m` mutes, `s` shuffles, `R` cycles repeat, `<` `>`
-skip tracks, `x` stops, `d` deletes an entry, `c` copies the link, `?` shows
-the help (with the version and an update check), `u` installs a newer version
-(or checks when there is none), and `q` quits. Inside the help overlay, `s`
-scans the local network for a resolver (see [Remote resolver](#remote-resolver)).
-
-The mouse works as well: click a tab, click a row to select it, double-click
-to play, click the progress bar to seek, and click the buttons in the player.
-The wheel moves five rows at a time. The speaker at the end of the player line
-mutes, and the slider to its left can be clicked or dragged.
-
-The row that is playing is marked with a green ▶ in every list that contains
-it, so it is easy to find your place after browsing elsewhere.
-
-When a track can't be resolved because YouTube no longer serves it, ytui says
-so in the status line and moves to the next one. It gives up after five dead
-tracks in a row, which usually means the problem is cookies or the network
-rather than the list; `space` retries.
-
-## Media keys
-
-ytui registers with the operating system's media session, so the keyboard's
-play/pause, next and previous keys, and headphone buttons, control playback
-even while the terminal is in the background:
-
-- **Windows**: System Media Transport Controls (the volume flyout and lock
-  screen).
-- **Linux**: MPRIS as `org.mpris.MediaPlayer2.ytui`, which GNOME, KDE and
-  `playerctl` use for their media widgets and key bindings.
-- **macOS**: Now Playing (`MPNowPlayingInfoCenter` and
-  `MPRemoteCommandCenter`), which also feeds Control Center and, on Touch Bar
-  Macs, the Control Strip. ytui pumps the AppKit run loop from the TUI, so no
-  window or Dock icon appears, and it loads the YouTube thumbnail as artwork.
-  macOS does not let a terminal program draw custom Touch Bar buttons, so the
-  system's Now Playing tile is where those controls appear.
-- **WSL**: Windows delivers the keys to Windows programs only, so the WSL
-  build starts the native Windows build (`ytui.exe --media-bridge`) and drives
-  its media session over a pipe. Install the Windows build (see
-  [WSL](#wsl)) or point `YTUI_MEDIA_BRIDGE` at `ytui.exe`. If WSL interop is
-  disabled, ytui falls back to grabbing the XF86 keys from WSLg's X server,
-  which needs no Windows helper.
-
-The keys work while the help or search overlay is open, and terminals that
-forward media keys as input are handled too. `ytui doctor` prints which
-session was selected. Set `media_keys` to `false` in the config to turn the
-integration off.
-
-## Config
-
-`~/.config/ytui/config.json` (on Windows
-`%USERPROFILE%\.config\ytui\config.json`) is created on the first run or by
-the installer:
-
-| field | default | meaning |
-|---|---|---|
-| `cookies_file` | `""` | cookie file path, set by `ytui auth` |
-| `cookies_browser` | `""` | read cookies from a browser instead |
-| `results_count` | `30` | search results |
-| `fetch_limit` | `2000` | max entries per playlist or feed |
-| `history_limit` | `300` | history entries kept |
-| `seek_step` | `5.0` | seconds for `left`/`right` |
-| `volume_step` | `5` | percent per `[` `]` |
-| `volume` | `35` | starting volume |
-| `buffer_ms` | `2000` | audio ring buffer |
-| `cache_kib` | `256` | HTTP Range chunk size |
-| `resolver_url` | `""` | remote resolver base URL; empty = resolve locally |
-| `resolver_token` | `""` | bearer token (prefer the file) |
-| `resolver_token_file` | `""` | token file; empty = `~/.config/ytui/resolver.token` when it exists |
-| `resolver_timeout_secs` | `20` | how long to wait for the resolver |
-| `resolver_fallback` | `true` | use local yt-dlp when the resolver fails |
-| `media_keys` | `true` | register with the OS media session for media keys |
-
-## Remote resolver
-
-Resolving a track starts `yt-dlp`, which starts deno to solve YouTube's JS
-challenge: about 110 MB plus a 300 MB peak for a few seconds, once per track.
-If that spike is unwelcome on the machine that plays music, run the small
-`ytui-resolver` binary on another box (a NAS, a Raspberry Pi, a tailnet VPS).
-The client then asks it for stream candidates and keeps audio playback and
-the 1 KiB probes local.
-
-### Install on the server
-
-The resolver is a separate package. Building it does not compile the TUI,
-`ratatui`, `cpal` or `symphonia`, and the server needs no ALSA. The resulting
-binary is about 600 KB.
-
-If the server has Rust 1.89+, this downloads the source to cargo's cache and
-builds only `ytui-resolver` and `ytui-resolve`:
-
-```bash
-cargo install --git https://github.com/tacamihail/ytui ytui-resolver
-```
-
-The binary lands in `~/.cargo/bin/ytui-resolver`. `cargo install` does not
-install `yt-dlp` or `deno`; the server still needs both.
-
-If you prefer a checkout, or want the script to install `yt-dlp` and `deno`
-too:
-
-```bash
-git clone https://github.com/tacamihail/ytui.git
-cd ytui
-./install-resolver.sh          # add --token for public/token mode
-```
-
-`install-resolver.sh` builds only `-p ytui-resolver` and installs
-`~/.local/bin/ytui-resolver`. It upgrades an old system Rust via rustup. The
-manual equivalent inside a checkout is:
-
-```bash
-cargo build --release -p ytui-resolver
-install -Dm755 target/release/ytui-resolver ~/.local/bin/ytui-resolver
-```
-
-Without keeping a checkout, fetch the script and run it with `--from-git`:
-
-```bash
-curl -fsSLO https://raw.githubusercontent.com/tacamihail/ytui/main/install-resolver.sh
-bash install-resolver.sh --from-git
-```
-
-### Launch
-
-On a trusted LAN or tailnet, no token is needed:
-
-```bash
-ytui-resolver --bind 0.0.0.0:8787 --allow-private
-```
-
-Public addresses need a token:
-
-```bash
-ytui-resolver --gen-token
-ytui-resolver --bind 0.0.0.0:8787
-```
-
-### Automatic discovery
-
-When the installer runs and `resolver_url` is still empty, the client scans
-localhost and the private networks for up to 10 seconds. If a tokenless
-resolver answers on port 8787, its URL is saved to `config.json` and ytui uses
-it from then on. If nothing answers, the config is left alone and ytui keeps
-resolving locally with its own yt-dlp.
-
-The same scan is in the help overlay: press `?`, then `s`. It may take up to
-60 seconds (the install-time scan is capped at 10), and `ENTER` picks a listed
-resolver while `ESC` cancels. From a shell:
-
-```bash
-ytui discover --save --timeout 10
-```
-
-The scan checks localhost and each private IPv4 `/24` the machine is attached
-to, so it finds a resolver on a plain LAN without any extra tooling. It only
-probes port 8787, and it never overwrites a `resolver_url` that is already
-configured. When several tokenless resolvers answer, ytui picks the one with
-the lowest estimated wait per track: the server's own recent resolve time from
-`/v1/health` plus the health round-trip. The scan keeps probing for 1.5 s after
-the first answer, so a neighbouring faster resolver still gets a chance.
-
-Overlay networks are not a local `/24`, so the scan cannot see them: that
-covers Tailscale's `100.64.0.0/10`, WireGuard and other VPNs, a resolver on
-another subnet, and a client inside WSL (which only sees the WSL virtual
-network). Point ytui at the address once instead:
-
-```bash
-ytui discover --url http://100.64.0.5:8787 --save
-```
-
-### Tokenless LAN or tailnet
-
-Start the server with `--allow-private` to trust peers in private ranges
-without a token. That covers RFC1918, link-local, IPv6 ULA and Tailscale's
-`100.64.0.0/10` range:
-
-```bash
-ytui-resolver --bind 0.0.0.0:8787 --allow-private
-```
-
-Public peers still need a token, and are refused when no token is configured.
-Without `--allow-private`, a non-loopback bind still refuses to start without
-a token, as before.
-
-### Public address with a token
-
-For a resolver on a public address, keep the token requirement and configure
-the same token on the client:
-
-```bash
-ytui-resolver --bind 0.0.0.0:8787 --token-file ~/.config/ytui/resolver.token
-```
-
-The server has no TLS of its own, so put Caddy or nginx in front when the
-address is public. The automatic scan only finds private resolvers; a public
-resolver is added by editing the config and is never overwritten by the
-installer or a later scan.
-
-### Client config
-
-```json
-"resolver_url": "http://100.64.0.5:8787",
-"resolver_token_file": "",
-"resolver_timeout_secs": 20,
-"resolver_fallback": true
-```
-
-`YTUI_RESOLVER` and `YTUI_RESOLVER_TOKEN` override the URL and token.
-`ytui doctor` prints the resolver version and latency. With
-`resolver_fallback` on, a dead server falls back to local yt-dlp and shows
-one toast per session; with it off, playback fails with the resolver error.
-
-Only stream resolution moves. Search, playlists and the subscriptions feed
-still use the local `yt-dlp`, so the client keeps its own yt-dlp and cookies.
-
-There is deliberately no TLS in the server: run it on a LAN or a
-Tailscale/WireGuard network, or put Caddy in front. The server learns which
-videos you resolve, so treat it like the YouTube account it uses. See
-[docs/resolver.md](docs/resolver.md) for the protocol, systemd unit and
-cache/rate-limit details.
-
-## Files
-
-- `~/.config/ytui/config.json` - config
-- `~/.config/ytui/cookies.txt` - imported cookies, mode `600`
-- `~/.config/ytui/account.json` - channel name and id
-- `~/.config/ytui/cache/` - last listing per tab, ignored after logout
-- `~/.config/ytui/resolver.token` - token for the remote resolver, mode `600`
-- `~/.local/share/ytui/history.json` - play history
-
-On Windows the same layout lives under `%USERPROFILE%`: the config and cookies
-are in `%USERPROFILE%\.config\ytui\`, history in
-`%USERPROFILE%\.local\share\ytui\`, and the binary is
-`%USERPROFILE%\.local\bin\ytui.exe`.
-
-## Memory
-
-Measured with a release build on WSL2 in a 130x30 terminal. The numbers are
-`VmRSS` from `/proc/<pid>/status`, after the list finished loading:
-
-| state | RSS |
-|---|---|
-| idle, Liked Music loaded | ~8 MB |
-| playing a normal track | ~11.5 MB |
-| playing a 108 h, 6.3 GB mix | ~16.5 MB |
-| the same after seeking to the middle | ~16.5 MB |
-
-Peak memory (VmHWM) was at most 1.5 MB above RSS.
-
-The 108 h case is the largest because it keeps the file's fragment index in
-RAM (about 0.6 MB, 39k fragments) so seeking stays a single request. Apart from
-that index, memory is a roughly 1 MB audio ring, up to six 256 KiB range chunks
-(four queued ahead of the decoder and two in flight, about 1.5 MB), the packet
-being decoded and up to 16 resolved URLs (about 25 KiB).
-
-Only the next track's URL is resolved, and only once the current one is within
-twice the measured resolve time (at least twenty seconds) of its end. Resolving
-runs at `nice 10`, so it does not compete with the decoder. A track you choose
-yourself is resolved immediately and never waits behind that queue. On a machine
-where audio still crackles during playback, `YTUI_PREFETCH=0 ytui` disables
-background resolution.
-
-A tail scan borrows a second decoder for a moment at the end of a track: about
-0.4 MB of transient RSS, and under 1 KiB of RMS levels. It does not change the
-steady-state numbers above.
-
-These are ytui's own numbers. Resolving a track also runs `yt-dlp`, which
-starts deno to solve YouTube's JavaScript challenge: about 110 MB plus 300 MB
-for two or three seconds, once per track. That is the spike a system monitor
-shows when a track is resolved, and it belongs to those processes, not to the
-player; on Windows the yt-dlp child alone measures about 70 MB of working set
-before deno starts, which is not comparable to the `VmRSS` figures above.
-Skipping to the track that is already being resolved waits for that
-resolution instead of starting a second one.
-
-The [remote resolver](#remote-resolver) exists for that spike: with
-`resolver_url` set, those processes run on the server instead and the player
-numbers in the table do not change.
-
-The virtual size is bigger still (about 350 MB) because PulseAudio maps a few
-64 MB shared-memory pools and glibc reserves heap for each thread. Almost none
-of that is resident, so RSS is the number to watch.
-
-`python3 tools/ram.py [URL ...]` runs the real TUI in a pty and prints the same
-table on your machine, plus the peak of the resolver processes.
-
-## Problems
-
-No sound on WSL: `libasound2-plugins` is missing. Rerun `./install.sh` or run
-`sudo apt-get install -y libasound2-plugins`; no `~/.asoundrc` is needed. If
-`ytui doctor` says it cannot reach PulseAudio, check WSLg (`wsl --update` on
-Windows) and that `PULSE_SERVER` points at `/mnt/wslg/PulseServer`.
-On a desktop, check that PipeWire or PulseAudio is running.
-
-A long title on the selected row scrolls to show the rest. It stops while the
-terminal is in the background, which needs focus reporting: terminals that do
-not implement it never report a lost focus, so the title simply keeps
-scrolling. Under tmux or screen, enable it with `set -g focus-events on`.
-
-"no AAC stream for this track (opus only)": the upload has no M4A audio and
-`symphonia` can't decode Opus.
-
-"unavailable on youtube": the upload was removed, is blocked in your country,
-or is otherwise not served to this account. Nothing in ytui can fix it; the
-track stays in the list until you unlike it on YouTube.
-
-"private: sign-in required": the session has no account cookies. Export them
-again and import them on this machine only.
-
-"playlist not found" on Liked Music or Watch Later: the export is signed out,
-revoked or incomplete. Netscape exports need the HttpOnly cookies too ("Get
-cookies.txt LOCALLY" includes them), so export while
-<https://music.youtube.com> is open in a signed-in browser and run
-`ytui auth <file>` again. If the export was fresh, check for a second copy:
-another ytui (WSL counts), a browser tab still using that session, or a
-resolver started with `--cookies`. `ytui doctor` and `ytui auth --status` check
-the cookies against YouTube and now say "signed out" instead of "expired" when
-YouTube cleared the first-party cookies.
-
-Search returns nothing or a 403: `yt-dlp` is too old.
-
-"Unable to extract uploader id": `yt-dlp` can't find `deno`. Make sure
-`~/.deno/bin` (Windows: `%USERPROFILE%\.deno\bin`) is on `PATH`.
-
-"resolver unavailable (...), using local yt-dlp": the configured resolver
-did not answer and the client fell back. `ytui doctor` shows the reason.
-
-"resolver: bad token": the client and server tokens differ. Regenerate with
-`ytui-resolver --gen-token` and point `resolver_token_file` at the result.
-
-Media keys do nothing: `ytui doctor` prints the media session it selected.
-On Linux the keys go to the focused player through MPRIS, so check
-`playerctl -l` and that `DBUS_SESSION_BUS_ADDRESS` is set (it is not under
-plain `ssh` or `sudo -i`). On Windows make sure `media_keys` is not `false`
-and that another player is not holding the session; the volume flyout should
-list ytui while a track is loaded. On macOS the keys follow the current Now
-Playing app, so quit Music if it keeps claiming them, and make sure ytui runs
-in a GUI login session (over plain SSH there is no WindowServer to register
-with). Under WSL, the native Windows build should serve the session
-(`which ytui.exe`, or `YTUI_MEDIA_BRIDGE=/mnt/c/.../ytui.exe`); without
-interop, ytui uses WSLg's X server, so check that `DISPLAY` is set.
-`ytui doctor` names the backend that actually registered.
-
-Mouse does nothing: the terminal has to forward mouse events. Windows Terminal
-and most Linux terminals do; in tmux add `set -g mouse on` and restart ytui.
-
-Windows:
-
-- `ytui` is not recognized after installing: the installer added
-  `%USERPROFILE%\.local\bin` to the user `PATH`, which only new terminals pick
-  up. Open a new Windows Terminal or PowerShell window, or run the full path
-  `%USERPROFILE%\.local\bin\ytui.exe`.
-- No sound: `ytui doctor` prints the WASAPI device and sample rate it opened.
-  Check Settings → System → Sound that the intended output is the default.
-  ytui moves to a new default while it is running; a build older than 0.4.7
-  needs a restart after switching. WASAPI shared mode plays at the device mix
-  rate, usually 48 kHz, so 44.1 kHz tracks are resampled.
-- Garbled box drawing or no mouse: use Windows Terminal instead of legacy
-  `conhost`.
-- `ytui update` cannot replace `ytui.exe`: close the player first. The updater
-  renames the running binary, but antivirus can briefly hold the file open.
-
-Tracks that sound muffled only had 48 kbps HE-AAC (`itag 139`). Symphonia
-decodes the AAC core but not the SBR band, so the highs are missing. ytui
-prefers AAC-LC when YouTube offers it, and tries every player client's URL for
-that itag before accepting 139: the `tv` client's 128 kbps link is the one that
-usually answers with 403.
-
-## Uninstall
-
-```bash
-rm ~/.local/bin/ytui ~/.local/bin/ytui.bin
-rm -rf ~/.config/ytui ~/.local/share/ytui
-```
-
-On Windows:
-
-```powershell
-Remove-Item "$env:USERPROFILE\.local\bin\ytui.exe"
-Remove-Item -Recurse -Force "$env:USERPROFILE\.config\ytui", "$env:USERPROFILE\.local\share\ytui"
-```
+The installers also scan for a resolver automatically on a fresh install.
+Leave the server anonymous (no `--cookies`) unless you need age-restricted or
+members-only tracks: two machines sharing one session sign each other out,
+and the player falls back to its own yt-dlp when the server can't help.
+
+Run at login, tokens, public addresses, automatic updates:
+[docs/resolver.md](docs/resolver.md).
+
+## Using it
+
+`1`-`6` or `Tab` switch tabs, `Enter` plays, `space` pauses, `/` searches and
+`?` lists every key. The mouse works too: click rows, tabs, the progress bar
+and the player buttons. Tabs, keys and media keys:
+[docs/usage.md](docs/usage.md) · settings and files:
+[docs/config.md](docs/config.md).
+
+## Problems?
+
+Run `ytui doctor` first. The full list with explanations is in
+[docs/troubleshooting.md](docs/troubleshooting.md).
+
+## Documentation
+
+- [docs/install.md](docs/install.md) — what the installers do, manual builds,
+  macOS and WSL notes, uninstall
+- [docs/account.md](docs/account.md) — cookies: the export, session rotation,
+  one export per machine
+- [docs/resolver.md](docs/resolver.md) — the remote resolver
+- [docs/usage.md](docs/usage.md) — tabs, keys, mouse, media keys
+- [docs/config.md](docs/config.md) — the config table and files on disk
+- [docs/audio.md](docs/audio.md) — how the audio pipeline works
+- [docs/memory.md](docs/memory.md) — measured RAM numbers
+- [docs/troubleshooting.md](docs/troubleshooting.md) — the full problem list
+- [docs/releases.md](docs/releases.md) — how a release is tagged and published
 
 ## License
 
