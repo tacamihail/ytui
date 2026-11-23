@@ -636,7 +636,19 @@ audio.addEventListener("playing", () => {
   loading = false;
   $("buffering").hidden = true;
   markPlaying();
+  prefetchNext();
 });
+
+// Warm the server's resolve cache for the next queue track while this one
+// plays; the handover then costs the proxy's range request only.
+const prefetched = new Set();
+function prefetchNext() {
+  const next = queue[index + 1];
+  if (!next || prefetched.has(next.id)) return;
+  prefetched.add(next.id);
+  fetch("/v1/resolve?url=" + encodeURIComponent("https://www.youtube.com/watch?v=" + next.id))
+    .catch(() => {});
+}
 audio.addEventListener("waiting", () => { $("buffering").hidden = false; });
 audio.addEventListener("pause", () => {
   setIcon($("play"), "play");
