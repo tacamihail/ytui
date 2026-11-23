@@ -66,9 +66,10 @@ sheet to run it full-screen.
 - The player uses the current track's cover as a backdrop over the left half of
   the bar on phones: dimmed to 35%, cropped to the centered square so the
   filler bars in YouTube's 16:9 thumbnails do not show, and faded out by the
-  middle of the screen. On a desktop the whole square cover is shown at the
-  left instead, uncropped. A light vertical backdrop blur starts at the top
-  edge and fades out before the transport. Title, elapsed/total timers, seek bar and transport are
+  middle of the screen. On a desktop the whole square cover is shown at full
+  opacity and unblurred in a column of its own at the left, with the playback
+  laid out beside it. A light vertical backdrop blur starts at the top edge
+  and fades out before the transport on phones. Title, elapsed/total timers, seek bar and transport are
   centered; the channel shares the timer line with them and truncates with an
   ellipsis instead of wrapping or touching the times. On a desktop browser the
   transport row also carries mute, a volume slider and fullscreen (phones use

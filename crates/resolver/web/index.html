@@ -273,9 +273,18 @@ button.busy::after {
    mouse makes them useful; phones keep their hardware buttons instead. */
 #player .extras { display: none; }
 @media (hover: hover) and (pointer: fine) and (min-width: 820px) {
-  /* A desktop has room for the whole square cover instead of the half-width
-     fill; the crop above lands it exactly in a square box. */
-  #player .bg-wrap { width: auto; aspect-ratio: 1 / 1; }
+  /* A desktop has space to show the whole square cover beside the playback
+     instead of under it, so the art stays crisp and full opacity with a
+     reserved column of its own. */
+  #player { --cover: 148px; padding-left: calc(var(--cover) + 16px); }
+  #player .bg-wrap {
+    width: var(--cover); height: var(--cover);
+    top: 50%; transform: translateY(-50%);
+    -webkit-mask-image: none;
+            mask-image: none;
+  }
+  #player .bg { opacity: 1; }
+  #player .bg-blur { display: none; }
   #player .inner { max-width: 1000px; margin: 0 auto; }
   #player .extras { display: flex; align-items: center; gap: 6px; }
   #player .extras button { width: 34px; height: 34px; }
