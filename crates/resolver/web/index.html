@@ -6,53 +6,222 @@
 <title>ytui</title>
 <meta name="theme-color" content="#101014">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="ytui">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="format-detection" content="telephone=no">
 <style>
-:root { color-scheme: dark; }
+:root {
+  color-scheme: dark;
+  --bg: #101014; --panel: #15151b; --panel2: #1c1c23;
+  --line: #26262e; --text: #e8e8ec; --muted: #8a8a96; --accent: #4cc38a;
+}
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-body { margin:0; font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;
-  background:#101014; color:#e8e8ec; display:flex; flex-direction:column; height:100dvh; }
-header { position:sticky; top:0; background:#15151b; border-bottom:1px solid #26262e; z-index:2; }
-nav { display:flex; }
-nav button { flex:1; padding:12px 0; background:none; border:0;
-  border-bottom:2px solid transparent; color:#9a9aa6; font:inherit; font-weight:600; }
-nav button.active { color:#4cc38a; border-bottom-color:#4cc38a; }
-main { flex:1; overflow-y:auto; }
-.list { display:flex; flex-direction:column; }
-.row { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid #1c1c23; }
-.row .meta { flex:1; min-width:0; }
-.row .title { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.row .sub { color:#8a8a96; font-size:13px; }
-.row button { background:#1e1e26; color:#e8e8ec; border:1px solid #2c2c36;
-  border-radius:8px; padding:8px 12px; font-size:15px; }
-.row.playing .title { color:#4cc38a; }
-form.bar { display:flex; gap:8px; padding:10px 14px; }
-input { flex:1; background:#1c1c23; border:1px solid #2c2c36; color:#e8e8ec;
-  border-radius:10px; padding:10px 12px; font:inherit; }
-form.bar button { background:#26262e; border:0; border-radius:10px; color:#e8e8ec; padding:8px 16px; }
-#player { position:fixed; left:0; right:0; bottom:0; background:#15151b;
-  border-top:1px solid #26262e; padding:10px 14px calc(10px + env(safe-area-inset-bottom)); }
-#player .line1 { display:flex; justify-content:space-between; gap:10px; margin-bottom:8px; }
-#player .ptitle { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-#player .sub { color:#8a8a96; font-size:13px; }
-#player .controls { display:flex; align-items:center; gap:10px; }
-#player button { background:#1e1e26; color:#e8e8ec; border:0; border-radius:8px; padding:8px 12px; font-size:16px; }
-#seek { flex:1; }
-#time { color:#8a8a96; font-size:12px; min-width:96px; text-align:right; }
-.empty { color:#8a8a96; padding:24px 16px; text-align:center; }
-#overlay { position:fixed; inset:0; background:#101014ee; display:flex;
-  align-items:center; justify-content:center; z-index:10; }
-#overlay[hidden] { display:none; }
-#overlay .card { width:min(90vw,360px); background:#15151b; border:1px solid #2c2c36;
-  border-radius:14px; padding:20px; }
-#overlay h2 { margin:0 0 6px; font-size:17px; }
-#overlay p { color:#8a8a96; margin:0 0 14px; font-size:13px; }
-#overlay form { display:flex; gap:8px; }
-#toast { position:fixed; left:50%; transform:translateX(-50%); bottom:110px; background:#26262e;
-  border:1px solid #3a2c2c; color:#ffd7d7; border-radius:10px; padding:10px 16px;
-  max-width:80vw; z-index:11; }
-#toast[hidden] { display:none; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg); color: var(--text);
+  display: flex; flex-direction: column;
+  height: 100vh; height: 100dvh;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
+
+/* ---------- header ---------- */
+header {
+  flex: none; z-index: 2;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding-top: env(safe-area-inset-top);
+}
+nav { display: flex; }
+nav button {
+  flex: 1; min-height: 50px;
+  background: none; border: 0; border-bottom: 2px solid transparent;
+  color: var(--muted); font: inherit; font-weight: 700; font-size: 14px;
+  letter-spacing: .02em; touch-action: manipulation; cursor: pointer;
+}
+nav button.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* ---------- content ---------- */
+main {
+  flex: 1; overflow-y: auto; overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.list { display: flex; flex-direction: column; }
+.row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px; min-height: 58px;
+  border-bottom: 1px solid #1c1c23;
+}
+.row .meta { flex: 1; min-width: 0; }
+.row .title {
+  font-size: 15px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.row .sub {
+  color: var(--muted); font-size: 13px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.row button {
+  flex: none; width: 44px; height: 44px;
+  display: grid; place-items: center;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid #2c2c36; border-radius: 12px;
+  font-size: 16px; touch-action: manipulation; cursor: pointer;
+}
+.row.playing .title { color: var(--accent); }
+.row.playing { background: #141920; }
+
+form.bar {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; gap: 8px; padding: 10px 14px;
+  background: var(--bg);
+}
+input {
+  flex: 1; min-width: 0;
+  font-size: 16px; /* stops iOS Safari from zooming on focus */
+  background: var(--panel2);
+  border: 1px solid #2c2c36; color: var(--text);
+  border-radius: 12px; padding: 12px;
+  font-family: inherit;
+}
+form.bar button {
+  flex: none; min-height: 46px; padding: 0 18px;
+  background: #26262e; border: 1px solid #2c2c36; border-radius: 12px;
+  color: var(--text); font: inherit; font-weight: 600;
+  touch-action: manipulation; cursor: pointer;
+}
+.toolbar {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; background: var(--bg);
+}
+.toolbar button {
+  min-height: 40px; padding: 0 16px;
+  background: var(--panel2); border: 1px solid #2c2c36; border-radius: 10px;
+  color: var(--text); font: inherit; font-weight: 600;
+  touch-action: manipulation; cursor: pointer;
+}
+.toolbar .count { color: var(--muted); font-size: 13px; }
+
+/* ---------- loading ---------- */
+.skel {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px; min-height: 58px;
+  border-bottom: 1px solid #1c1c23;
+}
+.skel .circle {
+  flex: none; width: 44px; height: 44px; border-radius: 12px;
+  background: #1e1e26; animation: pulse 1.1s ease-in-out infinite;
+}
+.skel .bars { flex: 1; display: flex; flex-direction: column; gap: 7px; }
+.skel .b1, .skel .b2 {
+  height: 12px; border-radius: 6px; background: #1e1e26;
+  animation: pulse 1.1s ease-in-out infinite;
+}
+.skel .b1 { width: 68%; }
+.skel .b2 { width: 34%; animation-delay: .18s; }
+@keyframes pulse { 0%,100% { opacity: .4; } 50% { opacity: 1; } }
+.spin {
+  width: 18px; height: 18px; flex: none;
+  border: 2px solid #3c3c48; border-top-color: var(--accent);
+  border-radius: 50%; animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.empty {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  color: var(--muted); padding: 48px 24px; text-align: center; font-size: 14px;
+}
+.empty .spin { width: 26px; height: 26px; border-width: 3px; }
+
+/* ---------- player ---------- */
+#player {
+  flex: none; z-index: 3;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+}
+#player[hidden] { display: none; }
+#player .line1 {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 10px; min-width: 0; margin-bottom: 6px;
+}
+#player .ptitle {
+  font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#player .sub { color: var(--muted); font-size: 12px; white-space: nowrap; flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; }
+#seek {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 28px; margin: 0 0 4px;
+  background: transparent; touch-action: manipulation;
+}
+#seek::-webkit-slider-runnable-track {
+  height: 6px; border-radius: 3px;
+  background: linear-gradient(to right, var(--accent) 0 var(--fill, 0%), #2c2c36 var(--fill, 0%) 100%);
+}
+#seek::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent); margin-top: -6px;
+  box-shadow: 0 0 0 4px #4cc38a22;
+}
+#seek::-moz-range-track { height: 6px; border-radius: 3px; background: #2c2c36; }
+#seek::-moz-range-thumb {
+  width: 18px; height: 18px; border: 0; border-radius: 50%; background: var(--accent);
+}
+#player .controls {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+#player .buttons { display: flex; align-items: center; gap: 14px; }
+#player button {
+  width: 46px; height: 46px; display: grid; place-items: center;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid #2c2c36; border-radius: 50%;
+  font-size: 17px; touch-action: manipulation; cursor: pointer;
+}
+#player #play {
+  width: 54px; height: 54px; font-size: 20px;
+  background: var(--accent); color: #0b0b0e; border: 0;
+}
+#right { display: flex; align-items: center; gap: 10px; }
+#time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+#buffering[hidden] { display: none; }
+
+/* ---------- overlays ---------- */
+#overlay {
+  position: fixed; inset: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center;
+  background: #101014ee; padding: 24px;
+  padding-top: calc(24px + env(safe-area-inset-top));
+  padding-bottom: calc(24px + env(safe-area-inset-bottom));
+}
+#overlay[hidden] { display: none; }
+#overlay .card {
+  width: min(100%, 380px);
+  background: var(--panel); border: 1px solid #2c2c36;
+  border-radius: 16px; padding: 22px;
+}
+#overlay h2 { margin: 0 0 6px; font-size: 18px; }
+#overlay p { color: var(--muted); margin: 0 0 16px; font-size: 13px; }
+#overlay code { font-size: 12px; }
+#overlay form { display: flex; gap: 8px; }
+#overlay button {
+  flex: none; min-height: 46px; padding: 0 18px;
+  background: var(--accent); color: #0b0b0e; border: 0; border-radius: 12px;
+  font: inherit; font-weight: 700; touch-action: manipulation; cursor: pointer;
+}
+#toast {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(140px + env(safe-area-inset-bottom));
+  z-index: 11; max-width: 84vw;
+  background: #26262e; border: 1px solid #3a2c2c; color: #ffd7d7;
+  border-radius: 12px; padding: 10px 16px; font-size: 14px;
+  box-shadow: 0 8px 24px #0008;
+}
+#toast[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -64,13 +233,16 @@ form.bar button { background:#26262e; border:0; border-radius:10px; color:#e8e8e
 <main>
   <section id="view-search">
     <form class="bar" id="search-form">
-      <input id="search-input" type="search" placeholder="Search YouTube Music" autocomplete="off">
+      <input id="search-input" type="search" placeholder="Search YouTube Music" autocomplete="off" enterkeyhint="search">
       <button type="submit">Go</button>
     </form>
     <div id="search-results" class="list"></div>
   </section>
   <section id="view-liked" hidden>
-    <div class="bar"><button id="liked-play-all">Play all</button></div>
+    <div class="toolbar">
+      <button id="liked-play-all">Play all</button>
+      <span class="count" id="liked-count"></span>
+    </div>
     <div id="liked-list" class="list"></div>
   </section>
   <section id="view-queue" hidden>
@@ -78,13 +250,21 @@ form.bar button { background:#26262e; border:0; border-radius:10px; color:#e8e8e
   </section>
 </main>
 <footer id="player" hidden>
-  <div class="line1"><span class="ptitle" id="player-title"></span><span class="sub" id="player-sub"></span></div>
+  <div class="line1">
+    <span class="ptitle" id="player-title"></span>
+    <span class="sub" id="player-sub"></span>
+  </div>
+  <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
   <div class="controls">
-    <button id="prev">⏮</button>
-    <button id="play">▶</button>
-    <button id="next">⏭</button>
-    <input id="seek" type="range" min="0" max="1000" value="0">
-    <span id="time">0:00</span>
+    <div class="buttons">
+      <button id="prev" aria-label="Previous">⏮</button>
+      <button id="play" aria-label="Play or pause">▶</button>
+      <button id="next" aria-label="Next">⏭</button>
+    </div>
+    <div id="right">
+      <div class="spin" id="buffering" hidden></div>
+      <span id="time">0:00</span>
+    </div>
   </div>
 </footer>
 <div id="overlay" hidden>
@@ -135,6 +315,29 @@ function toast(msg) {
   $("toast").hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { $("toast").hidden = true; }, 4000);
+}
+function skeleton(box, n) {
+  box.innerHTML = "";
+  for (let i = 0; i < n; i++) {
+    const div = document.createElement("div");
+    div.className = "skel";
+    div.innerHTML = '<div class="circle"></div><div class="bars"><div class="b1"></div><div class="b2"></div></div>';
+    box.appendChild(div);
+  }
+}
+function empty(box, text, spinning) {
+  box.innerHTML = "";
+  const div = document.createElement("div");
+  div.className = "empty";
+  if (spinning) {
+    const sp = document.createElement("div");
+    sp.className = "spin";
+    div.appendChild(sp);
+  }
+  const p = document.createElement("div");
+  p.textContent = text;
+  div.appendChild(p);
+  box.appendChild(div);
 }
 
 // ---------- login ----------
@@ -189,9 +392,11 @@ function row(item, onPlay, onAdd) {
   meta.append(title, sub);
   const add = document.createElement("button");
   add.textContent = "+";
+  add.setAttribute("aria-label", "Add to queue");
   add.addEventListener("click", onAdd);
   const play = document.createElement("button");
   play.textContent = "▶";
+  play.setAttribute("aria-label", "Play");
   play.addEventListener("click", onPlay);
   div.append(meta, add, play);
   return div;
@@ -238,19 +443,28 @@ audio.addEventListener("play", () => {
   $("play").textContent = "⏸";
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
 });
-audio.addEventListener("playing", () => { dead = 0; });
+audio.addEventListener("playing", () => {
+  dead = 0;
+  $("buffering").hidden = true;
+});
+audio.addEventListener("waiting", () => { $("buffering").hidden = false; });
 audio.addEventListener("pause", () => {
   $("play").textContent = "▶";
+  $("buffering").hidden = true;
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
 });
 audio.addEventListener("ended", () => playIndex(index + 1));
 audio.addEventListener("error", () => {
+  $("buffering").hidden = true;
   // Same rule as the terminal player: give up after five dead in a row.
   if (++dead >= 5) { dead = 0; toast("giving up: too many dead tracks in a row"); return; }
   playIndex(index + 1);
 });
 let seeking = false;
-$("seek").addEventListener("input", () => { seeking = true; });
+$("seek").addEventListener("input", () => {
+  seeking = true;
+  $("seek").style.setProperty("--fill", ($("seek").value / 10) + "%");
+});
 $("seek").addEventListener("change", () => {
   if (audio.duration) audio.currentTime = ($("seek").value / 1000) * audio.duration;
   seeking = false;
@@ -258,6 +472,7 @@ $("seek").addEventListener("change", () => {
 audio.addEventListener("timeupdate", () => {
   if (!seeking) {
     $("seek").value = audio.duration ? Math.round((audio.currentTime / audio.duration) * 1000) : 0;
+    $("seek").style.setProperty("--fill", ($("seek").value / 10) + "%");
   }
   const total = audio.duration || (current() ? current().duration : 0);
   $("time").textContent = fmt(audio.currentTime) + " / " + fmt(total);
@@ -280,13 +495,13 @@ $("search-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const q = $("search-input").value.trim();
   if (!q) return;
+  $("search-input").blur();
   const box = $("search-results");
-  box.innerHTML = "";
-  box.insertAdjacentHTML("beforeend", '<div class="empty">searching…</div>');
+  skeleton(box, 6);
   try {
     const out = await api("/v1/search?q=" + encodeURIComponent(q));
     box.innerHTML = "";
-    if (!out.items.length) { box.insertAdjacentHTML("beforeend", '<div class="empty">nothing found</div>'); return; }
+    if (!out.items.length) { empty(box, "nothing found"); return; }
     for (const item of out.items) {
       box.appendChild(row(item,
         () => addToQueue(item, true),
@@ -300,25 +515,12 @@ $("search-form").addEventListener("submit", async (e) => {
 });
 
 // ---------- liked ----------
-async function loadLiked() {
-  if (liked.length) { renderLiked(); return; }
-  const box = $("liked-list");
-  box.innerHTML = "";
-  box.insertAdjacentHTML("beforeend", '<div class="empty">loading liked music…</div>');
-  try {
-    const out = await api("/v1/liked");
-    liked = out.items;
-    renderLiked();
-  } catch (err) {
-    box.innerHTML = "";
-    toast(err.message);
-  }
-}
 function renderLiked() {
   const box = $("liked-list");
   box.innerHTML = "";
+  $("liked-count").textContent = liked.length ? liked.length + " tracks" : "";
   if (!liked.length) {
-    box.insertAdjacentHTML("beforeend", '<div class="empty">no liked music (the server needs --cookies)</div>');
+    empty(box, "no liked music (the server needs --cookies)");
     return;
   }
   for (const item of liked) {
@@ -327,6 +529,20 @@ function renderLiked() {
       () => addToQueue(item, false)));
   }
   markPlaying();
+}
+async function loadLiked(refresh) {
+  if (liked.length && !refresh) { renderLiked(); return; }
+  const box = $("liked-list");
+  skeleton(box, 8);
+  try {
+    const out = await api("/v1/liked");
+    liked = out.items;
+    renderLiked();
+  } catch (err) {
+    box.innerHTML = "";
+    $("liked-count").textContent = "";
+    toast(err.message);
+  }
 }
 $("liked-play-all").addEventListener("click", () => {
   if (!liked.length) { toast("liked music is empty"); return; }
@@ -340,7 +556,7 @@ function renderQueue() {
   const box = $("queue-list");
   box.innerHTML = "";
   if (!queue.length) {
-    box.insertAdjacentHTML("beforeend", '<div class="empty">the queue is empty: search for something</div>');
+    empty(box, "the queue is empty: search for something");
     return;
   }
   queue.forEach((item, i) => {
@@ -359,6 +575,7 @@ function renderQueue() {
     meta.addEventListener("click", () => playIndex(i));
     const rm = document.createElement("button");
     rm.textContent = "×";
+    rm.setAttribute("aria-label", "Remove from queue");
     rm.addEventListener("click", () => {
       queue.splice(i, 1);
       if (i < index) index--;
