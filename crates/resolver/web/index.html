@@ -331,14 +331,24 @@ let index = -1;       // position in the queue that is loaded
 let liked = [];       // liked-music rows, fetched once per visit
 let dead = 0;         // consecutive streams that failed outright
 let loading = false;  // a track is being fetched and cannot play yet
-// The duration the current tab reports. Safari gets HE-AAC streams wrong
-// (it can report twice the real length), so the listing is authoritative.
+// The duration the current tab reports. Safari gets fragmented HE-AAC wrong
+// (it can report twice the real length), so the listing is authoritative and
+// media time is mapped onto the real length before it reaches the UI.
 let listDuration = 0;
+let mediaScale = 1;   // media seconds per real second reported by the browser
 function saveQueue() { localStorage.setItem("ytui-web-queue", JSON.stringify(queue)); }
 function current() { return queue[index] || null; }
-function trackDuration() {
-  return listDuration > 0 ? listDuration : (isFinite(audio.duration) ? audio.duration : 0);
+function updateScale() {
+  const media = isFinite(audio.duration) ? audio.duration : 0;
+  mediaScale = listDuration > 0 && media > 0 ? media / listDuration : 1;
+  if (!isFinite(mediaScale) || mediaScale <= 0) mediaScale = 1;
 }
+function realDuration() {
+  if (listDuration > 0) return listDuration;
+  const media = isFinite(audio.duration) ? audio.duration : 0;
+  return media > 0 ? media / mediaScale : 0;
+}
+function realTime() { return audio.currentTime / mediaScale; }
 
 // ---------- icons ----------
 const ICONS = {
@@ -515,6 +525,7 @@ function playIndex(i) {
   index = i;
   const t = queue[i];
   listDuration = t.duration || 0;
+  mediaScale = 1;
   loading = true;
   audio.src = "/audio/" + t.id;
   audio.play().catch((e) => { loading = false; markPlaying(); toast("playback failed: " + e.message); });
@@ -593,23 +604,25 @@ $("seek").addEventListener("input", () => {
   $("seek").style.setProperty("--fill", ($("seek").value / 10) + "%");
 });
 $("seek").addEventListener("change", () => {
-  const total = trackDuration();
-  if (total) audio.currentTime = ($("seek").value / 1000) * total;
+  const total = realDuration();
+  if (total) audio.currentTime = ($("seek").value / 1000) * total * mediaScale;
   seeking = false;
 });
 audio.addEventListener("timeupdate", () => {
-  const total = trackDuration();
+  const total = realDuration();
+  const pos = Math.min(realTime(), total);
   if (!seeking) {
-    $("seek").value = total ? Math.round((audio.currentTime / total) * 1000) : 0;
+    $("seek").value = total ? Math.round((pos / total) * 1000) : 0;
     $("seek").style.setProperty("--fill", ($("seek").value / 10) + "%");
   }
-  $("time").textContent = fmt(audio.currentTime) + " / " + fmt(total);
+  $("time").textContent = fmt(pos) + " / " + fmt(total);
 });
-audio.addEventListener("loadedmetadata", () => {
-  // Keep the seek mapping on the listing duration; only fall back to the
-  // stream when it has no metadata.
-  if (!listDuration && isFinite(audio.duration)) listDuration = audio.duration;
-});
+// Safari can report a doubled media timeline for a fragmented stream. The
+// scale between that timeline and the real length is recomputed whenever the
+// browser updates its idea of the duration.
+audio.addEventListener("loadedmetadata", updateScale);
+audio.addEventListener("durationchange", updateScale);
+audio.addEventListener("seeked", updateScale);
 if ("mediaSession" in navigator) {
   const ms = navigator.mediaSession;
   try {
