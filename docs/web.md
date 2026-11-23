@@ -94,8 +94,9 @@ sheet to run it full-screen.
   tab to manage. Rows show a 40px thumbnail, lazily loaded so long lists do
   not fetch every cover up front.
 - A double-click on a desktop or a single tap on a phone plays a row from
-  Search, Liked or a playlist (tapping the current track toggles pause); the
-  button left on the row only adds it to the playback queue.
+  Search, Liked or a playlist (tapping the current track toggles pause). Rows
+  have no buttons: the duration sits at the right edge and the whole artist
+  line is left for the name.
 - Install it as a service like any other invocation:
   `ytui-resolver --bind 0.0.0.0:8787 --allow-private --web --install-service`.
 - One export is one client still: with `--cookies` on the server, the
