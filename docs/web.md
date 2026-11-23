@@ -60,12 +60,12 @@ sheet to run it full-screen.
 - Lock-screen controls come from the Media Session API: the page sets title,
   artist and the YouTube thumbnail per track.
 - The player uses the current track's cover as a backdrop over the left half of
-  the bar: dimmed to 35%, cropped from its left edge so any aspect ratio fills
-  the area, and faded out by the middle of the screen. A light vertical
-  backdrop blur is strongest under the title and gone by the transport.
-  Title, elapsed/total timers, seek bar and transport are centered; the
-  channel shares the timer line with them and truncates with an ellipsis
-  instead of wrapping or touching the times. On a desktop browser the
+  the bar: dimmed to 35%, cropped to the centered square so the filler bars in
+  YouTube's 16:9 thumbnails do not show, and faded out by the middle of the
+  screen. A light vertical backdrop blur starts at the top edge and fades out
+  before the transport. Title, elapsed/total timers, seek bar and transport are
+  centered; the channel shares the timer line with them and truncates with an
+  ellipsis instead of wrapping or touching the times. On a desktop browser the
   transport row also carries mute, a volume slider and fullscreen (phones use
   their hardware buttons). The volume level is remembered in browser storage,
   like the queue.
@@ -81,8 +81,10 @@ sheet to run it full-screen.
   length through `setPositionState`, so its scrubber is not doubled either.
 - Lock-screen artwork is offered at three sizes and set again once playback
   starts, since iOS can drop metadata set too early.
-- Double-clicking a row in Search or Liked plays it, just like its play
-  button.
+- A double-click on a desktop or a single tap on a phone plays a row from
+  Search or Liked (tapping the current track toggles pause); the button left
+  on the row only adds it to the queue. Rows show a 40px thumbnail, lazily
+  loaded so long lists do not fetch every cover up front.
 - Install it as a service like any other invocation:
   `ytui-resolver --bind 0.0.0.0:8787 --allow-private --web --install-service`.
 - One export is one client still: with `--cookies` on the server, the

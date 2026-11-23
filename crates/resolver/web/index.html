@@ -63,6 +63,10 @@ main {
 }
 #queue-list .row { scroll-margin-top: 10px; }
 .row .meta { flex: 1; min-width: 0; }
+.row .art {
+  flex: none; width: 40px; height: 40px; border-radius: 6px;
+  object-fit: cover; background: var(--panel2);
+}
 .row .meta:active { opacity: .6; }
 .row .title {
   font-size: 15px;
@@ -181,25 +185,30 @@ button.busy::after {
   padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
 }
 #player[hidden] { display: none; }
-/* The cover fills the left half of the player, cropped from the left edge,
-   dimmed, and faded out by the middle of the screen. */
-#player .bg, #player .bg-blur {
+/* The cover fills the left half of the player. YouTube puts square artwork
+   in the middle of its 16:9 thumbnails with 21.875% of filler on each side,
+   so the image is shifted left by that much (and scaled by 100/56.25) until
+   the artwork starts at the left edge. It is all compositor work on the
+   already-decoded thumbnail, not a pixel crop. */
+#player .bg-wrap {
   position: absolute; left: 0; top: 0; height: 100%; width: 50%;
-  pointer-events: none;
-}
-#player .bg {
-  object-fit: cover; object-position: left center;
-  opacity: .35;
+  overflow: hidden; pointer-events: none;
   -webkit-mask-image: linear-gradient(to right, #000 0%, #000 22%, transparent 100%);
           mask-image: linear-gradient(to right, #000 0%, #000 22%, transparent 100%);
 }
-/* A soft vertical blur, strongest just under the title and gone by the
+#player .bg {
+  position: absolute; top: 50%; left: -38.89%;
+  width: 177.78%; height: auto; transform: translateY(-50%);
+  opacity: .35;
+}
+/* A soft vertical blur starting at the top edge and fading out before the
    transport; the radius stays small so compositing is cheap. */
 #player .bg-blur {
+  position: absolute; inset: 0;
   -webkit-backdrop-filter: blur(5px);
           backdrop-filter: blur(5px);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 40%, transparent 74%);
-          mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 40%, transparent 74%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 26%, transparent 78%);
+          mask-image: linear-gradient(to bottom, #000 0%, #000 26%, transparent 78%);
 }
 #player .inner { position: relative; text-shadow: 0 1px 3px #000a; }
 #player .line1 { min-width: 0; margin-bottom: 1px; text-align: center; }
@@ -353,8 +362,10 @@ button.busy::after {
   </section>
 </main>
 <footer id="player" hidden>
-  <img class="bg" id="bg" alt="" aria-hidden="true">
-  <div class="bg-blur" aria-hidden="true"></div>
+  <div class="bg-wrap" aria-hidden="true">
+    <img class="bg" id="bg" alt="">
+    <div class="bg-blur"></div>
+  </div>
   <div class="inner">
     <div class="line1">
       <span class="ptitle" id="player-title"></span>
@@ -632,6 +643,15 @@ $("tabs").addEventListener("click", (e) => {
 });
 
 // ---------- rows ----------
+function thumb(item) {
+  const img = document.createElement("img");
+  img.className = "art";
+  img.loading = "lazy";
+  img.decoding = "async";
+  img.alt = "";
+  img.src = "https://i.ytimg.com/vi/" + item.id + "/mqdefault.jpg";
+  return img;
+}
 function row(item, onPlay, onAdd) {
   const div = document.createElement("div");
   div.className = "row";
@@ -662,24 +682,27 @@ function row(item, onPlay, onAdd) {
       add.classList.remove("done");
     }, 900);
   });
-  const play = document.createElement("button");
-  play.className = "pbtn";
-  play.setAttribute("aria-label", "Play or pause");
-  setIcon(play, "play");
-  play.addEventListener("click", () => {
+  div.append(thumb(item), meta, add);
+  // The whole row plays: a double-click on a desktop, a single tap on a
+  // phone. Tapping the current track toggles it like the old row button.
+  function activate() {
     const cur = current();
     if (cur && cur.id === item.id) {
       if (audio.paused) audio.play(); else audio.pause();
     } else {
       onPlay();
     }
-  });
-  div.append(meta, add, play);
-  // A double-click anywhere on the row (but not on its buttons) plays it, the
-  // way a desktop music player does; the play button still works on its own.
-  div.addEventListener("dblclick", (e) => {
+  }
+  function onRow(e) {
     if (e.target.closest("button")) return;
-    onPlay();
+    activate();
+  }
+  div.addEventListener("dblclick", (e) => {
+    if (matchMedia("(hover: hover) and (pointer: fine)").matches) onRow(e);
+  });
+  div.addEventListener("click", (e) => {
+    if (!matchMedia("(hover: none), (pointer: coarse)").matches) return;
+    onRow(e);
   });
   return div;
 }
@@ -689,11 +712,6 @@ function markPlaying() {
     for (const div of box.children) {
       const isCur = !!cur && div.dataset.id === cur.id;
       div.classList.toggle("playing", isCur);
-      const btn = div.querySelector(".pbtn");
-      if (!btn) continue;
-      const busy = isCur && loading;
-      btn.classList.toggle("busy", busy);
-      if (!busy) setIcon(btn, isCur && !audio.paused ? "pause" : "play");
     }
   }
   $("play").classList.toggle("busy", loading);
@@ -1062,7 +1080,7 @@ function renderQueue() {
       saveQueue();
       renderQueue();
     });
-    div.append(meta, rm);
+    div.append(thumb(item), meta, rm);
     box.appendChild(div);
   });
   markPlaying();
