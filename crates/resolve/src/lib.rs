@@ -334,7 +334,36 @@ pub const EXTRACTOR_ARGS: &str = "youtube:player_client=visionos,default;formats
 /// Like [`resolve`], but kills the yt-dlp child as soon as `cancel` is raised
 /// and returns [`CANCELLED`]. Used by the player's foreground load, where a
 /// newer selection must not wait for the abandoned track.
+///
+/// A signed-in run that cannot hand out a usable format is retried once
+/// without cookies: some uploads give an account only restricted formats
+/// while the public view still serves AAC. The jar is not needed for those.
 pub fn resolve_cancellable(
+    url: &str,
+    cookies: Option<(&str, &str)>,
+    cancel: Option<&AtomicBool>,
+) -> Result<Resolved, String> {
+    match resolve_once(url, cookies, cancel) {
+        Ok(resolved) => Ok(resolved),
+        Err(e) if cookies.is_some() && is_restricted_format(&e) => {
+            resolve_once(url, None, cancel)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Errors that mean "this view of the video has no format we can use", where
+/// the anonymous view is worth one more try.
+fn is_restricted_format(err: &str) -> bool {
+    let low = err.to_lowercase();
+    low.contains("requested format is not available")
+        || low.contains("no video formats found")
+        || low.contains("no formats")
+        || low.contains("no aac stream")
+}
+
+/// One yt-dlp run, with the jar lock and the signed-out transition check.
+fn resolve_once(
     url: &str,
     cookies: Option<(&str, &str)>,
     cancel: Option<&AtomicBool>,
@@ -717,6 +746,22 @@ mod tests {
             friendly("ERROR: Private video. Sign in if you've been granted access"),
             "private: sign-in required, run `ytui auth <cookies.txt>`"
         );
+    }
+
+    /// The signed-in view can be narrower than the anonymous one; those errors
+    /// are the ones worth a second, cookie-less run.
+    #[test]
+    fn restricted_formats_trigger_the_anonymous_retry() {
+        let real = friendly(
+            "ERROR: [youtube] x: Requested format is not available. \
+             Use --list-formats for a list of available formats",
+        );
+        assert!(is_restricted_format(&real), "{real}");
+        assert!(is_restricted_format("no AAC stream for this track (opus only)"));
+        assert!(is_restricted_format("yt-dlp returned no formats"));
+        assert!(!is_restricted_format("unavailable on youtube"));
+        assert!(!is_restricted_format("private: sign-in required"));
+        assert!(!is_restricted_format(CANCELLED));
     }
 
     /// Watch Later and Liked Music answer this when the cookies do not sign
