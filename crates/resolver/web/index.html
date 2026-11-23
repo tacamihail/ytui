@@ -444,6 +444,24 @@ let rateMedia = 0;    // media and wall clocks at the last rate sample
 let rateWall = 0;
 let ended = false;    // this track was already finished by the page
 function saveQueue() { localStorage.setItem("ytui-web-queue", JSON.stringify(queue)); }
+// Another tab or the home-screen app may change the queue; adopt its version
+// rather than letting a stale copy put removed tracks back on the next save.
+addEventListener("storage", (e) => {
+  if (e.key !== "ytui-web-queue" || !e.newValue) return;
+  let next;
+  try { next = JSON.parse(e.newValue); } catch { return; }
+  const cur = current();
+  queue = next;
+  index = cur ? queue.findIndex((t) => t.id === cur.id) : -1;
+  if (tab === "queue") renderQueue();
+  markPlaying();
+});
+// iOS can suspend a standalone web app without a clean unload; persist the
+// queue again while the page is still around.
+addEventListener("pagehide", saveQueue);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") saveQueue();
+});
 function current() { return queue[index] || null; }
 function resetRate() {
   rateMedia = audio.currentTime;
