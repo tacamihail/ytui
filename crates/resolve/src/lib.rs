@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+pub mod listing;
+
 /// Browser-ish UA; googlevideo accepts any modern string.
 pub const UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
                       Chrome/126.0.0.0 Safari/537.36";
@@ -372,7 +374,7 @@ client only, then run `ytui auth <cookies.txt>`.";
 
 /// `Some(true)` when a file-backed jar still signs in, `Some(false)` when it is
 /// signed out, `None` for browser cookies or an unreadable file.
-fn jar_session_state(cookies: Option<(&str, &str)>) -> Option<bool> {
+pub fn jar_session_state(cookies: Option<(&str, &str)>) -> Option<bool> {
     match cookies {
         Some(("--cookies", path)) => std::fs::read_to_string(path)
             .ok()

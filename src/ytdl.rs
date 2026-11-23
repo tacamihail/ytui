@@ -1,11 +1,11 @@
 //! yt-dlp integration.
 //!
-//! Listing runs `--flat-playlist --print`, which avoids resolving metadata for
-//! every entry, and streams results to the UI line by line. Resolving asks for
-//! the full JSON, picks the best AAC format that actually answers and hands the
-//! URL to the decoder.
+//! Listing a playlist, feed or search result is shared with the resolver's
+//! web API and lives in `ytui_resolve::listing`; this module re-exports it
+//! for the rest of the player and turns the streamed rows into UI messages.
+//! Resolving asks for the full JSON, picks the best AAC format that actually
+//! answers and hands the URL to the decoder.
 
-use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -18,28 +18,13 @@ use crate::remote;
 use ytui_resolve::friendly;
 
 pub(crate) use ytui_resolve::{command, tool_path, UA};
+pub use ytui_resolve::listing::{
+    self, label, Kind, TrackMeta, LIKED_MUSIC_URL, WATCH_LATER_URL,
+};
 
 /// A resolve that was superseded by a newer selection. Callers drop it without
 /// showing an error: nothing went wrong, the user moved on.
 pub const CANCELLED: &str = ytui_resolve::CANCELLED;
-
-pub const LIKED_MUSIC_URL: &str = "https://music.youtube.com/playlist?list=LM";
-/// System playlist owned by the account; unlike `LM` it exposes the owner.
-pub const WATCH_LATER_URL: &str = "https://www.youtube.com/playlist?list=WL";
-/// The subscriptions feed. yt-dlp has an extractor for this tab, and using it
-/// (instead of fetching the page with a raw `Cookie:` header) is important:
-/// YouTube rotates `__Secure-1PSIDTS` on responses, and a reader that throws
-/// that rotation away ages the stored token until it is treated as replayed.
-pub const SUBSCRIPTIONS_URL: &str = "https://www.youtube.com/feed/subscriptions";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Search,
-    LikedMusic,
-    Playlists,
-    Subscriptions,
-    PlaylistTracks,
-}
 
 #[derive(Debug)]
 pub enum Msg {
@@ -52,30 +37,33 @@ pub enum Msg {
     Error(u64, Kind, String),
 }
 
-const SEP: char = '\u{1f}';
-const TEMPLATE: &str = "%(id)s\u{1f}%(title)s\u{1f}%(duration)s\u{1f}%(channel,uploader)s";
-
-pub fn label(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Search => "search",
-        Kind::LikedMusic => "liked music",
-        Kind::Playlists => "playlists",
-        Kind::Subscriptions => "subscriptions",
-        Kind::PlaylistTracks => "playlist",
-    }
-}
-
 /// Runs a listing on a background thread, streaming entries through `tx`.
 pub fn spawn(seq: u64, kind: Kind, target: String, cfg: Config, tx: Sender<Msg>) {
     thread::spawn(move || {
         let _ = tx.send(Msg::Begin(seq, kind));
-        // The feed is a fixed tab, whatever target the caller passed.
-        let target = if kind == Kind::Subscriptions {
-            SUBSCRIPTIONS_URL.to_string()
-        } else {
-            target
+        let cookies = cfg.cookie_args();
+        let refs = cookies.as_ref().map(|(flag, value)| (*flag, value.as_str()));
+        let mut add = |m: TrackMeta| {
+            // A playlists row is a list id, not a video: open it as a
+            // playlist URL. Every other row is a watch URL built from the id.
+            let url_override = if kind == Kind::Playlists {
+                format!("https://www.youtube.com/playlist?list={}", m.id)
+            } else {
+                String::new()
+            };
+            let _ = tx.send(Msg::Add(
+                seq,
+                kind,
+                Entry {
+                    id: m.id,
+                    title: m.title,
+                    channel: m.channel,
+                    duration: m.duration,
+                    url_override,
+                },
+            ));
         };
-        let res = run(seq, kind, &target, &cfg, &tx).and_then(|n| {
+        let res = listing::list(kind, &target, cfg.fetch_limit, refs, &mut add).and_then(|n| {
             if kind == Kind::Subscriptions && n == 0 {
                 Err("subscriptions feed came back empty, are you signed in?".into())
             } else {
@@ -91,158 +79,6 @@ pub fn spawn(seq: u64, kind: Kind, target: String, cfg: Config, tx: Sender<Msg>)
             }
         }
     });
-}
-
-/// `Some(true)` while a file-backed jar still signs in, `Some(false)` after
-/// YouTube cleared the first-party cookies, `None` for browser cookies or an
-/// unreadable file.
-fn jar_signed_in(flag: &str, value: &str) -> Option<bool> {
-    if flag != "--cookies" {
-        return None;
-    }
-    std::fs::read_to_string(value)
-        .ok()
-        .map(|txt| ytui_resolve::has_session_cookies(&txt))
-}
-
-fn run(seq: u64, kind: Kind, target: &str, cfg: &Config, tx: &Sender<Msg>) -> Result<usize, String> {
-    let mut c = command();
-    c.args([
-        "--flat-playlist",
-        "--no-warnings",
-        "--print",
-        TEMPLATE,
-        &format!("--playlist-items=1-{}", cfg.fetch_limit.max(1)),
-    ]);
-    // A feed is a single page, so lazy pagination buys nothing there.
-    if kind != Kind::Subscriptions {
-        // Print rows page by page instead of collecting the whole playlist
-        // first: the first screen is on screen in about a second even when
-        // the list has thousands of entries.
-        c.arg("--lazy-playlist");
-    }
-    let cookies = cfg.cookie_args();
-    // yt-dlp saves the jar when it exits, so only one run may touch it at a
-    // time or a stale rotating token can overwrite a fresh one. A busy jar is
-    // an error: running unlocked is the write this lock exists to prevent.
-    let _cookie_lock = ytui_resolve::lock_cookies_for_run(
-        cookies
-            .as_ref()
-            .map(|(flag, value)| (*flag, value.as_str())),
-    )?;
-    let before = cookies
-        .as_ref()
-        .and_then(|(flag, value)| jar_signed_in(flag, value));
-    if let Some((flag, value)) = &cookies {
-        c.arg(flag).arg(value);
-    }
-    c.arg(target);
-    c.stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null());
-
-    let mut child = c
-        .spawn()
-        .map_err(|_| "yt-dlp not found, install it and run: ytui doctor".to_string())?;
-
-    let out = child.stdout.take().unwrap();
-    let err = child.stderr.take().unwrap();
-    let errth = thread::spawn(move || {
-        let mut buf = String::new();
-        for line in lossy_lines(BufReader::new(err)) {
-            if buf.lines().count() < 6 {
-                buf.push_str(&line);
-                buf.push('\n');
-            }
-        }
-        buf
-    });
-
-    let mut n = 0usize;
-    for line in lossy_lines(BufReader::new(out)) {
-        if let Some(entry) = parse_line(kind, &line) {
-            n += 1;
-            let _ = tx.send(Msg::Add(seq, kind, entry));
-        }
-    }
-
-    let status = child.wait().map_err(|e| e.to_string())?;
-    let errtxt = errth.join().unwrap_or_default();
-    // The run that gets the rejection is the one that writes the cleared jar,
-    // so report it here instead of showing "playlist not found" forever.
-    let after = cookies
-        .as_ref()
-        .and_then(|(flag, value)| jar_signed_in(flag, value));
-    if before == Some(true) && after == Some(false) {
-        return Err(ytui_resolve::SIGNED_OUT.to_string());
-    }
-    if !status.success() && n == 0 {
-        Err(friendly(&errtxt))
-    } else {
-        Ok(n)
-    }
-}
-
-/// Reads a pipe line by line, decoding each line separately and replacing a
-/// byte that is not UTF-8 instead of refusing the whole stream.
-///
-/// `BufRead::lines()` returns `Err` on the first invalid byte. Callers that
-/// stopped at that error (`map_while(Result::ok)`) used to drop the read end of
-/// the pipe in the middle of a listing; yt-dlp then failed with
-/// `[Errno 22] Invalid argument` and the list ended at a song title with a
-/// curly quote. `yt-dlp --encoding utf-8` is set in [`command`] so this is a
-/// safety net for warnings and for other tools, not the happy path.
-fn lossy_lines<R: BufRead>(mut reader: R) -> impl Iterator<Item = String> {
-    std::iter::from_fn(move || {
-        let mut buf = Vec::new();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => {
-                if buf.last() == Some(&b'\n') {
-                    buf.pop();
-                }
-                if buf.last() == Some(&b'\r') {
-                    buf.pop();
-                }
-                Some(String::from_utf8_lossy(&buf).into_owned())
-            }
-        }
-    })
-}
-
-fn parse_line(kind: Kind, line: &str) -> Option<Entry> {
-    let mut it = line.split(SEP);
-    let id = it.next()?.trim().to_string();
-    if id.is_empty() {
-        return None;
-    }
-    let title = it.next().unwrap_or("").trim().to_string();
-    let dur = it.next().unwrap_or("").trim();
-    let channel = it.next().unwrap_or("").trim().to_string();
-    let title = if title.is_empty() {
-        format!("untitled {id}")
-    } else {
-        title
-    };
-    let url_override = if kind == Kind::Playlists {
-        format!("https://www.youtube.com/playlist?list={id}")
-    } else {
-        String::new()
-    };
-    Some(Entry {
-        id,
-        title,
-        channel,
-        duration: parse_num(dur),
-        url_override,
-    })
-}
-
-fn parse_num(s: &str) -> u64 {
-    if s.is_empty() || s == "NA" || s == "nan" {
-        return 0;
-    }
-    s.split('.').next().unwrap_or("").parse().unwrap_or(0)
 }
 
 /// A playable stream plus the metadata yt-dlp already handed us, so an entry
@@ -399,7 +235,7 @@ pub fn account(cfg: &Config) -> Result<(String, String), String> {
     };
     // Same jar as the player's listings and resolves; serialize with them.
     let _cookie_lock = ytui_resolve::lock_cookies_for_run(Some((flag, value.as_str())))?;
-    let before = jar_signed_in(flag, &value);
+    let before = ytui_resolve::jar_session_state(Some((flag, value.as_str())));
     let mut last_err = String::new();
     for url in [WATCH_LATER_URL, LIKED_MUSIC_URL] {
         let out = command()
@@ -445,7 +281,9 @@ pub fn account(cfg: &Config) -> Result<(String, String), String> {
     }
     if last_err.is_empty() {
         Err("could not read the account: cookies are accepted but YouTube returned no owner".into())
-    } else if before == Some(true) && jar_signed_in(flag, &value) == Some(false) {
+    } else if before == Some(true)
+        && ytui_resolve::jar_session_state(Some((flag, value.as_str()))) == Some(false)
+    {
         Err(ytui_resolve::SIGNED_OUT.to_string())
     } else {
         Err(last_err)
@@ -457,24 +295,6 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-
-    /// The 31st liked song carried a cp1252 curly quote, and stopping at that
-    /// byte truncated the rest of the list. Every line must survive.
-    #[test]
-    fn lossy_lines_keep_going_past_an_invalid_byte() {
-        let raw: &[u8] = b"first\nsecond\nArun\x92s Roof\nfourth\n";
-        let lines: Vec<String> = lossy_lines(raw).collect();
-        assert_eq!(lines.len(), 4);
-        assert_eq!(lines[0], "first");
-        assert_eq!(lines[2], "Arun\u{fffd}s Roof");
-        assert_eq!(lines[3], "fourth");
-    }
-
-    #[test]
-    fn lossy_lines_strip_windows_newlines() {
-        let lines: Vec<String> = lossy_lines(&b"a\r\nb\r\n"[..]).collect();
-        assert_eq!(lines, ["a", "b"]);
-    }
 
     /// A resolver and a CDN in one: `/v1/resolve` returns a candidate, and the
     /// candidate URL answers the 1 KiB probe with 206.
