@@ -66,7 +66,9 @@ fn main() {
 /// none of it is resident. Two arenas is plenty for this many threads, and it
 /// keeps the virtual size flat instead of jumping whenever a thread allocates.
 fn tune_allocator() {
-    #[cfg(target_env = "gnu")]
+    // `target_env = "gnu"` also matches the Windows GNU toolchain, where
+    // glibc's mallopt does not exist.
+    #[cfg(all(target_env = "gnu", not(windows)))]
     unsafe {
         libc::mallopt(libc::M_ARENA_MAX, 2);
     }
@@ -320,7 +322,7 @@ fn discover(args: &[String]) -> i32 {
     }
 
     if !quiet {
-        println!("scanning localhost and private networks for ytui-resolver (up to {timeout}s)…");
+        println!("scanning localhost, tailnet peers and private networks for ytui-resolver (up to {timeout}s)…");
     }
     let found = remote::scan_for(std::time::Duration::from_secs(timeout));
     if found.is_empty() {

@@ -585,9 +585,9 @@ impl App {
 
     // ---------------- resolver scan ----------------
 
-    /// Scans localhost and the private networks on port 8787 in the
-    /// background, for up to a minute. The result is applied automatically when
-    /// it is a tokenless private resolver (or when a token is already
+    /// Scans localhost, overlay peers and the private networks on port 8787 in
+    /// the background, for up to a minute. The result is applied automatically
+    /// when it is a tokenless private resolver (or when a token is already
     /// configured).
     fn start_scan(&mut self) {
         self.scan_open = true;

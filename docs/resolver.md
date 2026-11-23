@@ -176,9 +176,12 @@ and stops probing as soon as the overlay is closed. From a shell:
 ytui discover --save --timeout 10
 ```
 
-The scan probes port 8787 on localhost and each private IPv4 `/24` the machine
-is attached to. Every probe has a short connect timeout, so a silent host
-cannot stretch the scan past its deadline. A tokenless result is preferred and
+The scan probes port 8787 on localhost, the online peers of a Tailscale
+tailnet when its CLI is available, and each private IPv4 `/24` the machine is
+attached to. Tailscale peers are `/32` routes outside every local `/24`, so
+they are probed first; a missing or stopped CLI simply leaves them out.
+Every probe has a short connect timeout, so a silent host cannot stretch the
+scan past its deadline. A tokenless result is preferred and
 applied automatically; a token-protected result is only applied when
 `resolver_token_file` already points at a token.
 
@@ -188,16 +191,14 @@ wait per track wins: the server's median cold-resolve time, reported as
 tokenless answer the scan keeps probing for another 1.5 s, so a neighbouring
 faster resolver still gets a chance.
 
-Discovery stays provider-neutral on purpose: it does not shell out to
-Tailscale, ZeroTier or any other overlay CLI. Those networks are not a local
-`/24`, so point ytui at the resolver once instead:
+Discovery does not need an overlay vendor to be installed: the local `/24`
+sweep is the provider-neutral base, and Tailscale peer enumeration is a
+best-effort addition on top. For WireGuard, ZeroTier, another subnet or a
+public resolver, point ytui at the address once instead:
 
 ```bash
 ytui discover --url http://100.64.0.5:8787 --save
 ```
-
-The same applies to a resolver on another subnet, over a VPN, or to a WSL
-client, which only sees the WSL virtual network rather than the Windows LAN.
 
 ## Client config
 
@@ -393,8 +394,11 @@ instead, add `--no-auto-update` and restart the service.
 a `cargo run` / `target/debug` build, so there is no install root to replace.
 Run the updater by hand or install it with `cargo install --root`.
 
-`scan found nothing`: the resolver is on another subnet, port 8787 is
-firewalled, or the client is inside WSL and sees only the WSL virtual network.
+`scan found nothing`: the resolver is on another subnet or a non-Tailscale
+overlay, port 8787 is firewalled, or the client is inside WSL and sees only
+the WSL virtual network. A Tailscale resolver is found automatically only when
+`tailscale status` works for this user (the CLI is missing in many minimal
+installations); check with `curl http://HOST:8787/v1/health`.
 Configure `resolver_url` by hand, or run the server on the host/another
 machine with a route to the client. Check with `curl http://HOST:8787/v1/health`.
 

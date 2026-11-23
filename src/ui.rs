@@ -855,7 +855,7 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
         // and update state are what the overlay is asked about most often.
         (upd_header.as_str(), ""),
         ("u", "install update or check again"),
-        ("s", "scan the LAN for a resolver"),
+        ("s", "scan the LAN/tailnet for a resolver"),
         ("navigation", ""),
         ("1-6 / TAB / SHIFT+TAB", "switch tabs"),
         ("↑↓ / j k / wheel", "move selection"),
@@ -956,7 +956,7 @@ fn draw_scan(f: &mut Frame, app: &mut App, area: Rect) {
         ))),
         ScanState::Running => lines.push(Line::from(Span::styled(
             format!(
-                " {} scanning localhost and private networks on port {} (up to {}s)…",
+                " {} scanning localhost, tailnet peers and private networks on port {} (up to {}s)…",
                 spinner(app.anim.elapsed()),
                 remote::SCAN_PORT,
                 remote::MENU_SCAN_BUDGET.as_secs()

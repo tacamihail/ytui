@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -32,6 +33,13 @@ const SCAN_GRACE: Duration = Duration::from_millis(1500);
 /// Kept generous because `/v1/health` on an older server can take about a
 /// second while it shells out to `yt-dlp --version` and `deno --version`.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(2500);
+/// Overlay peers answer through a tunnel, and their `/v1/health` can be the
+/// first one that shells out for tool versions, so give them a little more
+/// room than a LAN host while still respecting the overall scan deadline.
+const OVERLAY_PROBE_TIMEOUT: Duration = Duration::from_millis(3000);
+/// A wedged `tailscale` CLI must not hold the scan: it gets this long to
+/// print `status --json` before it is killed and the sweep continues.
+const OVERLAY_CLI_TIMEOUT: Duration = Duration::from_secs(2);
 /// Parallel probes; a /24 then finishes in about five seconds when every host
 /// is silent, which fits the scan budget.
 const SCAN_WORKERS: usize = 128;
@@ -305,7 +313,7 @@ fn scan_port(port: u16, budget: Duration, cancel: Option<&AtomicBool>) -> Vec<Fo
                 let Some(&ip) = targets.get(i) else {
                     break;
                 };
-                if let Some(hit) = probe(ip, port, PROBE_TIMEOUT.min(left)) {
+                if let Some(hit) = probe(ip, port, probe_timeout(ip).min(left)) {
                     if !hit.auth {
                         let mut slot = first_tokenless.lock().unwrap_or_else(|e| e.into_inner());
                         if slot.is_none() {
@@ -346,8 +354,14 @@ fn scan_targets() -> Vec<IpAddr> {
     // The real LAN goes before virtual switches: Windows machines often carry
     // VMware, Hyper-V, WSL and VirtualBox adapters, each with its own /24, and
     // they used to push the physical network out of the scan.
+    let mut overlay: Vec<IpAddr> = Vec::new();
     let mut primary: Vec<IpAddr> = Vec::new();
     let mut virtual_switches: Vec<IpAddr> = Vec::new();
+
+    // Overlay peers are /32 routes outside every local /24, so the interface
+    // sweep below can never reach them. Probe them first: a tailnet resolver
+    // is the common case for a laptop that is not at home.
+    add_overlay_peers(&mut |ip| overlay.push(ip));
 
     if let Ok(interfaces) = get_if_addrs() {
         for iface in interfaces {
@@ -373,7 +387,7 @@ fn scan_targets() -> Vec<IpAddr> {
         }
     }
 
-    for ip in primary.into_iter().chain(virtual_switches) {
+    for ip in overlay.into_iter().chain(primary).chain(virtual_switches) {
         if targets.len() >= MAX_TARGETS {
             break;
         }
@@ -382,6 +396,130 @@ fn scan_targets() -> Vec<IpAddr> {
         }
     }
     targets
+}
+
+/// Adds peers of an overlay network that installs host routes (Tailscale today)
+/// so the scan can find a resolver in another `/32`.
+///
+/// This is best-effort on purpose: a missing or not-running CLI means the scan
+/// simply stays on the local network, and other overlays (WireGuard, ZeroTier)
+/// are still reached by `ytui discover --url`.
+fn add_overlay_peers(push: &mut impl FnMut(IpAddr)) {
+    let Some(status) = tailscale_status() else {
+        return;
+    };
+    if let Some(node) = status.get("Self") {
+        add_tailscale_node(node, push);
+    }
+    if let Some(peers) = status.get("Peer").and_then(|v| v.as_object()) {
+        for node in peers.values() {
+            add_tailscale_node(node, push);
+        }
+    }
+}
+
+fn add_tailscale_node(node: &serde_json::Value, push: &mut impl FnMut(IpAddr)) {
+    // A node that has been offline for weeks still has a route, but answering
+    // is hopeless and waiting for it would eat the scan budget.
+    if !node.get("Online").and_then(|v| v.as_bool()).unwrap_or(true) {
+        return;
+    }
+    let Some(ips) = node.get("TailscaleIPs").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for ip in ips {
+        if let Some(addr) = ip.as_str().and_then(|s| s.parse::<IpAddr>().ok()) {
+            push(addr);
+        }
+    }
+}
+
+/// `tailscale status --json`, also trying the Windows executable name so a
+/// client inside WSL can see the host's tailnet, and the macOS app bundle when
+/// the CLI is not on `PATH`. Any failure is a quiet "no overlay peers".
+fn tailscale_status() -> Option<serde_json::Value> {
+    const COMMANDS: [&str; 3] = [
+        // Linux, Windows and the macOS CLI symlink.
+        "tailscale",
+        // WSL interop: the host's Windows install.
+        "tailscale.exe",
+        // macOS app bundle.
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    ];
+    for cmd in COMMANDS {
+        let Some(out) = bounded_output(cmd, &["status", "--json"], OVERLAY_CLI_TIMEOUT) else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Runs a command and collects stdout, killing it after `timeout`.
+///
+/// `Command::output` would wait forever on a wedged daemon, and a plain
+/// `try_wait` poll can deadlock on a full pipe, so stdout is drained on its own
+/// thread while the parent watches the clock.
+fn bounded_output(program: &str, args: &[&str], timeout: Duration) -> Option<std::process::Output> {
+    use std::io::Read;
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let stdout = reader.join().ok()?;
+    Some(std::process::Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
+}
+
+/// Overlay peers live in `100.64.0.0/10`, outside the machine's own private
+/// `/24`, and are reached through a tunnel. They get the longer probe timeout,
+/// as do IPv6 targets, which are either a local ULA or a peer's tailnet address.
+fn probe_timeout(ip: IpAddr) -> Duration {
+    let overlay = match ip {
+        IpAddr::V4(v4) => {
+            let range = u32::from(v4) & 0xffc0_0000;
+            range == u32::from(Ipv4Addr::new(100, 64, 0, 0))
+        }
+        IpAddr::V6(_) => true,
+    };
+    if overlay {
+        OVERLAY_PROBE_TIMEOUT
+    } else {
+        PROBE_TIMEOUT
+    }
 }
 
 /// VMware, Hyper-V, WSL and VirtualBox give the host the first address of
@@ -642,6 +780,50 @@ mod tests {
         let mut ips = Vec::new();
         add_v4_range(&mut |ip| ips.push(ip), Ipv4Addr::new(100, 64, 0, 7), 32);
         assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(100, 64, 0, 7))]);
+    }
+
+    #[test]
+    fn overlay_peers_get_the_longer_probe_timeout() {
+        let peer = IpAddr::V4(Ipv4Addr::new(100, 126, 49, 124));
+        assert_eq!(probe_timeout(peer), OVERLAY_PROBE_TIMEOUT);
+        assert_eq!(
+            probe_timeout(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5))),
+            PROBE_TIMEOUT
+        );
+        assert_eq!(
+            probe_timeout(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
+            OVERLAY_PROBE_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn tailscale_nodes_add_online_v4_and_v6_peers_only() {
+        let online: serde_json::Value = serde_json::from_str(
+            r#"{"Online":true,"TailscaleIPs":["100.126.49.124","fd7a:115c:a1e0::1"]}"#,
+        )
+        .unwrap();
+        let offline: serde_json::Value =
+            serde_json::from_str(r#"{"Online":false,"TailscaleIPs":["100.76.39.13"]}"#).unwrap();
+        let mut ips = Vec::new();
+        add_tailscale_node(&online, &mut |ip| ips.push(ip));
+        add_tailscale_node(&offline, &mut |ip| ips.push(ip));
+        assert_eq!(
+            ips,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(100, 126, 49, 124)),
+                "fd7a:115c:a1e0::1".parse().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tailscale_node_without_an_online_flag_is_kept() {
+        // The Self entry has no Online field; it must not be dropped.
+        let node: serde_json::Value =
+            serde_json::from_str(r#"{"TailscaleIPs":["100.68.31.91"]}"#).unwrap();
+        let mut ips = Vec::new();
+        add_tailscale_node(&node, &mut |ip| ips.push(ip));
+        assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(100, 68, 31, 91))]);
     }
 
     #[test]

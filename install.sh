@@ -503,7 +503,7 @@ scan=0
 [[ "${YTUI_DISCOVER:-0}" == "1" ]] && scan=1
 if [[ "${YTUI_SKIP_DISCOVER:-0}" != "1" && "$scan" == 1 ]] \
    && ! grep -Eq '"resolver_url"[[:space:]]*:[[:space:]]*"[^"]+"' "$CFG_DIR/config.json" 2>/dev/null; then
-  info "looking for a resolver on the local network (optional, up to 10s)"
+  info "looking for a resolver on the LAN/tailnet (optional, up to 10s)"
   "$BIN_REAL" discover --save --timeout 10 --quiet || true
 fi
 

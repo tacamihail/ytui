@@ -390,7 +390,7 @@ if (-not $SkipDiscover -and ($seeded -or $Discover) -and $env:YTUI_SKIP_DISCOVER
         # A hand-edited or broken file is left for the player to report.
     }
     if (-not $configured) {
-        Info 'looking for a resolver on the local network (optional, up to 10s)'
+        Info 'looking for a resolver on the LAN/tailnet (optional, up to 10s)'
         & $Installed discover --save --timeout 10 --quiet
     }
 }
