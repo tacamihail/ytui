@@ -59,12 +59,19 @@ sheet to run it full-screen.
   how `<audio>` seeks and buffers.
 - Lock-screen controls come from the Media Session API: the page sets title,
   artist and the YouTube thumbnail per track.
-- The player shows the current track's artwork on the left. On a desktop
-  browser the transport row also carries mute, a volume slider and fullscreen
-  (phones use their hardware buttons). The volume level is remembered in
-  browser storage, like the queue.
-- Shuffle and repeat (queue, then one track) sit beside the transport; repeat
-  all wraps at the end of the queue.
+- The player uses the current track's cover as a blurred backdrop that fades
+  out to the right; title, timer, seek bar and transport are centered. On a
+  desktop browser the transport row also carries mute, a volume slider and
+  fullscreen (phones use their hardware buttons). The volume level is
+  remembered in browser storage, like the queue.
+- Shuffle and repeat (queue, then one track) sit at the edges of the transport
+  row; repeat all wraps at the end of the queue.
+- Safari can report a doubled duration for fragmented HE-AAC. The listing's
+  length is authoritative, media time is mapped by measuring how fast the
+  clock actually moves, and the page finishes the track itself instead of
+  waiting for the browser's silent tail.
+- Lock-screen artwork is offered at three sizes and set again once playback
+  starts, since iOS can drop metadata set too early.
 - Double-clicking a row in Search or Liked plays it, just like its play
   button.
 - Install it as a service like any other invocation:
