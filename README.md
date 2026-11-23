@@ -126,6 +126,9 @@ and the player falls back to its own yt-dlp when the server can't help.
 Run at login, tokens, public addresses, automatic updates:
 [docs/resolver.md](docs/resolver.md).
 
+The same server can also serve a small web player for a phone: add `--web`
+and open `http://<resolver>:8787/` — [docs/web.md](docs/web.md).
+
 ## Using it
 
 `1`-`6` or `Tab` switch tabs, `Enter` plays, `space` pauses, `/` searches and
@@ -146,6 +149,7 @@ Run `ytui doctor` first. The full list with explanations is in
 - [docs/account.md](docs/account.md) — cookies: the export, session rotation,
   one export per machine
 - [docs/resolver.md](docs/resolver.md) — the remote resolver
+- [docs/web.md](docs/web.md) — the phone's web player (`--web`)
 - [docs/usage.md](docs/usage.md) — tabs, keys, mouse, media keys
 - [docs/config.md](docs/config.md) — the config table and files on disk
 - [docs/audio.md](docs/audio.md) — how the audio pipeline works

@@ -112,6 +112,7 @@ Options:
 | `--max-concurrency` | `2` | simultaneous yt-dlp runs |
 | `--auto-update` | on | check github every 4 hours and reinstall |
 | `--no-auto-update` | - | keep the running version |
+| `--web` | off | serve the web player for a phone ([web.md](web.md)) |
 
 The cookie file is optional. Without it the server resolves what YouTube
 serves to an anonymous client. With it, the server can use its own account
