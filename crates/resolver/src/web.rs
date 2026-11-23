@@ -45,6 +45,19 @@ pub(crate) const AUDIO_RATE_MAX: usize = 240;
 /// How many candidates the proxy tries before it re-resolves once.
 const MAX_TRIES: usize = 8;
 
+/// Connect and per-read limits for streaming. There is deliberately no overall
+/// timeout: a long mix keeps one connection open for minutes, but a stalled
+/// socket must not hang a slot forever.
+const STREAM_CONNECT: Duration = Duration::from_secs(10);
+const STREAM_READ: Duration = Duration::from_secs(30);
+
+fn stream_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(STREAM_CONNECT)
+        .timeout_read(STREAM_READ)
+        .build()
+}
+
 pub fn page(request: Request) {
     send(request, 200, INDEX_HTML.to_string(), "text/html; charset=utf-8");
 }
@@ -263,6 +276,10 @@ pub fn audio_request(request: Request, path: &str, ctx: &Ctx) {
             return;
         }
     };
+    // Safari asks for the tail (`bytes=-N`) to find the moov atom of a long
+    // mix. googlevideo answers only start ranges, so turn the suffix into an
+    // explicit one before opening.
+    let range = translate_suffix(&track, range.as_deref());
     if let Some(up) = open_upstream(&track, range.as_deref()) {
         respond_stream(request, up);
         return;
@@ -270,6 +287,7 @@ pub fn audio_request(request: Request, path: &str, ctx: &Ctx) {
     // Every candidate refused: the cached URLs may have expired. One fresh
     // resolve, then the same opening attempt again.
     if let Ok(track) = resolve_id(ctx, &id, true) {
+        let range = translate_suffix(&track, range.as_deref());
         if let Some(up) = open_upstream(&track, range.as_deref()) {
             respond_stream(request, up);
             return;
@@ -324,16 +342,51 @@ struct Upstream {
     reader: Box<dyn Read + Send + Sync + 'static>,
 }
 
+/// Turns `bytes=-N` into `bytes=<size-N>-` using a one-byte range answer, so
+/// a trailing-moov file can be read from the end. Anything else passes
+/// through unchanged; if no candidate reports its size, the original range is
+/// kept and fails the old way.
+fn translate_suffix(track: &Resolved, range: Option<&str>) -> Option<String> {
+    let Some(r) = range else { return None };
+    let Some(n) = r
+        .strip_prefix("bytes=-")
+        .and_then(|n| n.parse::<u64>().ok())
+    else {
+        return Some(r.to_string());
+    };
+    track
+        .candidates
+        .iter()
+        .take(MAX_TRIES)
+        .find_map(|c| suffix_start(&c.url, n))
+        .map(|start| format!("bytes={start}-"))
+        .or_else(|| Some(r.to_string()))
+}
+
+/// Start offset for the last `n` bytes of a candidate, read from the
+/// Content-Range total of a one-byte range request.
+fn suffix_start(candidate: &str, n: u64) -> Option<u64> {
+    let resp = stream_agent()
+        .get(candidate)
+        .set("User-Agent", UA)
+        .set("Range", "bytes=0-0")
+        .call()
+        .ok()?;
+    let size: u64 = resp.header("Content-Range")?.rsplit('/').next()?.parse().ok()?;
+    Some(size.saturating_sub(n))
+}
+
 /// Opens the ranged request on the first candidate that answers.
 ///
 /// The resolve cache already ordered them best-first. Opening is itself the
 /// probe — an unwanted URL answers 403 immediately — because this server is
 /// also the machine that will fetch the stream.
 fn open_upstream(track: &Resolved, range: Option<&str>) -> Option<Upstream> {
+    let agent = stream_agent();
     for candidate in track.candidates.iter().take(MAX_TRIES) {
-        let mut req = ureq::get(&candidate.url)
-            .set("User-Agent", UA)
-            .timeout(Duration::from_secs(15));
+        let mut req = agent
+            .get(&candidate.url)
+            .set("User-Agent", UA);
         if let Some(range) = range {
             req = req.set("Range", range);
         }
@@ -390,4 +443,32 @@ fn server_cookies(ctx: &Ctx) -> Option<(&str, &str)> {
         .as_deref()
         .and_then(std::path::Path::to_str)
         .map(|p| ("--cookies", p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With no candidate to ask, a suffix range must reach upstream unchanged:
+    /// the browser still gets its answer, and nothing is invented.
+    #[test]
+    fn a_suffix_range_falls_back_when_no_candidate_answers() {
+        let track = Resolved {
+            id: "x".into(),
+            title: String::new(),
+            channel: String::new(),
+            duration: 0.0,
+            candidates: Vec::new(),
+            cached: false,
+        };
+        assert_eq!(
+            translate_suffix(&track, Some("bytes=-1024")).as_deref(),
+            Some("bytes=-1024")
+        );
+        assert_eq!(
+            translate_suffix(&track, Some("bytes=0-1")).as_deref(),
+            Some("bytes=0-1")
+        );
+        assert_eq!(translate_suffix(&track, None), None);
+    }
 }
