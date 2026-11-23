@@ -331,29 +331,55 @@ pub fn resolve(url: &str, cookies: Option<(&str, &str)>) -> Result<Resolved, Str
 /// probe instead of a drop to 48 kbps HE-AAC, which symphonia renders muffled.
 pub const EXTRACTOR_ARGS: &str = "youtube:player_client=visionos,default;formats=duplicate";
 
+/// The fast first attempt: one client, no duplicate copies. Measured at about
+/// four seconds against nine for the full list, because the `default` client
+/// costs a second extraction round and its URLs usually lose to visionos'.
+pub const EXTRACTOR_ARGS_FAST: &str = "youtube:player_client=visionos";
+
 /// Like [`resolve`], but kills the yt-dlp child as soon as `cancel` is raised
 /// and returns [`CANCELLED`]. Used by the player's foreground load, where a
 /// newer selection must not wait for the abandoned track.
 ///
-/// A signed-in run that cannot hand out a usable format is retried once
-/// without cookies: some uploads give an account only restricted formats
-/// while the public view still serves AAC. The jar is not needed for those.
+/// Runs are staged from cheapest to most expensive:
+///
+/// 1. anonymous with one client (about four seconds, covers almost everything,
+///    needs no jar lock);
+/// 2. anonymous with the full client list (slower but broader);
+/// 3. with the cookie jar, only for content that needs the account.
 pub fn resolve_cancellable(
     url: &str,
     cookies: Option<(&str, &str)>,
     cancel: Option<&AtomicBool>,
 ) -> Result<Resolved, String> {
-    match resolve_once(url, cookies, cancel) {
-        Ok(resolved) => Ok(resolved),
-        Err(e) if cookies.is_some() && is_restricted_format(&e) => {
-            resolve_once(url, None, cancel)
+    let fast_error = match resolve_once(url, None, cancel, EXTRACTOR_ARGS_FAST) {
+        Ok(resolved) => return Ok(resolved),
+        Err(e) => e,
+    };
+    if needs_sign_in(&fast_error) {
+        // The account is the only way in; anonymous cannot succeed here.
+        let Some(cookies) = cookies else {
+            return Err(fast_error);
+        };
+        return resolve_once(url, Some(cookies), cancel, EXTRACTOR_ARGS);
+    }
+    if is_restricted_format(&fast_error) {
+        // The one-client view was too narrow. The wider anonymous view often
+        // has the format, and only then is the account worth trying: a
+        // signed-in view can be narrower still for some uploads.
+        match resolve_once(url, None, cancel, EXTRACTOR_ARGS) {
+            Ok(resolved) => Ok(resolved),
+            Err(wide) => match cookies {
+                Some(cookies) => resolve_once(url, Some(cookies), cancel, EXTRACTOR_ARGS),
+                None => Err(wide),
+            },
         }
-        Err(e) => Err(e),
+    } else {
+        Err(fast_error)
     }
 }
 
 /// Errors that mean "this view of the video has no format we can use", where
-/// the anonymous view is worth one more try.
+/// a wider view is worth one more try.
 fn is_restricted_format(err: &str) -> bool {
     let low = err.to_lowercase();
     low.contains("requested format is not available")
@@ -362,19 +388,31 @@ fn is_restricted_format(err: &str) -> bool {
         || low.contains("no aac stream")
 }
 
+/// Errors that only the signed-in view can answer.
+fn needs_sign_in(err: &str) -> bool {
+    let low = err.to_lowercase();
+    low.contains("sign in")
+        || low.contains("sign-in")
+        || low.contains("age")
+        || low.contains("private")
+        || low.contains("members-only")
+        || low.contains("not a bot")
+}
+
 /// One yt-dlp run, with the jar lock and the signed-out transition check.
 fn resolve_once(
     url: &str,
     cookies: Option<(&str, &str)>,
     cancel: Option<&AtomicBool>,
+    extractor_args: &str,
 ) -> Result<Resolved, String> {
     // One writer at a time keeps the rotating session cookies in the jar
-    // current; see [`CookieLock`].
+    // current; see [`CookieLock`]. Anonymous runs need no lock at all.
     let _lock = lock_cookies_for_run(cookies)?;
     let had_session = jar_session_state(cookies);
     let mut c = command();
     c.args(["--no-warnings", "-j", url]);
-    c.args(["--extractor-args", EXTRACTOR_ARGS]);
+    c.args(["--extractor-args", extractor_args]);
     if let Some((flag, value)) = cookies {
         c.arg(flag).arg(value);
     }
@@ -749,9 +787,9 @@ mod tests {
     }
 
     /// The signed-in view can be narrower than the anonymous one; those errors
-    /// are the ones worth a second, cookie-less run.
+    /// are the ones worth a second run.
     #[test]
-    fn restricted_formats_trigger_the_anonymous_retry() {
+    fn restricted_formats_trigger_a_wider_run() {
         let real = friendly(
             "ERROR: [youtube] x: Requested format is not available. \
              Use --list-formats for a list of available formats",
@@ -762,6 +800,24 @@ mod tests {
         assert!(!is_restricted_format("unavailable on youtube"));
         assert!(!is_restricted_format("private: sign-in required"));
         assert!(!is_restricted_format(CANCELLED));
+    }
+
+    /// Only these errors are worth the cookie jar's lock and rotation cost.
+    #[test]
+    fn sign_in_errors_use_the_account() {
+        for raw in [
+            "ERROR: Private video. Sign in if you've been granted access",
+            "ERROR: Sign in to confirm you're not a bot",
+            "ERROR: [youtube] x: Age-restricted video (requested by uploader)",
+            "ERROR: [youtube] x: This video is members-only",
+            "ERROR: [youtube] x: Join this channel to get access",
+        ] {
+            let mapped = friendly(raw);
+            assert!(needs_sign_in(&mapped), "{mapped}");
+        }
+        assert!(!needs_sign_in("unavailable on youtube"));
+        assert!(!needs_sign_in("Requested format is not available"));
+        assert!(!needs_sign_in(CANCELLED));
     }
 
     /// Watch Later and Liked Music answer this when the cookies do not sign
