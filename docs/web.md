@@ -64,7 +64,7 @@ sheet to run it full-screen.
 - Lock-screen controls come from the Media Session API: the page sets title,
   artist and the YouTube thumbnail per track.
 - The player uses the current track's cover as a backdrop over the left half of
-  the bar on phones: dimmed to 35%, cropped to the centered square so the
+  the bar on phones: dimmed to 31%, cropped to the centered square so the
   filler bars in YouTube's 16:9 thumbnails do not show, and faded out by the
   middle of the screen. On a desktop the whole square cover is shown at full
   opacity and unblurred in a column of its own at the left, with the playback
