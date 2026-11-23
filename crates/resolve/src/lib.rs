@@ -54,6 +54,10 @@ pub struct Candidate {
     pub url: String,
     pub itag: String,
     pub abr: u64,
+    /// Byte size when yt-dlp knows it. The web proxy uses it to answer tail
+    /// range requests without probing every candidate first.
+    #[serde(default)]
+    pub size: Option<u64>,
 }
 
 /// Everything a resolve returns: metadata plus the AAC URLs to try.
@@ -517,6 +521,10 @@ fn resolved_from_json(info: &serde_json::Value) -> Result<Resolved, String> {
             _ => 3,
         };
         let abr = f.get("abr").and_then(|v| v.as_f64()).unwrap_or(0.0) as u64;
+        let size = f
+            .get("filesize")
+            .and_then(|v| v.as_u64())
+            .or_else(|| f.get("filesize_approx").and_then(|v| v.as_u64()));
         ranked.push((
             rank,
             abr,
@@ -524,6 +532,7 @@ fn resolved_from_json(info: &serde_json::Value) -> Result<Resolved, String> {
                 url: url.to_string(),
                 itag,
                 abr,
+                size,
             },
         ));
     }

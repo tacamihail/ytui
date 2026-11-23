@@ -23,13 +23,17 @@ work without cookies; Liked Music needs the server's `--cookies`.
 | `POST /v1/login` | `{"token":"..."}` -> session cookie |
 | `GET /v1/search?q=` | yt-dlp search, `limit` results (default 30, max 100) |
 | `GET /v1/liked` | Liked Music, cached for 15 minutes |
+| `GET /v1/playlists` | the account's playlists, cached for 15 minutes |
+| `GET /v1/playlist?id=` | tracks in one playlist, cached for 15 minutes |
 | `GET /audio/<id>` | Range proxy to googlevideo |
 
 The audio is proxied, not linked: googlevideo URLs can be bound to the
 requesting IP, so a URL resolved on the server can 403 when the phone fetches
 it directly. The proxy forwards the phone's Range headers, reuses the resolve
 cache (a mid-track seek on a cached video answers in milliseconds) and takes
-a resolve slot only for a cold resolve, never while streaming. When every
+a resolve slot only for a cold resolve, never while streaming. Safari asks for
+the tail of long files to find the moov atom; yt-dlp reports the format size,
+so that suffix is translated without probing every candidate first. When every
 candidate refuses, it re-resolves once with the cache bypassed, like the
 terminal player does.
 
@@ -60,10 +64,11 @@ sheet to run it full-screen.
 - Lock-screen controls come from the Media Session API: the page sets title,
   artist and the YouTube thumbnail per track.
 - The player uses the current track's cover as a backdrop over the left half of
-  the bar: dimmed to 35%, cropped to the centered square so the filler bars in
-  YouTube's 16:9 thumbnails do not show, and faded out by the middle of the
-  screen. A light vertical backdrop blur starts at the top edge and fades out
-  before the transport. Title, elapsed/total timers, seek bar and transport are
+  the bar on phones: dimmed to 35%, cropped to the centered square so the
+  filler bars in YouTube's 16:9 thumbnails do not show, and faded out by the
+  middle of the screen. On a desktop the whole square cover is shown at the
+  left instead, uncropped. A light vertical backdrop blur starts at the top
+  edge and fades out before the transport. Title, elapsed/total timers, seek bar and transport are
   centered; the channel shares the timer line with them and truncates with an
   ellipsis instead of wrapping or touching the times. On a desktop browser the
   transport row also carries mute, a volume slider and fullscreen (phones use
@@ -81,10 +86,15 @@ sheet to run it full-screen.
   length through `setPositionState`, so its scrubber is not doubled either.
 - Lock-screen artwork is offered at three sizes and set again once playback
   starts, since iOS can drop metadata set too early.
+- The tabs are Search, Liked and Playlists. Playlists mirrors the account's
+  YouTube playlists (it needs the server's `--cookies`): tap one to see its
+  tracks, then a "Play all" button or any row starts it. The list you start
+  from becomes the playback queue, which stays internal; there is no queue
+  tab to manage. Rows show a 40px thumbnail, lazily loaded so long lists do
+  not fetch every cover up front.
 - A double-click on a desktop or a single tap on a phone plays a row from
-  Search or Liked (tapping the current track toggles pause); the button left
-  on the row only adds it to the queue. Rows show a 40px thumbnail, lazily
-  loaded so long lists do not fetch every cover up front.
+  Search, Liked or a playlist (tapping the current track toggles pause); the
+  button left on the row only adds it to the playback queue.
 - Install it as a service like any other invocation:
   `ytui-resolver --bind 0.0.0.0:8787 --allow-private --web --install-service`.
 - One export is one client still: with `--cookies` on the server, the

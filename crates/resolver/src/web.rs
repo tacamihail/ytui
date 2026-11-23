@@ -9,6 +9,8 @@
 //!   POST /v1/login        token -> HttpOnly session cookie
 //!   GET  /v1/search?q=    search through the shared listing code
 //!   GET  /v1/liked        Liked Music through the shared listing code
+//!   GET  /v1/playlists    the signed-in account's playlists
+//!   GET  /v1/playlist?id= tracks in one playlist
 //!   GET  /audio/<id>      Range proxy to googlevideo
 //!
 //! The audio is proxied rather than linked: googlevideo URLs can be bound to
@@ -23,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, StatusCode};
-use ytui_resolve::listing::{self, Kind, TrackMeta, LIKED_MUSIC_URL};
+use ytui_resolve::listing::{self, Kind, TrackMeta, LIKED_MUSIC_URL, WATCH_LATER_URL};
 use ytui_resolve::{Resolved, UA};
 
 use crate::{constant_time_eq, parse_query, send, send_json, send_text, Ctx};
@@ -235,6 +237,178 @@ pub fn liked_request(request: Request, ctx: &Ctx) {
     }
 }
 
+/// Shared checks for the playlist routes: auth, rate limit and cookies.
+/// Returns the request back when it may go on.
+fn allow_listing(request: Request, ctx: &Ctx) -> Option<Request> {
+    if request.method() != &Method::Get {
+        send_text(request, 405, "method not allowed");
+        return None;
+    }
+    if !crate::authorized(&request, &ctx.token, ctx.allow_private) {
+        send_json(request, 401, r#"{"error":"bad token"}"#.into());
+        return None;
+    }
+    let peer = peer_ip(&request);
+    if !ctx
+        .rate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .allow(&peer)
+    {
+        send_json(request, 429, r#"{"error":"rate limited"}"#.into());
+        return None;
+    }
+    if ctx.cookies.is_none() {
+        send_json(
+            request,
+            400,
+            r#"{"error":"this resolver has no --cookies, so playlists are not available"}"#.into(),
+        );
+        return None;
+    }
+    Some(request)
+}
+
+/// Answers a listing from the shared cache, or runs yt-dlp once and caches it.
+fn cached_listing(request: Request, ctx: &Ctx, key: &str, kind: Kind, target: &str) {
+    if let Some((at, items)) = ctx
+        .listings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+    {
+        if at.elapsed() < LISTING_TTL {
+            send_json(request, 200, json!({ "v": 1, "items": items }).to_string());
+            return;
+        }
+    }
+    let mut items: Vec<TrackMeta> = Vec::new();
+    let started = Instant::now();
+    match listing::list(kind, target, WEB_FETCH_LIMIT, server_cookies(ctx), &mut |m| {
+        items.push(m)
+    }) {
+        Ok(_) => {
+            eprintln!(
+                "web {} ok: {} items ({} ms)",
+                listing::label(kind),
+                items.len(),
+                started.elapsed().as_millis()
+            );
+            ctx.listings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key.to_string(), (Instant::now(), items.clone()));
+            send_json(request, 200, json!({ "v": 1, "items": items }).to_string());
+        }
+        Err(e) => {
+            eprintln!("web {} failed: {e}", listing::label(kind));
+            send_json(request, 502, json!({ "error": e }).to_string());
+        }
+    }
+}
+
+/// The account's channel id, needed for its playlists page.
+///
+/// This mirrors the terminal's account lookup: yt-dlp follows the stored jar
+/// and the watch-later or liked playlist reports its owner. Found once per
+/// process, since the resolver is restarted when the cookies change.
+fn account_channel_id(ctx: &Ctx) -> Result<String, String> {
+    if let Some(id) = ctx.account.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Ok(id);
+    }
+    let Some((flag, value)) = server_cookies(ctx) else {
+        return Err("this resolver has no --cookies, so playlists are not available".into());
+    };
+    let _lock = ytui_resolve::lock_cookies_for_run(Some((flag, value)))?;
+    let before = ytui_resolve::jar_session_state(Some((flag, value)));
+    let mut last = String::new();
+    for url in [WATCH_LATER_URL, LIKED_MUSIC_URL] {
+        let out = ytui_resolve::command()
+            .args([
+                "--flat-playlist",
+                "--playlist-items",
+                "1",
+                "-J",
+                "--no-warnings",
+                flag,
+                value,
+                url,
+            ])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|_| "yt-dlp not found".to_string())?;
+        if !out.status.success() {
+            last = ytui_resolve::friendly(&String::from_utf8_lossy(&out.stderr));
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+            Ok(v) => v,
+            Err(e) => {
+                last = format!("bad yt-dlp json: {e}");
+                continue;
+            }
+        };
+        let id = v
+            .get("channel_id")
+            .and_then(|x| x.as_str())
+            .or_else(|| v.get("uploader_id").and_then(|x| x.as_str()))
+            .unwrap_or("");
+        if !id.is_empty() {
+            *ctx.account.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.to_string());
+            return Ok(id.to_string());
+        }
+    }
+    if before == Some(true)
+        && ytui_resolve::jar_session_state(Some((flag, value))) == Some(false)
+    {
+        return Err(ytui_resolve::SIGNED_OUT.into());
+    }
+    Err(if last.is_empty() {
+        "could not read the account: cookies are accepted but YouTube returned no owner".into()
+    } else {
+        last
+    })
+}
+
+/// Playlists created by the signed-in account.
+pub fn playlists_request(request: Request, ctx: &Ctx) {
+    let Some(request) = allow_listing(request, ctx) else {
+        return;
+    };
+    let target = match account_channel_id(ctx) {
+        Ok(id) => format!("https://www.youtube.com/channel/{id}/playlists"),
+        Err(e) => {
+            send_json(request, 502, json!({ "error": e }).to_string());
+            return;
+        }
+    };
+    cached_listing(request, ctx, "playlists", Kind::Playlists, &target);
+}
+
+/// Tracks in one playlist. The id is validated so a request cannot turn the
+/// server into an arbitrary yt-dlp proxy.
+pub fn playlist_request(request: Request, url: &str, ctx: &Ctx) {
+    let Some(request) = allow_listing(request, ctx) else {
+        return;
+    };
+    let query = parse_query(url);
+    let Some(id) = query
+        .get("id")
+        .filter(|id| {
+            (2..=100).contains(&id.len())
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+    else {
+        send_json(request, 400, r#"{"error":"missing or bad playlist id"}"#.into());
+        return;
+    };
+    let target = format!("https://www.youtube.com/playlist?list={id}");
+    let key = format!("playlist:{id}");
+    cached_listing(request, ctx, &key, Kind::PlaylistTracks, &target);
+}
+
 pub fn audio_request(request: Request, path: &str, ctx: &Ctx) {
     if request.method() != &Method::Get {
         send_text(request, 405, "method not allowed");
@@ -358,7 +532,10 @@ fn translate_suffix(track: &Resolved, range: Option<&str>) -> Option<String> {
         .candidates
         .iter()
         .take(MAX_TRIES)
-        .find_map(|c| suffix_start(&c.url, n))
+        .find_map(|c| match c.size {
+            Some(size) => Some(size.saturating_sub(n)),
+            None => suffix_start(&c.url, n),
+        })
         .map(|start| format!("bytes={start}-"))
         .or_else(|| Some(r.to_string()))
 }
@@ -470,5 +647,26 @@ mod tests {
             Some("bytes=0-1")
         );
         assert_eq!(translate_suffix(&track, None), None);
+    }
+
+    #[test]
+    fn a_known_size_answers_a_tail_range_without_probing() {
+        let track = Resolved {
+            id: "x".into(),
+            title: String::new(),
+            channel: String::new(),
+            duration: 0.0,
+            candidates: vec![ytui_resolve::Candidate {
+                url: "https://example.invalid/a".into(),
+                itag: "140".into(),
+                abr: 128,
+                size: Some(1000),
+            }],
+            cached: false,
+        };
+        assert_eq!(
+            translate_suffix(&track, Some("bytes=-100")).as_deref(),
+            Some("bytes=900-")
+        );
     }
 }

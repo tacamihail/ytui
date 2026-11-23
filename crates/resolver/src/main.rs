@@ -106,6 +106,7 @@ fn run() -> Result<(), String> {
         rate: Mutex::new(RateLimit::new(RATE_MAX, RATE_WINDOW)),
         audio_rate: Mutex::new(RateLimit::new(web::AUDIO_RATE_MAX, RATE_WINDOW)),
         listings: Mutex::new(HashMap::new()),
+        account: Mutex::new(None),
         tools: Mutex::new(None),
         speed: Mutex::new(Speed::default()),
         gate: Arc::clone(&gate),
@@ -512,6 +513,8 @@ struct Ctx {
     audio_rate: Mutex<RateLimit>,
     /// Listing answers (Liked Music), kept for [`web::LISTING_TTL`].
     listings: Mutex<HashMap<String, (Instant, Vec<TrackMeta>)>>,
+    /// The signed-in account's channel id, found once if playlists are used.
+    account: Mutex<Option<String>>,
     tools: Mutex<Option<(Instant, Option<String>, Option<String>)>>,
     speed: Mutex<Speed>,
     /// Resolve slots. The audio route takes a permit itself, and only for the
@@ -537,6 +540,8 @@ fn handle(request: Request, ctx: &Ctx) {
         "/v1/login" if ctx.web => web::login_request(request, ctx),
         "/v1/search" if ctx.web => web::search_request(request, &url, ctx),
         "/v1/liked" if ctx.web => web::liked_request(request, ctx),
+        "/v1/playlists" if ctx.web => web::playlists_request(request, ctx),
+        "/v1/playlist" if ctx.web => web::playlist_request(request, &url, ctx),
         _ if ctx.web && path.starts_with("/audio/") => web::audio_request(request, path, ctx),
         _ => send_text(request, 404, "not found"),
     }
