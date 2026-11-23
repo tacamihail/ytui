@@ -71,8 +71,23 @@ main {
   border: 1px solid #2c2c36; border-radius: 12px;
   font-size: 16px; touch-action: manipulation; cursor: pointer;
 }
+.row .meta:active { opacity: .6; }
 .row.playing .title { color: var(--accent); }
 .row.playing { background: #141920; }
+.row { transition: background-color .2s ease; }
+
+/* A tap must be visible even when the queue tab is not the open one. */
+button { transition: transform .12s ease, background-color .15s ease, border-color .15s ease, color .15s ease; }
+button:active { transform: scale(.9); }
+nav button:active { transform: none; opacity: .7; }
+.row button.done {
+  color: var(--accent); border-color: var(--accent);
+  animation: pop .32s ease;
+}
+@keyframes pop { 40% { transform: scale(1.18); } }
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
 
 form.bar {
   position: sticky; top: 0; z-index: 1;
@@ -282,6 +297,8 @@ form.bar button {
 <audio id="audio" preload="none"></audio>
 <script>
 "use strict";
+// iOS Safari only paints :active on buttons once a touch listener exists.
+document.addEventListener("touchstart", () => {}, { passive: true });
 const $ = (id) => document.getElementById(id);
 const audio = $("audio");
 
@@ -393,11 +410,32 @@ function row(item, onPlay, onAdd) {
   const add = document.createElement("button");
   add.textContent = "+";
   add.setAttribute("aria-label", "Add to queue");
-  add.addEventListener("click", onAdd);
+  let addTimer = 0;
+  add.addEventListener("click", () => {
+    onAdd();
+    // Flip to a tick for a moment: the queue tab may not be open, so the tap
+    // needs a result of its own.
+    add.textContent = "✓";
+    add.classList.add("done");
+    clearTimeout(addTimer);
+    addTimer = setTimeout(() => {
+      add.textContent = "+";
+      add.classList.remove("done");
+    }, 900);
+  });
   const play = document.createElement("button");
   play.textContent = "▶";
-  play.setAttribute("aria-label", "Play");
-  play.addEventListener("click", onPlay);
+  play.setAttribute("aria-label", "Play or pause");
+  play.addEventListener("click", () => {
+    const cur = current();
+    if (cur && cur.id === item.id && !audio.paused) {
+      audio.pause();
+    } else if (cur && cur.id === item.id) {
+      audio.play();
+    } else {
+      onPlay();
+    }
+  });
   div.append(meta, add, play);
   return div;
 }
