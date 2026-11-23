@@ -57,6 +57,7 @@ main {
   padding: 8px 14px; min-height: 58px;
   border-bottom: 1px solid #1c1c23;
   transition: background-color .2s ease;
+  touch-action: manipulation;
 }
 .row .meta { flex: 1; min-width: 0; }
 .row .meta:active { opacity: .6; }
@@ -177,6 +178,13 @@ button.busy::after {
   padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
 }
 #player[hidden] { display: none; }
+#player .inner { display: flex; align-items: center; gap: 12px; }
+#player .art {
+  flex: none; width: 46px; height: 46px; border-radius: 8px;
+  object-fit: cover; background: var(--panel2);
+}
+#player .art[hidden] { display: none; }
+#player .body { flex: 1; min-width: 0; }
 #player .line1 {
   display: flex; justify-content: space-between; align-items: baseline;
   gap: 10px; min-width: 0; margin-bottom: 4px;
@@ -219,16 +227,19 @@ button.busy::after {
   display: flex; align-items: center; justify-content: center; gap: 22px;
   margin-top: 2px;
 }
-/* The volume slider rides the transport row on a desktop, where a mouse makes
-   it useful; phones keep their hardware buttons and the row stays centered. */
-#player .volume { display: none; }
-@media (hover: hover) and (pointer: fine) and (min-width: 760px) {
-  #player .volume {
+#player button.on { color: var(--accent); border-color: var(--accent); }
+/* Mute, volume and fullscreen ride the transport row on a desktop, where a
+   mouse makes them useful; phones keep their hardware buttons instead. */
+#player .extras { display: none; }
+@media (hover: hover) and (pointer: fine) and (min-width: 820px) {
+  #player .inner { max-width: 1000px; margin: 0 auto; }
+  #player .art { width: 64px; height: 64px; border-radius: 10px; }
+  #player .extras {
     display: flex; align-items: center; gap: 6px;
     position: absolute; right: 0; top: 50%; transform: translateY(-50%);
   }
-  #player .volume button { width: 34px; height: 34px; }
-  #player .volume button svg { width: 18px; height: 18px; }
+  #player .extras button { width: 34px; height: 34px; }
+  #player .extras button svg { width: 18px; height: 18px; }
 }
 #player button {
   width: 46px; height: 46px; display: grid; place-items: center;
@@ -242,6 +253,24 @@ button.busy::after {
   background: var(--accent); color: #0b0b0e; border: 0;
 }
 #player #play svg { width: 26px; height: 26px; }
+/* Five transport buttons plus the artwork need a little less room on phones. */
+@media (max-width: 440px) {
+  #player .inner { gap: 10px; }
+  #player .art { width: 42px; height: 42px; }
+  #player .controls { gap: 10px; }
+  #player button { width: 42px; height: 42px; }
+  #player button svg { width: 20px; height: 20px; }
+  #player #play { width: 50px; height: 50px; }
+  #player #play svg { width: 24px; height: 24px; }
+}
+@media (max-width: 340px) {
+  #player .art { width: 38px; height: 38px; border-radius: 7px; }
+  #player .controls { gap: 8px; }
+  #player button { width: 38px; height: 38px; }
+  #player button svg { width: 18px; height: 18px; }
+  #player #play { width: 46px; height: 46px; }
+  #player #play svg { width: 22px; height: 22px; }
+}
 #time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 #buffering[hidden] { display: none; }
 
@@ -305,22 +334,30 @@ button.busy::after {
   </section>
 </main>
 <footer id="player" hidden>
-  <div class="line1">
-    <span class="ptitle" id="player-title"></span>
-    <span class="sub" id="player-sub"></span>
-  </div>
-  <div class="line2">
-    <div class="spin" id="buffering" hidden></div>
-    <span id="time">0:00</span>
-  </div>
-  <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
-  <div class="controls">
-    <button id="prev" aria-label="Previous"></button>
-    <button id="play" aria-label="Play or pause"></button>
-    <button id="next" aria-label="Next"></button>
-    <div class="volume">
-      <button id="mute" aria-label="Mute"></button>
-      <input id="volume" type="range" min="0" max="100" value="100" aria-label="Volume">
+  <div class="inner">
+    <img class="art" id="art" alt="" width="64" height="64">
+    <div class="body">
+      <div class="line1">
+        <span class="ptitle" id="player-title"></span>
+        <span class="sub" id="player-sub"></span>
+      </div>
+      <div class="line2">
+        <div class="spin" id="buffering" hidden></div>
+        <span id="time">0:00</span>
+      </div>
+      <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
+      <div class="controls">
+        <button id="shuffle" aria-label="Shuffle" aria-pressed="false"></button>
+        <button id="prev" aria-label="Previous"></button>
+        <button id="play" aria-label="Play or pause"></button>
+        <button id="next" aria-label="Next"></button>
+        <button id="repeat" aria-label="Repeat"></button>
+        <div class="extras">
+          <button id="mute" aria-label="Mute"></button>
+          <input id="volume" type="range" min="0" max="100" value="100" aria-label="Volume">
+          <button id="fullscreen" aria-label="Fullscreen"></button>
+        </div>
+      </div>
     </div>
   </div>
 </footer>
@@ -355,6 +392,8 @@ try {
   if (isFinite(saved)) volume = Math.min(1, Math.max(0, saved / 100));
 } catch {}
 let lastVolume = volume || 1; // what unmuting goes back to
+let shuffle = false;  // pick the next track at random
+let repeat = 0;       // 0 off, 1 repeat the queue, 2 repeat one track
 let index = -1;       // position in the queue that is loaded
 let liked = [];       // liked-music rows, fetched once per visit
 let dead = 0;         // consecutive streams that failed outright
@@ -384,6 +423,11 @@ const ICONS = {
   pause: "M6 5h4v14H6zm8 0h4v14h-4z",
   next: "M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z",
   prev: "M18 6l-8.5 6L18 18V6zM8 6v12H6V6h2z",
+  shuffle: "M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z",
+  repeat: "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z",
+  repeat_one: "M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z",
+  fullscreen: "M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z",
+  fullscreen_exit: "M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z",
   add: "M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z",
   check: "M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z",
   close: "M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
@@ -429,6 +473,39 @@ $("mute").addEventListener("click", () => {
   }
 });
 setVolume(volume, false);
+
+// ---------- shuffle, repeat, fullscreen ----------
+function renderModes() {
+  $("shuffle").classList.toggle("on", shuffle);
+  $("shuffle").setAttribute("aria-pressed", shuffle);
+  $("repeat").classList.toggle("on", repeat > 0);
+  $("repeat").setAttribute("aria-label",
+    repeat === 2 ? "Repeat one" : repeat === 1 ? "Repeat all" : "Repeat");
+  setIcon($("repeat"), repeat === 2 ? "repeat_one" : "repeat");
+}
+$("shuffle").addEventListener("click", () => { shuffle = !shuffle; renderModes(); });
+$("repeat").addEventListener("click", () => { repeat = (repeat + 1) % 3; renderModes(); });
+setIcon($("shuffle"), "shuffle");
+$("fullscreen").addEventListener("click", () => {
+  const d = document, el = d.documentElement;
+  if (d.fullscreenElement || d.webkitFullscreenElement) {
+    (d.exitFullscreen || d.webkitExitFullscreen).call(d);
+    return;
+  }
+  const request = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (!request) { toast("fullscreen is not available here"); return; }
+  const answer = request.call(el);
+  if (answer && answer.catch) answer.catch(() => toast("fullscreen was refused"));
+});
+function renderFullscreen() {
+  const on = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  setIcon($("fullscreen"), on ? "fullscreen_exit" : "fullscreen");
+  $("fullscreen").setAttribute("aria-label", on ? "Exit fullscreen" : "Fullscreen");
+}
+document.addEventListener("fullscreenchange", renderFullscreen);
+document.addEventListener("webkitfullscreenchange", renderFullscreen);
+setIcon($("fullscreen"), "fullscreen");
+renderModes();
 
 // ---------- helpers ----------
 function fmt(s) {
@@ -556,6 +633,12 @@ function row(item, onPlay, onAdd) {
     }
   });
   div.append(meta, add, play);
+  // A double-click anywhere on the row (but not on its buttons) plays it, the
+  // way a desktop music player does; the play button still works on its own.
+  div.addEventListener("dblclick", (e) => {
+    if (e.target.closest("button")) return;
+    onPlay();
+  });
   return div;
 }
 function markPlaying() {
@@ -587,6 +670,8 @@ function playIndex(i) {
   $("player").hidden = false;
   $("player-title").textContent = t.title;
   $("player-sub").textContent = t.channel;
+  $("art").hidden = false;
+  $("art").src = "https://i.ytimg.com/vi/" + t.id + "/mqdefault.jpg";
   if ("mediaSession" in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: t.title,
@@ -621,8 +706,21 @@ function stopPlayback() {
   markPlaying();
 }
 $("play").addEventListener("click", () => (audio.paused ? audio.play() : audio.pause()));
-$("next").addEventListener("click", () => playIndex(index + 1));
+// Shuffle picks any track but the current one; with repeat on, next wraps to
+// the top of the queue instead of stopping at the end.
+function nextIndex() {
+  if (!queue.length) return -1;
+  if (shuffle && queue.length > 1) {
+    let n = index;
+    while (n === index) n = Math.floor(Math.random() * queue.length);
+    return n;
+  }
+  if (index + 1 >= queue.length && repeat === 1) return 0;
+  return index + 1;
+}
+$("next").addEventListener("click", () => playIndex(nextIndex()));
 $("prev").addEventListener("click", () => playIndex(index - 1));
+$("art").addEventListener("error", () => { $("art").hidden = true; });
 setIcon($("prev"), "prev");
 setIcon($("play"), "play");
 setIcon($("next"), "next");
@@ -643,8 +741,11 @@ audio.addEventListener("playing", () => {
 // plays; the handover then costs the proxy's range request only.
 const prefetched = new Set();
 function prefetchNext() {
-  const next = queue[index + 1];
-  if (!next || prefetched.has(next.id)) return;
+  if (shuffle || !queue[index]) return; // a random pick cannot be warmed ahead
+  const n = index + 1 < queue.length ? index + 1
+          : (repeat === 1 ? 0 : -1);
+  const next = n >= 0 ? queue[n] : null;
+  if (!next || next.id === queue[index].id || prefetched.has(next.id)) return;
   prefetched.add(next.id);
   fetch("/v1/resolve?url=" + encodeURIComponent("https://www.youtube.com/watch?v=" + next.id))
     .catch(() => {});
@@ -657,7 +758,14 @@ audio.addEventListener("pause", () => {
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
   markPlaying();
 });
-audio.addEventListener("ended", () => playIndex(index + 1));
+audio.addEventListener("ended", () => {
+  if (repeat === 2) { // repeat one: play the same stream again, no refetch
+    audio.currentTime = 0;
+    audio.play();
+    return;
+  }
+  playIndex(nextIndex());
+});
 audio.addEventListener("error", () => {
   $("buffering").hidden = true;
   loading = false;
@@ -785,7 +893,11 @@ function renderQueue() {
     sub.className = "sub";
     sub.textContent = item.channel + (item.duration ? " · " + fmt(item.duration) : "");
     meta.append(title, sub);
-    meta.addEventListener("click", () => playIndex(i));
+    meta.addEventListener("click", () => {
+      // The same row twice (a double-click) must not reload the stream.
+      if (i === index) { if (audio.paused) audio.play(); }
+      else playIndex(i);
+    });
     const rm = document.createElement("button");
     rm.setAttribute("aria-label", "Remove from queue");
     setIcon(rm, "close");
