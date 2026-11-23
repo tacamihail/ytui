@@ -60,10 +60,15 @@ sheet to run it full-screen.
 - Lock-screen controls come from the Media Session API: the page sets title,
   artist and the YouTube thumbnail per track.
 - The player uses the current track's cover as a dimmed backdrop that fades
-  out to the right; title, timer, seek bar and transport are centered. On a
-  desktop browser the transport row also carries mute, a volume slider and
-  fullscreen (phones use their hardware buttons). The volume level is
-  remembered in browser storage, like the queue.
+  out to the right; it keeps the artwork's aspect at the left edge, so square
+  covers are not cropped or pushed right. Title, elapsed/total timers, seek
+  bar and transport are centered. On a desktop browser the transport row also
+  carries mute, a volume slider and fullscreen (phones use their hardware
+  buttons). The volume level is remembered in browser storage, like the
+  queue.
+- Next/previous keep the visible list in step: the new track scrolls to the
+  first row after next, and to the second after previous so the track that
+  just played stays in view.
 - Shuffle and repeat (queue, then one track) sit at the edges of the transport
   row; repeat all wraps at the end of the queue.
 - Safari can report a doubled duration for fragmented HE-AAC. The listing's
