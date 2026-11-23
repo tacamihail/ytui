@@ -59,6 +59,9 @@ sheet to run it full-screen.
   how `<audio>` seeks and buffers.
 - Lock-screen controls come from the Media Session API: the page sets title,
   artist and the YouTube thumbnail per track.
+- On a desktop browser the player also shows a volume slider next to the
+  transport (phones use their hardware buttons). The level is remembered in
+  browser storage, like the queue.
 - Install it as a service like any other invocation:
   `ytui-resolver --bind 0.0.0.0:8787 --allow-private --web --install-service`.
 - One export is one client still: with `--cookies` on the server, the
