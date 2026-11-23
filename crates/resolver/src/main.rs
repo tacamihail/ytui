@@ -24,10 +24,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
+use ytui_resolve::listing::TrackMeta;
 use ytui_resolve::{Candidate, Resolved};
 
 mod service;
 mod update;
+mod web;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8787";
 const DEFAULT_TTL: Duration = Duration::from_secs(4 * 60 * 60);
@@ -90,17 +92,24 @@ fn run() -> Result<(), String> {
     if args.allow_private {
         eprintln!("private LAN/Tailscale peers do not need a token");
     }
+    if args.web {
+        eprintln!("web player on / (search and playback; Liked Music needs --cookies)");
+    }
 
+    let gate = Arc::new(Gate::new(args.max_concurrency));
     let ctx = Arc::new(Ctx {
         token,
         allow_private: args.allow_private,
         cookies: args.cookies,
+        web: args.web,
         cache: Mutex::new(Cache::new(args.cache_cap, args.cache_ttl, args.cache_file)),
         rate: Mutex::new(RateLimit::new(RATE_MAX, RATE_WINDOW)),
+        audio_rate: Mutex::new(RateLimit::new(web::AUDIO_RATE_MAX, RATE_WINDOW)),
+        listings: Mutex::new(HashMap::new()),
         tools: Mutex::new(None),
         speed: Mutex::new(Speed::default()),
+        gate: Arc::clone(&gate),
     });
-    let gate = Arc::new(Gate::new(args.max_concurrency));
     let server =
         Arc::new(Server::http(&args.bind).map_err(|e| format!("cannot bind {}: {e}", args.bind))?);
 
@@ -122,8 +131,13 @@ fn run() -> Result<(), String> {
             Ok(request) => {
                 // Health is cheap and never runs yt-dlp, so it must not wait
                 // behind a full resolve queue (doctor would look unreachable).
-                let health = request.url().starts_with("/v1/health");
-                if health {
+                // An audio stream, likewise, answers for the whole track: a
+                // resolve slot must not be held hostage by playback, so the
+                // audio route takes the gate itself, and only for the cold
+                // resolve.
+                let skip_gate = request.url().starts_with("/v1/health")
+                    || (ctx.web && request.url().starts_with("/audio/"));
+                if skip_gate {
                     let ctx = Arc::clone(&ctx);
                     thread::spawn(move || handle(request, &ctx));
                     continue;
@@ -161,6 +175,9 @@ struct Args {
     /// Check github every four hours and reinstall when a newer version is
     /// there. On by default; `--no-auto-update` turns it off.
     auto_update: bool,
+    /// Serve the web player: the page on `/`, the listing endpoints and the
+    /// audio proxy. Off by default, so an existing deployment is unchanged.
+    web: bool,
 }
 
 impl Args {
@@ -179,6 +196,7 @@ impl Args {
             install_service: false,
             uninstall_service: false,
             auto_update: true,
+            web: false,
         };
         let mut i = 1;
         while i < argv.len() {
@@ -219,6 +237,7 @@ impl Args {
                 "--uninstall-service" => a.uninstall_service = true,
                 "--auto-update" => a.auto_update = true,
                 "--no-auto-update" => a.auto_update = false,
+                "--web" => a.web = true,
                 other => return Err(format!("unknown option {other} (try --help)")),
             }
             i += 1;
@@ -291,6 +310,9 @@ fn service_args(args: &Args, token_path: Option<PathBuf>) -> Vec<String> {
     if args.allow_private {
         out.push("--allow-private".into());
     }
+    if args.web {
+        out.push("--web".into());
+    }
     if let Some(p) = &args.cookies {
         out.push("--cookies".into());
         out.push(p.display().to_string());
@@ -349,6 +371,9 @@ options:
   --max-concurrency N     simultaneous yt-dlp runs (default 2)
   --auto-update           check github every 4 hours and reinstall (default)
   --no-auto-update        do not update the server on its own
+  --web                   serve a small web player for the phone: the page on
+                          /, search, Liked Music and an audio proxy, with the
+                          same token or --allow-private applying
   -V, --version           print version
   -h, --help              this text
 
@@ -453,10 +478,19 @@ struct Ctx {
     token: Option<String>,
     allow_private: bool,
     cookies: Option<PathBuf>,
+    web: bool,
     cache: Mutex<Cache>,
     rate: Mutex<RateLimit>,
+    /// The audio proxy gets its own wider bucket: range requests are how
+    /// `<audio>` seeks and buffers.
+    audio_rate: Mutex<RateLimit>,
+    /// Listing answers (Liked Music), kept for [`web::LISTING_TTL`].
+    listings: Mutex<HashMap<String, (Instant, Vec<TrackMeta>)>>,
     tools: Mutex<Option<(Instant, Option<String>, Option<String>)>>,
     speed: Mutex<Speed>,
+    /// Resolve slots. The audio route takes a permit itself, and only for the
+    /// cold resolve, so a stream never holds the queue hostage.
+    gate: Arc<Gate>,
 }
 
 fn handle(request: Request, ctx: &Ctx) {
@@ -472,6 +506,12 @@ fn handle(request: Request, ctx: &Ctx) {
             send_json(request, 200, body);
         }
         "/v1/resolve" => resolve_request(request, &url, ctx),
+        "/" if ctx.web => web::page(request),
+        "/v1/session" if ctx.web => web::session_request(request, ctx),
+        "/v1/login" if ctx.web => web::login_request(request, ctx),
+        "/v1/search" if ctx.web => web::search_request(request, &url, ctx),
+        "/v1/liked" if ctx.web => web::liked_request(request, ctx),
+        _ if ctx.web && path.starts_with("/audio/") => web::audio_request(request, path, ctx),
         _ => send_text(request, 404, "not found"),
     }
 }
@@ -569,18 +609,29 @@ fn authorized(request: &Request, token: &Option<String>, allow_private: bool) ->
     let Some(expected) = token else {
         return private;
     };
-    let got = request
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv("Authorization"))
-        .map(|h| h.value.as_str())
-        .unwrap_or("");
-    let got = got
-        .strip_prefix("Bearer ")
-        .or_else(|| got.strip_prefix("bearer "))
-        .unwrap_or("")
-        .trim();
-    constant_time_eq(got.as_bytes(), expected.as_bytes())
+    // The player sends Authorization. A browser cannot put that header on an
+    // <audio> element, so the web player signs in once and carries the same
+    // token in a cookie.
+    let mut ok = false;
+    for h in request.headers() {
+        let value = h.value.as_str();
+        let got = if h.field.equiv("Authorization") {
+            value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+                .unwrap_or("")
+                .trim()
+        } else if h.field.equiv("Cookie") {
+            value
+                .split(';')
+                .find_map(|c| c.trim().strip_prefix("ytui_web="))
+                .unwrap_or("")
+        } else {
+            continue;
+        };
+        ok |= constant_time_eq(got.as_bytes(), expected.as_bytes());
+    }
+    ok
 }
 
 /// Compare without returning early on the first differing byte.
@@ -616,6 +667,8 @@ fn health_json(ctx: &Ctx, request: &Request) -> String {
         // Whether the resolver passes a cookie file of its own to yt-dlp. The
         // player's cookies are never sent over the network.
         "cookies": ctx.cookies.is_some(),
+        // Whether the web player routes are being served.
+        "web": ctx.web,
         // Recent cold-resolve time, so clients with more than one resolver on
         // the network can pick the fastest rather than the nearest.
         "resolve_ms": resolve_ms,
@@ -1308,6 +1361,14 @@ mod tests {
             service_args(&args, None),
             vec!["--bind", "0.0.0.0:8787", "--allow-private"]
         );
+    }
+
+    #[test]
+    fn service_args_pass_web_through() {
+        let mut args = base_args();
+        args.web = true;
+        assert!(service_args(&args, None).contains(&"--web".to_string()));
+        assert!(!service_args(&base_args(), None).contains(&"--web".to_string()));
     }
 
     #[test]

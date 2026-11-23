@@ -1,0 +1,393 @@
+//! The optional web player: a small static page the resolver can serve.
+//!
+//! Everything web sits behind `--web`, which is off by default, so an
+//! existing deployment is unchanged. The routes follow the rules of the rest
+//! of the server: token or `--allow-private`, rate-limited per peer.
+//!
+//!   GET  /                the player page (one file, no build step)
+//!   GET  /v1/session      auth state and whether the server has cookies
+//!   POST /v1/login        token -> HttpOnly session cookie
+//!   GET  /v1/search?q=    search through the shared listing code
+//!   GET  /v1/liked        Liked Music through the shared listing code
+//!   GET  /audio/<id>      Range proxy to googlevideo
+//!
+//! The audio is proxied rather than linked: googlevideo URLs can be bound to
+//! the requesting IP, so a URL resolved on this server can 403 when a phone
+//! fetches it directly. The proxy also keeps the stream URLs private and
+//! reuses the resolve cache. A stream answers for the whole track, so the
+//! main loop never holds a resolve slot for it; [`resolve_id`] takes the
+//! gate itself, and only for the cold resolve.
+
+use std::io::Read;
+use std::time::{Duration, Instant};
+
+use serde_json::json;
+use tiny_http::{Header, Method, Request, Response, StatusCode};
+use ytui_resolve::listing::{self, Kind, TrackMeta, LIKED_MUSIC_URL};
+use ytui_resolve::{Resolved, UA};
+
+use crate::{constant_time_eq, parse_query, send, send_json, send_text, Ctx};
+
+const INDEX_HTML: &str = include_str!("../web/index.html");
+
+/// How long a listing answer is reused. The player caches tabs for the same
+/// span; a phone re-fetches on every visit, so this also keeps yt-dlp off
+/// the hot path.
+const LISTING_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Rows pulled per listing; the player's `fetch_limit` default.
+const WEB_FETCH_LIMIT: u32 = 2000;
+
+/// Range requests are how `<audio>` seeks and buffers, so the proxy gets a
+/// wider bucket than the one resolve per track the JSON routes need.
+pub(crate) const AUDIO_RATE_MAX: usize = 240;
+
+/// How many candidates the proxy tries before it re-resolves once.
+const MAX_TRIES: usize = 8;
+
+pub fn page(request: Request) {
+    send(request, 200, INDEX_HTML.to_string(), "text/html; charset=utf-8");
+}
+
+pub fn session_request(request: Request, ctx: &Ctx) {
+    if !crate::authorized(&request, &ctx.token, ctx.allow_private) {
+        send_json(request, 401, r#"{"error":"bad token"}"#.into());
+        return;
+    }
+    send_json(
+        request,
+        200,
+        json!({ "auth": true, "cookies": ctx.cookies.is_some() }).to_string(),
+    );
+}
+
+pub fn login_request(mut request: Request, ctx: &Ctx) {
+    if request.method() != &Method::Post {
+        send_text(request, 405, "method not allowed");
+        return;
+    }
+    // A tokenless server trusts private peers; there is nothing to exchange.
+    let Some(expected) = &ctx.token else {
+        send_json(request, 200, r#"{"auth":true,"tokenless":true}"#.into());
+        return;
+    };
+    // 4 KiB is far beyond the 64 hex characters a token is.
+    let mut body = String::new();
+    if request
+        .as_reader()
+        .take(4096)
+        .read_to_string(&mut body)
+        .is_err()
+    {
+        send_json(request, 400, r#"{"error":"bad login body"}"#.into());
+        return;
+    }
+    let got = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from))
+        .unwrap_or_default();
+    if !constant_time_eq(got.as_bytes(), expected.as_bytes()) {
+        send_json(request, 401, r#"{"error":"bad token"}"#.into());
+        return;
+    }
+    // HttpOnly so a stray script cannot read the session. TLS is left to the
+    // front (tailscale serve or a proxy), same as the rest of the server.
+    let cookie = format!("ytui_web={got}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict");
+    let header = Header::from_bytes(&b"Set-Cookie"[..], cookie.as_bytes()).expect("static header");
+    let response = Response::from_string(r#"{"auth":true}"#)
+        .with_status_code(StatusCode(200))
+        .with_header(header);
+    let _ = request.respond(response);
+}
+
+pub fn search_request(request: Request, url: &str, ctx: &Ctx) {
+    if request.method() != &Method::Get {
+        send_text(request, 405, "method not allowed");
+        return;
+    }
+    if !crate::authorized(&request, &ctx.token, ctx.allow_private) {
+        send_json(request, 401, r#"{"error":"bad token"}"#.into());
+        return;
+    }
+    let peer = peer_ip(&request);
+    if !ctx
+        .rate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .allow(&peer)
+    {
+        send_json(request, 429, r#"{"error":"rate limited"}"#.into());
+        return;
+    }
+    let query = parse_query(url);
+    let Some(q) = query.get("q").filter(|q| !q.trim().is_empty()) else {
+        send_json(request, 400, r#"{"error":"missing q parameter"}"#.into());
+        return;
+    };
+    let limit: u32 = query
+        .get("limit")
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(30)
+        .clamp(1, 100);
+    let target = format!("ytsearch{limit}:{q}");
+
+    let mut items: Vec<TrackMeta> = Vec::new();
+    let started = Instant::now();
+    let result = listing::list(
+        Kind::Search,
+        &target,
+        limit,
+        server_cookies(ctx),
+        &mut |m| items.push(m),
+    );
+    match result {
+        Ok(n) => {
+            eprintln!(
+                "web search ok: {n} items for {q:?} ({} ms)",
+                started.elapsed().as_millis()
+            );
+            send_json(request, 200, json!({ "v": 1, "items": items }).to_string());
+        }
+        Err(e) => {
+            eprintln!("web search failed: {e}");
+            send_json(request, 502, json!({ "error": e }).to_string());
+        }
+    }
+}
+
+pub fn liked_request(request: Request, ctx: &Ctx) {
+    if request.method() != &Method::Get {
+        send_text(request, 405, "method not allowed");
+        return;
+    }
+    if !crate::authorized(&request, &ctx.token, ctx.allow_private) {
+        send_json(request, 401, r#"{"error":"bad token"}"#.into());
+        return;
+    }
+    let peer = peer_ip(&request);
+    if !ctx
+        .rate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .allow(&peer)
+    {
+        send_json(request, 429, r#"{"error":"rate limited"}"#.into());
+        return;
+    }
+    if ctx.cookies.is_none() {
+        send_json(
+            request,
+            400,
+            r#"{"error":"this resolver has no --cookies, so Liked Music is not available"}"#.into(),
+        );
+        return;
+    }
+    if let Some((at, items)) = ctx
+        .listings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get("liked")
+    {
+        if at.elapsed() < LISTING_TTL {
+            send_json(request, 200, json!({ "v": 1, "items": items }).to_string());
+            return;
+        }
+    }
+    let mut items: Vec<TrackMeta> = Vec::new();
+    let started = Instant::now();
+    let result = listing::list(
+        Kind::LikedMusic,
+        LIKED_MUSIC_URL,
+        WEB_FETCH_LIMIT,
+        server_cookies(ctx),
+        &mut |m| items.push(m),
+    );
+    match result {
+        Ok(_) => {
+            eprintln!(
+                "web liked ok: {} items ({} ms)",
+                items.len(),
+                started.elapsed().as_millis()
+            );
+            ctx.listings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert("liked".into(), (Instant::now(), items.clone()));
+            send_json(request, 200, json!({ "v": 1, "items": items }).to_string());
+        }
+        Err(e) => {
+            eprintln!("web liked failed: {e}");
+            send_json(request, 502, json!({ "error": e }).to_string());
+        }
+    }
+}
+
+pub fn audio_request(request: Request, path: &str, ctx: &Ctx) {
+    if request.method() != &Method::Get {
+        send_text(request, 405, "method not allowed");
+        return;
+    }
+    if !crate::authorized(&request, &ctx.token, ctx.allow_private) {
+        send_json(request, 401, r#"{"error":"bad token"}"#.into());
+        return;
+    }
+    let peer = peer_ip(&request);
+    if !ctx
+        .audio_rate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .allow(&peer)
+    {
+        send_json(request, 429, r#"{"error":"rate limited"}"#.into());
+        return;
+    }
+    let Some(id) = path.strip_prefix("/audio/").filter(|id| crate::is_video_id(id)) else {
+        send_json(request, 400, r#"{"error":"bad audio id"}"#.into());
+        return;
+    };
+    let id = id.to_string();
+    // The client's own Range header, passed through: `<audio>` seeks by
+    // asking for the bytes it needs next.
+    let range = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Range"))
+        .map(|h| h.value.as_str().to_string())
+        .filter(|r| r.starts_with("bytes="));
+
+    let track = match resolve_id(ctx, &id, false) {
+        Ok(track) => track,
+        Err(e) => {
+            eprintln!("audio {id}: resolve failed: {e}");
+            send_json(request, 502, json!({ "error": e }).to_string());
+            return;
+        }
+    };
+    if let Some(up) = open_upstream(&track, range.as_deref()) {
+        respond_stream(request, up);
+        return;
+    }
+    // Every candidate refused: the cached URLs may have expired. One fresh
+    // resolve, then the same opening attempt again.
+    if let Ok(track) = resolve_id(ctx, &id, true) {
+        if let Some(up) = open_upstream(&track, range.as_deref()) {
+            respond_stream(request, up);
+            return;
+        }
+    }
+    eprintln!("audio {id}: every candidate refused");
+    send_json(request, 502, r#"{"error":"YouTube refused every AAC stream"}"#.into());
+}
+
+/// The candidates for a video, from the resolve cache unless `refresh`.
+///
+/// A cold resolve takes a gate slot, like `/v1/resolve` does, so the number
+/// of yt-dlp children still follows `--max-concurrency`.
+fn resolve_id(ctx: &Ctx, id: &str, refresh: bool) -> Result<Resolved, String> {
+    if !refresh {
+        if let Some(track) = ctx.cache.lock().unwrap_or_else(|e| e.into_inner()).get(id) {
+            return Ok(track);
+        }
+    }
+    let canonical = format!("https://www.youtube.com/watch?v={id}");
+    let permit = ctx.gate.acquire();
+    let started = Instant::now();
+    let result = ytui_resolve::resolve(&canonical, server_cookies(ctx));
+    drop(permit);
+    let ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(track) => {
+            ctx.cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .put(id, track.clone());
+            ctx.speed.lock().unwrap_or_else(|e| e.into_inner()).record(ms);
+            eprintln!(
+                "resolve {id} ok ({ms} ms, {} candidates)",
+                track.candidates.len()
+            );
+            Ok(track)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// One upstream answer, ready to stream to the client.
+struct Upstream {
+    status: u16,
+    content_type: Option<String>,
+    content_range: Option<String>,
+    accept_ranges: Option<String>,
+    /// The body's byte count, so tiny_http frames the answer with
+    /// Content-Length instead of closing the connection per chunk.
+    content_length: Option<usize>,
+    reader: Box<dyn Read + Send + Sync + 'static>,
+}
+
+/// Opens the ranged request on the first candidate that answers.
+///
+/// The resolve cache already ordered them best-first. Opening is itself the
+/// probe — an unwanted URL answers 403 immediately — because this server is
+/// also the machine that will fetch the stream.
+fn open_upstream(track: &Resolved, range: Option<&str>) -> Option<Upstream> {
+    for candidate in track.candidates.iter().take(MAX_TRIES) {
+        let mut req = ureq::get(&candidate.url)
+            .set("User-Agent", UA)
+            .timeout(Duration::from_secs(15));
+        if let Some(range) = range {
+            req = req.set("Range", range);
+        }
+        let Ok(resp) = req.call() else { continue };
+        let status = resp.status();
+        if status != 206 && status != 200 {
+            continue;
+        }
+        return Some(Upstream {
+            status,
+            content_type: resp.header("Content-Type").map(String::from),
+            content_range: resp.header("Content-Range").map(String::from),
+            accept_ranges: resp.header("Accept-Ranges").map(String::from),
+            content_length: resp.header("Content-Length").and_then(|v| v.parse().ok()),
+            reader: resp.into_reader(),
+        });
+    }
+    None
+}
+
+/// Passes the upstream answer through: same status, the range headers
+/// verbatim, and the body streamed without buffering.
+fn respond_stream(request: Request, up: Upstream) {
+    let mut headers = Vec::new();
+    let mut push = |name: &str, value: &str| {
+        if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            headers.push(h);
+        }
+    };
+    if let Some(ct) = &up.content_type {
+        push("Content-Type", ct);
+    }
+    if let Some(cr) = &up.content_range {
+        push("Content-Range", cr);
+    }
+    if let Some(ar) = &up.accept_ranges {
+        push("Accept-Ranges", ar);
+    }
+    let response = Response::new(StatusCode(up.status), headers, up.reader, up.content_length, None);
+    // The client may hang up mid-stream: a seek, a locked phone. The browser
+    // retries with a new range request, so that is not an error to log.
+    let _ = request.respond(response);
+}
+
+fn peer_ip(request: &Request) -> String {
+    request
+        .remote_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|| "local".into())
+}
+
+fn server_cookies(ctx: &Ctx) -> Option<(&str, &str)> {
+    ctx.cookies
+        .as_deref()
+        .and_then(std::path::Path::to_str)
+        .map(|p| ("--cookies", p))
+}

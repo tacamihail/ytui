@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ytui</title>
+<meta name="theme-color" content="#101014">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="ytui">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+body { margin:0; font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;
+  background:#101014; color:#e8e8ec; display:flex; flex-direction:column; height:100dvh; }
+header { position:sticky; top:0; background:#15151b; border-bottom:1px solid #26262e; z-index:2; }
+nav { display:flex; }
+nav button { flex:1; padding:12px 0; background:none; border:0;
+  border-bottom:2px solid transparent; color:#9a9aa6; font:inherit; font-weight:600; }
+nav button.active { color:#4cc38a; border-bottom-color:#4cc38a; }
+main { flex:1; overflow-y:auto; }
+.list { display:flex; flex-direction:column; }
+.row { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid #1c1c23; }
+.row .meta { flex:1; min-width:0; }
+.row .title { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.row .sub { color:#8a8a96; font-size:13px; }
+.row button { background:#1e1e26; color:#e8e8ec; border:1px solid #2c2c36;
+  border-radius:8px; padding:8px 12px; font-size:15px; }
+.row.playing .title { color:#4cc38a; }
+form.bar { display:flex; gap:8px; padding:10px 14px; }
+input { flex:1; background:#1c1c23; border:1px solid #2c2c36; color:#e8e8ec;
+  border-radius:10px; padding:10px 12px; font:inherit; }
+form.bar button { background:#26262e; border:0; border-radius:10px; color:#e8e8ec; padding:8px 16px; }
+#player { position:fixed; left:0; right:0; bottom:0; background:#15151b;
+  border-top:1px solid #26262e; padding:10px 14px calc(10px + env(safe-area-inset-bottom)); }
+#player .line1 { display:flex; justify-content:space-between; gap:10px; margin-bottom:8px; }
+#player .ptitle { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#player .sub { color:#8a8a96; font-size:13px; }
+#player .controls { display:flex; align-items:center; gap:10px; }
+#player button { background:#1e1e26; color:#e8e8ec; border:0; border-radius:8px; padding:8px 12px; font-size:16px; }
+#seek { flex:1; }
+#time { color:#8a8a96; font-size:12px; min-width:96px; text-align:right; }
+.empty { color:#8a8a96; padding:24px 16px; text-align:center; }
+#overlay { position:fixed; inset:0; background:#101014ee; display:flex;
+  align-items:center; justify-content:center; z-index:10; }
+#overlay[hidden] { display:none; }
+#overlay .card { width:min(90vw,360px); background:#15151b; border:1px solid #2c2c36;
+  border-radius:14px; padding:20px; }
+#overlay h2 { margin:0 0 6px; font-size:17px; }
+#overlay p { color:#8a8a96; margin:0 0 14px; font-size:13px; }
+#overlay form { display:flex; gap:8px; }
+#toast { position:fixed; left:50%; transform:translateX(-50%); bottom:110px; background:#26262e;
+  border:1px solid #3a2c2c; color:#ffd7d7; border-radius:10px; padding:10px 16px;
+  max-width:80vw; z-index:11; }
+#toast[hidden] { display:none; }
+</style>
+</head>
+<body>
+<header><nav id="tabs">
+  <button data-tab="search" class="active">Search</button>
+  <button data-tab="liked">Liked</button>
+  <button data-tab="queue">Queue</button>
+</nav></header>
+<main>
+  <section id="view-search">
+    <form class="bar" id="search-form">
+      <input id="search-input" type="search" placeholder="Search YouTube Music" autocomplete="off">
+      <button type="submit">Go</button>
+    </form>
+    <div id="search-results" class="list"></div>
+  </section>
+  <section id="view-liked" hidden>
+    <div class="bar"><button id="liked-play-all">Play all</button></div>
+    <div id="liked-list" class="list"></div>
+  </section>
+  <section id="view-queue" hidden>
+    <div id="queue-list" class="list"></div>
+  </section>
+</main>
+<footer id="player" hidden>
+  <div class="line1"><span class="ptitle" id="player-title"></span><span class="sub" id="player-sub"></span></div>
+  <div class="controls">
+    <button id="prev">⏮</button>
+    <button id="play">▶</button>
+    <button id="next">⏭</button>
+    <input id="seek" type="range" min="0" max="1000" value="0">
+    <span id="time">0:00</span>
+  </div>
+</footer>
+<div id="overlay" hidden>
+  <div class="card">
+    <h2>Sign in</h2>
+    <p>This resolver wants its token. On the server it is in
+    <code>~/.config/ytui/resolver.token</code>.</p>
+    <form id="login-form">
+      <input id="token-input" type="password" placeholder="token" autocomplete="off">
+      <button type="submit">Go</button>
+    </form>
+  </div>
+</div>
+<div id="toast" hidden></div>
+<audio id="audio" preload="none"></audio>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const audio = $("audio");
+
+// ---------- state ----------
+let queue = [];
+try { queue = JSON.parse(localStorage.getItem("ytui-web-queue") || "[]"); } catch {}
+let index = -1;       // position in the queue that is loaded
+let liked = [];       // liked-music rows, fetched once per visit
+let dead = 0;         // consecutive streams that failed outright
+function saveQueue() { localStorage.setItem("ytui-web-queue", JSON.stringify(queue)); }
+function current() { return queue[index] || null; }
+
+// ---------- helpers ----------
+function fmt(s) {
+  if (!s) return "";
+  s = Math.round(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? h + ":" + String(m).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0")
+           : m + ":" + String(s % 60).padStart(2, "0");
+}
+async function api(path, opts) {
+  const resp = await fetch(path, opts);
+  if (resp.status === 401) { $("overlay").hidden = false; throw new Error("unauthorized"); }
+  const body = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(body.error || ("http " + resp.status));
+  return body;
+}
+let toastTimer = 0;
+function toast(msg) {
+  $("toast").textContent = msg;
+  $("toast").hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { $("toast").hidden = true; }, 4000);
+}
+
+// ---------- login ----------
+$("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const token = $("token-input").value.trim();
+  if (!token) return;
+  try {
+    await api("/v1/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    $("overlay").hidden = true;
+    checkSession();
+  } catch (err) { toast("login failed: " + err.message); }
+});
+async function checkSession() {
+  try {
+    const s = await api("/v1/session");
+    if (!s.cookies && tab === "liked") toast("the server has no cookies: Liked Music is empty");
+  } catch { /* the login overlay is up */ }
+}
+
+// ---------- tabs ----------
+let tab = "search";
+$("tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  tab = btn.dataset.tab;
+  for (const b of $("tabs").children) b.classList.toggle("active", b === btn);
+  $("view-search").hidden = tab !== "search";
+  $("view-liked").hidden = tab !== "liked";
+  $("view-queue").hidden = tab !== "queue";
+  if (tab === "liked") loadLiked();
+  if (tab === "queue") renderQueue();
+});
+
+// ---------- rows ----------
+function row(item, onPlay, onAdd) {
+  const div = document.createElement("div");
+  div.className = "row";
+  div.dataset.id = item.id;
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const title = document.createElement("div");
+  title.className = "title";
+  title.textContent = item.title;
+  const sub = document.createElement("div");
+  sub.className = "sub";
+  sub.textContent = item.channel + (item.duration ? " · " + fmt(item.duration) : "");
+  meta.append(title, sub);
+  const add = document.createElement("button");
+  add.textContent = "+";
+  add.addEventListener("click", onAdd);
+  const play = document.createElement("button");
+  play.textContent = "▶";
+  play.addEventListener("click", onPlay);
+  div.append(meta, add, play);
+  return div;
+}
+function markPlaying() {
+  const cur = current();
+  for (const box of [$("search-results"), $("liked-list"), $("queue-list")]) {
+    for (const div of box.children) {
+      div.classList.toggle("playing", !!cur && div.dataset.id === cur.id);
+    }
+  }
+}
+
+// ---------- playback ----------
+function playIndex(i) {
+  if (i < 0 || i >= queue.length) return;
+  index = i;
+  const t = queue[i];
+  audio.src = "/audio/" + t.id;
+  audio.play().catch((e) => toast("playback failed: " + e.message));
+  $("player").hidden = false;
+  $("player-title").textContent = t.title;
+  $("player-sub").textContent = t.channel;
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: t.title,
+      artist: t.channel,
+      album: "ytui",
+      artwork: [{ src: "https://i.ytimg.com/vi/" + t.id + "/hqdefault.jpg" }],
+    });
+  }
+  markPlaying();
+}
+function addToQueue(item, play) {
+  queue.push(item);
+  saveQueue();
+  if (play || index < 0) playIndex(queue.length - 1);
+  if (tab === "queue") renderQueue();
+}
+$("play").addEventListener("click", () => (audio.paused ? audio.play() : audio.pause()));
+$("next").addEventListener("click", () => playIndex(index + 1));
+$("prev").addEventListener("click", () => playIndex(index - 1));
+audio.addEventListener("play", () => {
+  $("play").textContent = "⏸";
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+});
+audio.addEventListener("playing", () => { dead = 0; });
+audio.addEventListener("pause", () => {
+  $("play").textContent = "▶";
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+});
+audio.addEventListener("ended", () => playIndex(index + 1));
+audio.addEventListener("error", () => {
+  // Same rule as the terminal player: give up after five dead in a row.
+  if (++dead >= 5) { dead = 0; toast("giving up: too many dead tracks in a row"); return; }
+  playIndex(index + 1);
+});
+let seeking = false;
+$("seek").addEventListener("input", () => { seeking = true; });
+$("seek").addEventListener("change", () => {
+  if (audio.duration) audio.currentTime = ($("seek").value / 1000) * audio.duration;
+  seeking = false;
+});
+audio.addEventListener("timeupdate", () => {
+  if (!seeking) {
+    $("seek").value = audio.duration ? Math.round((audio.currentTime / audio.duration) * 1000) : 0;
+  }
+  const total = audio.duration || (current() ? current().duration : 0);
+  $("time").textContent = fmt(audio.currentTime) + " / " + fmt(total);
+});
+if ("mediaSession" in navigator) {
+  const ms = navigator.mediaSession;
+  try {
+    ms.setActionHandler("play", () => audio.play());
+    ms.setActionHandler("pause", () => audio.pause());
+    ms.setActionHandler("previoustrack", () => playIndex(index - 1));
+    ms.setActionHandler("nexttrack", () => playIndex(index + 1));
+    ms.setActionHandler("seekto", (d) => {
+      if (d.seekTime != null && audio.duration) audio.currentTime = d.seekTime;
+    });
+  } catch {}
+}
+
+// ---------- search ----------
+$("search-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const q = $("search-input").value.trim();
+  if (!q) return;
+  const box = $("search-results");
+  box.innerHTML = "";
+  box.insertAdjacentHTML("beforeend", '<div class="empty">searching…</div>');
+  try {
+    const out = await api("/v1/search?q=" + encodeURIComponent(q));
+    box.innerHTML = "";
+    if (!out.items.length) { box.insertAdjacentHTML("beforeend", '<div class="empty">nothing found</div>'); return; }
+    for (const item of out.items) {
+      box.appendChild(row(item,
+        () => addToQueue(item, true),
+        () => addToQueue(item, false)));
+    }
+    markPlaying();
+  } catch (err) {
+    box.innerHTML = "";
+    toast(err.message);
+  }
+});
+
+// ---------- liked ----------
+async function loadLiked() {
+  if (liked.length) { renderLiked(); return; }
+  const box = $("liked-list");
+  box.innerHTML = "";
+  box.insertAdjacentHTML("beforeend", '<div class="empty">loading liked music…</div>');
+  try {
+    const out = await api("/v1/liked");
+    liked = out.items;
+    renderLiked();
+  } catch (err) {
+    box.innerHTML = "";
+    toast(err.message);
+  }
+}
+function renderLiked() {
+  const box = $("liked-list");
+  box.innerHTML = "";
+  if (!liked.length) {
+    box.insertAdjacentHTML("beforeend", '<div class="empty">no liked music (the server needs --cookies)</div>');
+    return;
+  }
+  for (const item of liked) {
+    box.appendChild(row(item,
+      () => addToQueue(item, true),
+      () => addToQueue(item, false)));
+  }
+  markPlaying();
+}
+$("liked-play-all").addEventListener("click", () => {
+  if (!liked.length) { toast("liked music is empty"); return; }
+  queue = liked.slice();
+  saveQueue();
+  playIndex(0);
+});
+
+// ---------- queue ----------
+function renderQueue() {
+  const box = $("queue-list");
+  box.innerHTML = "";
+  if (!queue.length) {
+    box.insertAdjacentHTML("beforeend", '<div class="empty">the queue is empty: search for something</div>');
+    return;
+  }
+  queue.forEach((item, i) => {
+    const div = document.createElement("div");
+    div.className = "row";
+    div.dataset.id = item.id;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const title = document.createElement("div");
+    title.className = "title";
+    title.textContent = (i + 1) + ". " + item.title;
+    const sub = document.createElement("div");
+    sub.className = "sub";
+    sub.textContent = item.channel + (item.duration ? " · " + fmt(item.duration) : "");
+    meta.append(title, sub);
+    meta.addEventListener("click", () => playIndex(i));
+    const rm = document.createElement("button");
+    rm.textContent = "×";
+    rm.addEventListener("click", () => {
+      queue.splice(i, 1);
+      if (i < index) index--;
+      if (i === index) {
+        audio.pause();
+        audio.removeAttribute("src");
+        index = -1;
+        $("player").hidden = true;
+      }
+      saveQueue();
+      renderQueue();
+    });
+    div.append(meta, rm);
+    box.appendChild(div);
+  });
+  markPlaying();
+}
+
+checkSession();
+renderQueue();
+</script>
+</body>
+</html>
