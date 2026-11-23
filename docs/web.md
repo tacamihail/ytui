@@ -59,13 +59,14 @@ sheet to run it full-screen.
   how `<audio>` seeks and buffers.
 - Lock-screen controls come from the Media Session API: the page sets title,
   artist and the YouTube thumbnail per track.
-- The player uses the current track's cover as a dimmed backdrop that fades
-  out to the right; it keeps the artwork's aspect at the left edge, so square
-  covers are not cropped or pushed right. Title, elapsed/total timers, seek
-  bar and transport are centered. On a desktop browser the transport row also
-  carries mute, a volume slider and fullscreen (phones use their hardware
-  buttons). The volume level is remembered in browser storage, like the
-  queue.
+- The player uses the current track's cover as a backdrop over the left half of
+  the bar: dimmed to 35%, cropped from its left edge so any aspect ratio fills
+  the area, and faded out by the middle of the screen. A light vertical
+  backdrop blur is strongest under the title and gone by the transport.
+  Title, elapsed/total timers, seek bar and transport are centered. On a
+  desktop browser the transport row also carries mute, a volume slider and
+  fullscreen (phones use their hardware buttons). The volume level is
+  remembered in browser storage, like the queue.
 - Next/previous keep the visible list in step: the new track scrolls to the
   first row after next, and to the second after previous so the track that
   just played stays in view.

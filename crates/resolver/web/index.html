@@ -181,15 +181,25 @@ button.busy::after {
   padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
 }
 #player[hidden] { display: none; }
-/* The current cover, dimmed and faded out to the right, so the centered
-   controls stay readable without hiding the picture. It keeps its aspect at
-   the left edge, so square covers are not cropped or pushed right. */
-#player .bg {
-  position: absolute; left: 0; top: 0; height: 100%; width: auto;
-  opacity: .45;
-  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 40%, transparent 100%);
-          mask-image: linear-gradient(to right, #000 0%, #000 40%, transparent 100%);
+/* The cover fills the left half of the player, cropped from the left edge,
+   dimmed, and faded out by the middle of the screen. */
+#player .bg, #player .bg-blur {
+  position: absolute; left: 0; top: 0; height: 100%; width: 50%;
   pointer-events: none;
+}
+#player .bg {
+  object-fit: cover; object-position: left center;
+  opacity: .35;
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 22%, transparent 100%);
+          mask-image: linear-gradient(to right, #000 0%, #000 22%, transparent 100%);
+}
+/* A soft vertical blur, strongest just under the title and gone by the
+   transport; the radius stays small so compositing is cheap. */
+#player .bg-blur {
+  -webkit-backdrop-filter: blur(5px);
+          backdrop-filter: blur(5px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 40%, transparent 74%);
+          mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 40%, transparent 74%);
 }
 #player .inner { position: relative; text-shadow: 0 1px 3px #000a; }
 #player .line1 { min-width: 0; margin-bottom: 2px; text-align: center; }
@@ -340,6 +350,7 @@ button.busy::after {
 </main>
 <footer id="player" hidden>
   <img class="bg" id="bg" alt="" aria-hidden="true">
+  <div class="bg-blur" aria-hidden="true"></div>
   <div class="inner">
     <div class="line1">
       <span class="ptitle" id="player-title"></span>
