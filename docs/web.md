@@ -91,8 +91,9 @@ sheet to run it full-screen.
   YouTube playlists (it needs the server's `--cookies`): tap one to see its
   tracks, then a "Play all" button or any row starts it. The list you start
   from becomes the playback queue, which stays internal; there is no queue
-  tab to manage. Rows show a 40px thumbnail, lazily loaded so long lists do
-  not fetch every cover up front.
+  tab to manage. Once a track is playing, "Play all" steps out of the way.
+  Rows show a 40px thumbnail, lazily loaded so long lists do not fetch every
+  cover up front.
 - A double-click on a desktop or a single tap on a phone plays a row from
   Search, Liked or a playlist (tapping the current track toggles pause). Rows
   have no buttons: the duration sits at the right edge and the whole artist

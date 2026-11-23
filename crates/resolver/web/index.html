@@ -457,6 +457,7 @@ let playlistTracks = [];
 let playlistTitle = "";
 let inPlaylist = false;
 let playlistsLoaded = false;
+let started = false;  // a song has started since this page loaded
 let dead = 0;         // consecutive streams that failed outright
 let loading = false;  // a track is being fetched and cannot play yet
 // The duration the current tab reports. Safari gets fragmented HE-AAC wrong:
@@ -797,6 +798,8 @@ function playIndex(i) {
   $("bg").src = "https://i.ytimg.com/vi/" + t.id + "/mqdefault.jpg";
   setSessionMetadata(t);
   updatePositionState(true);
+  started = true;
+  setPlayAll();
   markPlaying();
 }
 // The open tab is the queue: playing a row from Liked or Search turns that
@@ -1048,9 +1051,15 @@ $("liked-play-all").addEventListener("click", () => {
 });
 
 // ---------- playlists ----------
+// Play all only makes sense before something is playing; once a track starts
+// both the Liked and playlist buttons step out of the way.
+function setPlayAll() {
+  $("liked-play-all").hidden = started;
+  $("playlist-play").hidden = started || !inPlaylist || !playlistTracks.length;
+}
 function setPlaylistChrome() {
   $("playlist-back").hidden = !inPlaylist;
-  $("playlist-play").hidden = !inPlaylist || !playlistTracks.length;
+  setPlayAll();
   $("playlist-name").textContent = inPlaylist ? playlistTitle : "Playlists";
   $("playlist-count").textContent = inPlaylist
     ? playlistTracks.length + " tracks"
