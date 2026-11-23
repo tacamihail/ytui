@@ -202,24 +202,28 @@ button.busy::after {
           mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 40%, transparent 74%);
 }
 #player .inner { position: relative; text-shadow: 0 1px 3px #000a; }
-#player .line1 { min-width: 0; margin-bottom: 2px; text-align: center; }
+#player .line1 { min-width: 0; margin-bottom: 1px; text-align: center; }
 #player .ptitle {
   display: block; font-weight: 600;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #player .sub {
-  display: block; color: var(--muted); font-size: 12px;
+  min-width: 0; color: var(--muted); font-size: 12px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-/* The elapsed time sits left, the total right, above the bar. */
+/* The elapsed time and the artist share a line either side of center; the
+   artist truncates instead of wrapping or touching the timers. */
 #player .line2 {
-  display: grid; grid-template-columns: 1fr auto 1fr;
+  display: grid; grid-template-columns: max-content 1fr max-content;
   align-items: center; gap: 8px;
   min-height: 16px; margin: 0 2px 2px;
 }
 #time-current { grid-column: 1; justify-self: start; }
 #time-total { grid-column: 3; justify-self: end; }
-#buffering { grid-column: 2; }
+#player .artist {
+  grid-column: 2; min-width: 0;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+}
 #seek, #volume {
   -webkit-appearance: none; appearance: none;
   height: 28px; margin: 0;
@@ -354,11 +358,13 @@ button.busy::after {
   <div class="inner">
     <div class="line1">
       <span class="ptitle" id="player-title"></span>
-      <span class="sub" id="player-sub"></span>
     </div>
     <div class="line2">
       <span id="time-current">0:00</span>
-      <div class="spin" id="buffering" hidden></div>
+      <div class="artist">
+        <div class="spin" id="buffering" hidden></div>
+        <span class="sub" id="player-sub"></span>
+      </div>
       <span id="time-total">0:00</span>
     </div>
     <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Seek">

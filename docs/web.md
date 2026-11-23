@@ -63,10 +63,12 @@ sheet to run it full-screen.
   the bar: dimmed to 35%, cropped from its left edge so any aspect ratio fills
   the area, and faded out by the middle of the screen. A light vertical
   backdrop blur is strongest under the title and gone by the transport.
-  Title, elapsed/total timers, seek bar and transport are centered. On a
-  desktop browser the transport row also carries mute, a volume slider and
-  fullscreen (phones use their hardware buttons). The volume level is
-  remembered in browser storage, like the queue.
+  Title, elapsed/total timers, seek bar and transport are centered; the
+  channel shares the timer line with them and truncates with an ellipsis
+  instead of wrapping or touching the times. On a desktop browser the
+  transport row also carries mute, a volume slider and fullscreen (phones use
+  their hardware buttons). The volume level is remembered in browser storage,
+  like the queue.
 - Next/previous keep the visible list in step: the new track scrolls to the
   first row after next, and to the second after previous so the track that
   just played stays in view.
