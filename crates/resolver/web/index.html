@@ -26,7 +26,9 @@ body {
   height: 100vh; height: 100dvh;
   -webkit-text-size-adjust: 100%;
   overscroll-behavior: none;
+  -webkit-user-select: none; user-select: none;
 }
+input { -webkit-user-select: text; user-select: text; }
 
 /* ---------- header ---------- */
 header {
@@ -54,8 +56,10 @@ main {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 14px; min-height: 58px;
   border-bottom: 1px solid #1c1c23;
+  transition: background-color .2s ease;
 }
 .row .meta { flex: 1; min-width: 0; }
+.row .meta:active { opacity: .6; }
 .row .title {
   font-size: 15px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -71,23 +75,8 @@ main {
   border: 1px solid #2c2c36; border-radius: 12px;
   font-size: 16px; touch-action: manipulation; cursor: pointer;
 }
-.row .meta:active { opacity: .6; }
 .row.playing .title { color: var(--accent); }
 .row.playing { background: #141920; }
-.row { transition: background-color .2s ease; }
-
-/* A tap must be visible even when the queue tab is not the open one. */
-button { transition: transform .12s ease, background-color .15s ease, border-color .15s ease, color .15s ease; }
-button:active { transform: scale(.9); }
-nav button:active { transform: none; opacity: .7; }
-.row button.done {
-  color: var(--accent); border-color: var(--accent);
-  animation: pop .32s ease;
-}
-@keyframes pop { 40% { transform: scale(1.18); } }
-@media (prefers-reduced-motion: reduce) {
-  * { animation: none !important; transition: none !important; }
-}
 
 form.bar {
   position: sticky; top: 0; z-index: 1;
@@ -152,6 +141,34 @@ form.bar button {
 }
 .empty .spin { width: 26px; height: 26px; border-width: 3px; }
 
+/* ---------- buttons ---------- */
+button {
+  transition: transform .12s ease, background-color .15s ease,
+              border-color .15s ease, color .15s ease;
+}
+button:active { transform: scale(.9); }
+nav button:active { transform: none; opacity: .7; }
+button svg { display: block; }
+.row button.done {
+  color: var(--accent); border-color: var(--accent);
+  animation: pop .32s ease;
+}
+@keyframes pop { 40% { transform: scale(1.18); } }
+
+/* a button that is waiting for its stream */
+button.busy svg { display: none; }
+button.busy::after {
+  content: ""; width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid #3c3c48; border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+#play.busy::after {
+  border-color: #0b0b0e40; border-top-color: #0b0b0e;
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+
 /* ---------- player ---------- */
 #player {
   flex: none; z-index: 3;
@@ -167,7 +184,10 @@ form.bar button {
 #player .ptitle {
   font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-#player .sub { color: var(--muted); font-size: 12px; white-space: nowrap; flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; }
+#player .sub {
+  color: var(--muted); font-size: 12px; white-space: nowrap; flex: none;
+  max-width: 40%; overflow: hidden; text-overflow: ellipsis;
+}
 #seek {
   -webkit-appearance: none; appearance: none;
   width: 100%; height: 28px; margin: 0 0 4px;
@@ -197,10 +217,12 @@ form.bar button {
   border: 1px solid #2c2c36; border-radius: 50%;
   font-size: 17px; touch-action: manipulation; cursor: pointer;
 }
+#player button svg { width: 22px; height: 22px; }
 #player #play {
-  width: 54px; height: 54px; font-size: 20px;
+  width: 54px; height: 54px;
   background: var(--accent); color: #0b0b0e; border: 0;
 }
+#player #play svg { width: 26px; height: 26px; }
 #right { display: flex; align-items: center; gap: 10px; }
 #time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
 #buffering[hidden] { display: none; }
@@ -272,9 +294,9 @@ form.bar button {
   <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
   <div class="controls">
     <div class="buttons">
-      <button id="prev" aria-label="Previous">⏮</button>
-      <button id="play" aria-label="Play or pause">▶</button>
-      <button id="next" aria-label="Next">⏭</button>
+      <button id="prev" aria-label="Previous"></button>
+      <button id="play" aria-label="Play or pause"></button>
+      <button id="next" aria-label="Next"></button>
     </div>
     <div id="right">
       <div class="spin" id="buffering" hidden></div>
@@ -308,8 +330,40 @@ try { queue = JSON.parse(localStorage.getItem("ytui-web-queue") || "[]"); } catc
 let index = -1;       // position in the queue that is loaded
 let liked = [];       // liked-music rows, fetched once per visit
 let dead = 0;         // consecutive streams that failed outright
+let loading = false;  // a track is being fetched and cannot play yet
+// The duration the current tab reports. Safari gets HE-AAC streams wrong
+// (it can report twice the real length), so the listing is authoritative.
+let listDuration = 0;
 function saveQueue() { localStorage.setItem("ytui-web-queue", JSON.stringify(queue)); }
 function current() { return queue[index] || null; }
+function trackDuration() {
+  return listDuration > 0 ? listDuration : (isFinite(audio.duration) ? audio.duration : 0);
+}
+
+// ---------- icons ----------
+const ICONS = {
+  play: "M8 5v14l11-7z",
+  pause: "M6 5h4v14H6zm8 0h4v14h-4z",
+  next: "M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z",
+  prev: "M18 6l-8.5 6L18 18V6zM8 6v12H6V6h2z",
+  add: "M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z",
+  check: "M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z",
+  close: "M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+};
+function icon(name) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", ICONS[name]);
+  path.setAttribute("fill", "currentColor");
+  svg.appendChild(path);
+  return svg;
+}
+function setIcon(btn, name) {
+  btn.innerHTML = "";
+  btn.appendChild(icon(name));
+}
 
 // ---------- helpers ----------
 function fmt(s) {
@@ -408,30 +462,30 @@ function row(item, onPlay, onAdd) {
   sub.textContent = item.channel + (item.duration ? " · " + fmt(item.duration) : "");
   meta.append(title, sub);
   const add = document.createElement("button");
-  add.textContent = "+";
+  add.className = "addbtn";
   add.setAttribute("aria-label", "Add to queue");
+  setIcon(add, "add");
   let addTimer = 0;
   add.addEventListener("click", () => {
     onAdd();
     // Flip to a tick for a moment: the queue tab may not be open, so the tap
     // needs a result of its own.
-    add.textContent = "✓";
+    setIcon(add, "check");
     add.classList.add("done");
     clearTimeout(addTimer);
     addTimer = setTimeout(() => {
-      add.textContent = "+";
+      setIcon(add, "add");
       add.classList.remove("done");
     }, 900);
   });
   const play = document.createElement("button");
-  play.textContent = "▶";
+  play.className = "pbtn";
   play.setAttribute("aria-label", "Play or pause");
+  setIcon(play, "play");
   play.addEventListener("click", () => {
     const cur = current();
-    if (cur && cur.id === item.id && !audio.paused) {
-      audio.pause();
-    } else if (cur && cur.id === item.id) {
-      audio.play();
+    if (cur && cur.id === item.id) {
+      if (audio.paused) audio.play(); else audio.pause();
     } else {
       onPlay();
     }
@@ -443,9 +497,16 @@ function markPlaying() {
   const cur = current();
   for (const box of [$("search-results"), $("liked-list"), $("queue-list")]) {
     for (const div of box.children) {
-      div.classList.toggle("playing", !!cur && div.dataset.id === cur.id);
+      const isCur = !!cur && div.dataset.id === cur.id;
+      div.classList.toggle("playing", isCur);
+      const btn = div.querySelector(".pbtn");
+      if (!btn) continue;
+      const busy = isCur && loading;
+      btn.classList.toggle("busy", busy);
+      if (!busy) setIcon(btn, isCur && !audio.paused ? "pause" : "play");
     }
   }
+  $("play").classList.toggle("busy", loading);
 }
 
 // ---------- playback ----------
@@ -453,8 +514,10 @@ function playIndex(i) {
   if (i < 0 || i >= queue.length) return;
   index = i;
   const t = queue[i];
+  listDuration = t.duration || 0;
+  loading = true;
   audio.src = "/audio/" + t.id;
-  audio.play().catch((e) => toast("playback failed: " + e.message));
+  audio.play().catch((e) => { loading = false; markPlaying(); toast("playback failed: " + e.message); });
   $("player").hidden = false;
   $("player-title").textContent = t.title;
   $("player-sub").textContent = t.channel;
@@ -468,32 +531,58 @@ function playIndex(i) {
   }
   markPlaying();
 }
+// The open tab is the queue: playing a row from Liked or Search turns that
+// list into the queue, so playback continues down what you are looking at.
+function playFrom(items, i) {
+  queue = items.slice();
+  saveQueue();
+  playIndex(i);
+  if (tab === "queue") renderQueue();
+}
 function addToQueue(item, play) {
   queue.push(item);
   saveQueue();
   if (play || index < 0) playIndex(queue.length - 1);
   if (tab === "queue") renderQueue();
 }
+function stopPlayback() {
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
+  index = -1;
+  loading = false;
+  $("player").hidden = true;
+  markPlaying();
+}
 $("play").addEventListener("click", () => (audio.paused ? audio.play() : audio.pause()));
 $("next").addEventListener("click", () => playIndex(index + 1));
 $("prev").addEventListener("click", () => playIndex(index - 1));
+setIcon($("prev"), "prev");
+setIcon($("play"), "play");
+setIcon($("next"), "next");
 audio.addEventListener("play", () => {
-  $("play").textContent = "⏸";
+  setIcon($("play"), "pause");
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+  markPlaying();
 });
 audio.addEventListener("playing", () => {
   dead = 0;
+  loading = false;
   $("buffering").hidden = true;
+  markPlaying();
 });
 audio.addEventListener("waiting", () => { $("buffering").hidden = false; });
 audio.addEventListener("pause", () => {
-  $("play").textContent = "▶";
+  setIcon($("play"), "play");
   $("buffering").hidden = true;
+  loading = false;
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+  markPlaying();
 });
 audio.addEventListener("ended", () => playIndex(index + 1));
 audio.addEventListener("error", () => {
   $("buffering").hidden = true;
+  loading = false;
   // Same rule as the terminal player: give up after five dead in a row.
   if (++dead >= 5) { dead = 0; toast("giving up: too many dead tracks in a row"); return; }
   playIndex(index + 1);
@@ -504,16 +593,22 @@ $("seek").addEventListener("input", () => {
   $("seek").style.setProperty("--fill", ($("seek").value / 10) + "%");
 });
 $("seek").addEventListener("change", () => {
-  if (audio.duration) audio.currentTime = ($("seek").value / 1000) * audio.duration;
+  const total = trackDuration();
+  if (total) audio.currentTime = ($("seek").value / 1000) * total;
   seeking = false;
 });
 audio.addEventListener("timeupdate", () => {
+  const total = trackDuration();
   if (!seeking) {
-    $("seek").value = audio.duration ? Math.round((audio.currentTime / audio.duration) * 1000) : 0;
+    $("seek").value = total ? Math.round((audio.currentTime / total) * 1000) : 0;
     $("seek").style.setProperty("--fill", ($("seek").value / 10) + "%");
   }
-  const total = audio.duration || (current() ? current().duration : 0);
   $("time").textContent = fmt(audio.currentTime) + " / " + fmt(total);
+});
+audio.addEventListener("loadedmetadata", () => {
+  // Keep the seek mapping on the listing duration; only fall back to the
+  // stream when it has no metadata.
+  if (!listDuration && isFinite(audio.duration)) listDuration = audio.duration;
 });
 if ("mediaSession" in navigator) {
   const ms = navigator.mediaSession;
@@ -523,7 +618,7 @@ if ("mediaSession" in navigator) {
     ms.setActionHandler("previoustrack", () => playIndex(index - 1));
     ms.setActionHandler("nexttrack", () => playIndex(index + 1));
     ms.setActionHandler("seekto", (d) => {
-      if (d.seekTime != null && audio.duration) audio.currentTime = d.seekTime;
+      if (d.seekTime != null) audio.currentTime = d.seekTime;
     });
   } catch {}
 }
@@ -540,11 +635,11 @@ $("search-form").addEventListener("submit", async (e) => {
     const out = await api("/v1/search?q=" + encodeURIComponent(q));
     box.innerHTML = "";
     if (!out.items.length) { empty(box, "nothing found"); return; }
-    for (const item of out.items) {
+    out.items.forEach((item, i) => {
       box.appendChild(row(item,
-        () => addToQueue(item, true),
+        () => playFrom(out.items, i),
         () => addToQueue(item, false)));
-    }
+    });
     markPlaying();
   } catch (err) {
     box.innerHTML = "";
@@ -561,11 +656,11 @@ function renderLiked() {
     empty(box, "no liked music (the server needs --cookies)");
     return;
   }
-  for (const item of liked) {
+  liked.forEach((item, i) => {
     box.appendChild(row(item,
-      () => addToQueue(item, true),
+      () => playFrom(liked, i),
       () => addToQueue(item, false)));
-  }
+  });
   markPlaying();
 }
 async function loadLiked(refresh) {
@@ -612,16 +707,23 @@ function renderQueue() {
     meta.append(title, sub);
     meta.addEventListener("click", () => playIndex(i));
     const rm = document.createElement("button");
-    rm.textContent = "×";
     rm.setAttribute("aria-label", "Remove from queue");
+    setIcon(rm, "close");
     rm.addEventListener("click", () => {
+      const wasCurrent = i === index;
+      const wasPlaying = wasCurrent && !audio.paused;
       queue.splice(i, 1);
       if (i < index) index--;
-      if (i === index) {
-        audio.pause();
-        audio.removeAttribute("src");
-        index = -1;
-        $("player").hidden = true;
+      if (wasCurrent) {
+        if (!queue.length) {
+          stopPlayback();
+        } else if (wasPlaying) {
+          // Removing what is playing continues with the next one; if the
+          // last row was playing, the previous one takes over.
+          playIndex(Math.min(i, queue.length - 1));
+        } else {
+          stopPlayback();
+        }
       }
       saveQueue();
       renderQueue();
