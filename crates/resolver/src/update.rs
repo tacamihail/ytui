@@ -5,6 +5,11 @@
 //! valid executable. Unlike `ytui update` there is no checkout to fast-forward:
 //! cargo fetches the repository, builds only the resolver crates and replaces
 //! the binary in place.
+//!
+//! On main the updater compares the `[package] version`; with `--update-branch`
+//! (testing) it tracks the head commit of that ref instead, so a pushed change
+//! installs even when the version did not move. The commit it installed is
+//! recorded in `~/.cache/ytui-resolver/installed-rev`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,34 +19,54 @@ use std::time::Duration;
 use crate::service;
 
 const REPO: &str = "https://github.com/tacamihail/ytui";
-const COMMITS_URL: &str = "https://api.github.com/repos/tacamihail/ytui/commits/main";
 const MANIFEST_PATH: &str = "crates/resolver/Cargo.toml";
+
+/// How often the running server looks for a new release when nothing overrides
+/// it. `--update-every-mins` changes it (a test branch uses 5 minutes).
+pub(crate) const DEFAULT_UPDATE_MINS: u64 = 240;
 
 const USAGE: &str = "\
 ytui-resolver update - reinstall from github
 
 usage:
-  ytui-resolver update            install when github has a newer version
-  ytui-resolver update --check    only report whether a newer version exists
-  ytui-resolver update --force    reinstall even when the version is unchanged
+  ytui-resolver update                  install when github has a newer version
+  ytui-resolver update --check          only report whether a newer version exists
+  ytui-resolver update --force          reinstall even when the version is unchanged
+  ytui-resolver update --branch REF     follow the head of REF (testing)
 
 the binary is installed into the same prefix it runs from, so an autostart
 entry created with --install-service keeps working. the version is the
-[package] version in crates/resolver/Cargo.toml on main.";
+[package] version in crates/resolver/Cargo.toml on main. --branch tracks the
+head commit of REF instead, so unversioned test pushes install too.";
 
 pub fn cli(args: &[String]) -> Result<(), String> {
     let mut check = false;
     let mut force = false;
-    for arg in args {
-        match arg.as_str() {
+    let mut branch: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
             "-n" | "--check" => check = true,
             "-f" | "--force" => force = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
             }
+            "--branch" => {
+                i += 1;
+                branch = Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or_else(|| format!("--branch needs a value\n\n{USAGE}"))?,
+                );
+            }
             other => return Err(format!("unknown option {other}\n\n{USAGE}")),
         }
+        i += 1;
+    }
+
+    if let Some(refname) = &branch {
+        return cli_branch(refname, check, force);
     }
 
     let current = env!("CARGO_PKG_VERSION");
@@ -65,22 +90,64 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("cannot find this binary: {e}\n  {USAGE}"))?;
     let root = install_root(&exe)?;
     println!("· installing ytui-resolver {remote} into {}", root.display());
-    install(&root, &remote)?;
+    install(&root, &remote, None)?;
     if let Err(e) = service::restart_if_installed() {
         eprintln!("warning: could not restart the autostart entry: {e}");
     }
     Ok(())
 }
 
-/// Runs `cargo install` into `root` and reports the new version.
+/// `update --branch REF`: compares the head commit instead of the version.
+fn cli_branch(refname: &str, check: bool, force: bool) -> Result<(), String> {
+    let sha = head_sha(refname)?;
+    let recorded = read_rev();
+    let at_head = recorded.as_deref() == Some(sha.as_str());
+    if check {
+        if at_head {
+            println!("ytui-resolver is at the head of {refname} ({})", short(&sha));
+        } else {
+            println!(
+                "{refname} is at {} (installed {})",
+                short(&sha),
+                recorded
+                    .as_deref()
+                    .map(short)
+                    .unwrap_or_else(|| "unknown".into())
+            );
+        }
+        return Ok(());
+    }
+    if at_head && !force {
+        println!("ytui-resolver is up to date with {refname} ({})", short(&sha));
+        return Ok(());
+    }
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot find this binary: {e}\n  {USAGE}"))?;
+    let root = install_root(&exe)?;
+    println!(
+        "· installing {} from {refname} into {}",
+        short(&sha),
+        root.display()
+    );
+    install(&root, &short(&sha), Some(refname))?;
+    write_rev(&sha);
+    if let Err(e) = service::restart_if_installed() {
+        eprintln!("warning: could not restart the autostart entry: {e}");
+    }
+    Ok(())
+}
+
+/// Runs `cargo install` into `root` and reports what was installed.
 ///
 /// Shared by the `update` command and the automatic updater, so both fetch the
 /// same commit and leave the binary where the autostart entry expects it.
-fn install(root: &Path, remote: &str) -> Result<(), String> {
-    let status = cargo_command()
-        .arg("install")
-        .arg("--git")
-        .arg(REPO)
+fn install(root: &Path, remote: &str, branch: Option<&str>) -> Result<(), String> {
+    let mut cmd = cargo_command();
+    cmd.arg("install").arg("--git").arg(REPO);
+    if let Some(branch) = branch {
+        cmd.arg("--branch").arg(branch);
+    }
+    let status = cmd
         .arg("ytui-resolver")
         .arg("--root")
         .arg(root)
@@ -115,62 +182,96 @@ fn cargo_command() -> Command {
 
 // ---------------- automatic updates ----------------
 
-/// How often the running server looks for a new release.
-#[cfg(unix)]
-const AUTO_UPDATE_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
 /// Wait for the network and the rest of the boot before the first check.
 #[cfg(unix)]
 const AUTO_UPDATE_FIRST: Duration = Duration::from_secs(2 * 60);
 
 /// Starts the background updater. Called by the server when auto-update is on
-/// (the default).
-pub fn spawn_auto() {
+/// (the default). `branch` makes it follow a ref's head commit instead of the
+/// version on main; `every_mins` is the check period.
+pub fn spawn_auto(branch: Option<&str>, every_mins: u64) {
     #[cfg(unix)]
     {
-        let exe = std::env::current_exe()
-            .unwrap_or_else(|_| PathBuf::from(format!("ytui-resolver{}", std::env::consts::EXE_SUFFIX)));
+        let exe = std::env::current_exe().unwrap_or_else(|_| {
+            PathBuf::from(format!("ytui-resolver{}", std::env::consts::EXE_SUFFIX))
+        });
         // A checkout build or a binary outside a `bin` directory cannot be
-        // replaced in place; say so once instead of failing every four hours.
+        // replaced in place; say so once instead of failing every check.
         if let Err(e) = install_root(&exe) {
             eprintln!("· auto-update is off: {e}");
             return;
         }
-        eprintln!("· auto-update: checking github every 4 hours (--no-auto-update turns this off)");
-        std::thread::spawn(move || auto_loop(exe));
+        let every = every_mins.max(1);
+        eprintln!(
+            "· auto-update: checking {} every {} (--no-auto-update turns this off)",
+            branch.unwrap_or("main"),
+            human_mins(every)
+        );
+        let branch = branch.map(str::to_string);
+        let interval = Duration::from_secs(every * 60);
+        std::thread::spawn(move || auto_loop(exe, branch, interval));
     }
     #[cfg(not(unix))]
     {
+        let _ = (branch, every_mins);
         eprintln!("· auto-update needs Linux or macOS; run `ytui-resolver update` by hand");
     }
 }
 
+fn human_mins(mins: u64) -> String {
+    if mins == 1 {
+        "1 minute".into()
+    } else if mins % 60 == 0 {
+        format!("{} hours", mins / 60)
+    } else {
+        format!("{mins} minutes")
+    }
+}
+
 #[cfg(unix)]
-fn auto_loop(exe: PathBuf) {
+fn auto_loop(exe: PathBuf, branch: Option<String>, interval: Duration) {
     std::thread::sleep(AUTO_UPDATE_FIRST);
     loop {
-        match auto_step() {
+        match auto_step(branch.as_deref()) {
             Ok(true) => restart_in_place(&exe),
             Ok(false) => {}
             Err(e) => eprintln!("· auto-update: {e}"),
         }
-        std::thread::sleep(AUTO_UPDATE_INTERVAL);
+        std::thread::sleep(interval);
     }
 }
 
-/// Checks github and installs a newer release. `Ok(true)` means a new binary is
-/// on disk and the process should re-exec into it.
+/// Checks github and installs what is new. `Ok(true)` means a new binary is on
+/// disk and the process should re-exec into it.
 #[cfg(unix)]
-fn auto_step() -> Result<bool, String> {
+fn auto_step(branch: Option<&str>) -> Result<bool, String> {
+    if let Some(refname) = branch {
+        // Testing mode: any new commit on the ref is worth installing, even
+        // when the version did not change.
+        let sha = head_sha(refname)?;
+        if read_rev().as_deref() == Some(sha.as_str()) {
+            return Ok(false);
+        }
+        println!(
+            "· auto-update: {refname} moved to {}; installing",
+            short(&sha)
+        );
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("cannot find this binary: {e}"))?;
+        let root = install_root(&exe)?;
+        install(&root, &short(&sha), Some(refname))?;
+        write_rev(&sha);
+        return Ok(true);
+    }
     let current = env!("CARGO_PKG_VERSION");
     let remote = remote_version()?;
     if !is_newer(&remote, current) {
         return Ok(false);
     }
     println!("· auto-update: ytui-resolver {remote} is available (running {current})");
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("cannot find this binary: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("cannot find this binary: {e}"))?;
     let root = install_root(&exe)?;
-    install(&root, &remote)?;
+    install(&root, &remote, None)?;
     Ok(true)
 }
 
@@ -213,21 +314,49 @@ fn install_root(exe: &Path) -> Result<PathBuf, String> {
 /// from the API first: raw URLs for a branch are cached for minutes after a
 /// push, but a raw URL pinned to a sha is immutable.
 fn remote_version() -> Result<String, String> {
-    let sha = head_sha()?;
+    let sha = head_sha("main")?;
     let url = format!("https://raw.githubusercontent.com/tacamihail/ytui/{sha}/{MANIFEST_PATH}");
     let text = curl(&url)?;
     parse_version(&text).ok_or_else(|| "cannot parse the version from github".into())
 }
 
-fn head_sha() -> Result<String, String> {
-    let body = curl(COMMITS_URL)?;
+/// The head commit of `refname` on the repo. Works for branches and tags.
+fn head_sha(refname: &str) -> Result<String, String> {
+    let body = curl(&format!(
+        "https://api.github.com/repos/tacamihail/ytui/commits/{refname}"
+    ))?;
     let value: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("bad github response: {e}"))?;
     value
         .get("sha")
         .and_then(|s| s.as_str())
         .map(str::to_string)
-        .ok_or_else(|| "github did not report a commit for main".into())
+        .ok_or_else(|| format!("github did not report a commit for {refname}"))
+}
+
+/// The commit the branch updater installed last. A missing or stale file only
+/// costs one reinstall; it is an accelerator, like the resolve cache.
+fn rev_path() -> PathBuf {
+    crate::default_cache_path().with_file_name("installed-rev")
+}
+
+fn read_rev() -> Option<String> {
+    std::fs::read_to_string(rev_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn write_rev(sha: &str) {
+    let path = rev_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, format!("{sha}\n"));
+}
+
+fn short(sha: &str) -> String {
+    sha.chars().take(7).collect()
 }
 
 fn curl(url: &str) -> Result<String, String> {
@@ -303,6 +432,14 @@ serde = { version = "1", features = ["derive"] }
         assert!(!is_newer("0.4.0", "0.4.1"));
         assert!(is_newer("0.5.0", "0.4.99"));
         assert!(!is_newer("0.4.1-rc1", "0.4.1"));
+    }
+
+    #[test]
+    fn minutes_read_naturally() {
+        assert_eq!(human_mins(5), "5 minutes");
+        assert_eq!(human_mins(240), "4 hours");
+        assert_eq!(human_mins(1), "1 minute");
+        assert_eq!(human_mins(90), "90 minutes");
     }
 
     #[test]

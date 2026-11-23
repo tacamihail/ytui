@@ -123,7 +123,7 @@ fn run() -> Result<(), String> {
     );
 
     if args.auto_update {
-        update::spawn_auto();
+        update::spawn_auto(args.update_branch.as_deref(), args.update_every_mins);
     }
 
     loop {
@@ -178,6 +178,11 @@ struct Args {
     /// Serve the web player: the page on `/`, the listing endpoints and the
     /// audio proxy. Off by default, so an existing deployment is unchanged.
     web: bool,
+    /// Track this git ref's head commit instead of main's version. Testing
+    /// only: pushes that do not bump the version install too.
+    update_branch: Option<String>,
+    /// How often the auto-updater checks github, in minutes.
+    update_every_mins: u64,
 }
 
 impl Args {
@@ -197,6 +202,8 @@ impl Args {
             uninstall_service: false,
             auto_update: true,
             web: false,
+            update_branch: None,
+            update_every_mins: update::DEFAULT_UPDATE_MINS,
         };
         let mut i = 1;
         while i < argv.len() {
@@ -238,6 +245,13 @@ impl Args {
                 "--auto-update" => a.auto_update = true,
                 "--no-auto-update" => a.auto_update = false,
                 "--web" => a.web = true,
+                "--update-branch" => a.update_branch = Some(value("--update-branch")?),
+                "--update-every-mins" => {
+                    let n: u64 = value("--update-every-mins")?
+                        .parse()
+                        .map_err(|_| "--update-every-mins must be a number")?;
+                    a.update_every_mins = n.max(1);
+                }
                 other => return Err(format!("unknown option {other} (try --help)")),
             }
             i += 1;
@@ -313,6 +327,14 @@ fn service_args(args: &Args, token_path: Option<PathBuf>) -> Vec<String> {
     if args.web {
         out.push("--web".into());
     }
+    if let Some(branch) = &args.update_branch {
+        out.push("--update-branch".into());
+        out.push(branch.clone());
+    }
+    if args.update_every_mins != update::DEFAULT_UPDATE_MINS {
+        out.push("--update-every-mins".into());
+        out.push(args.update_every_mins.to_string());
+    }
     if let Some(p) = &args.cookies {
         out.push("--cookies".into());
         out.push(p.display().to_string());
@@ -374,6 +396,10 @@ options:
   --web                   serve a small web player for the phone: the page on
                           /, search, Liked Music and an audio proxy, with the
                           same token or --allow-private applying
+  --update-branch REF     auto-update from this git ref instead of main
+                          (testing: tracks the head commit, so a push that
+                          does not bump the version installs too)
+  --update-every-mins N   how often the auto-updater checks (default 240)
   -V, --version           print version
   -h, --help              this text
 
@@ -1369,6 +1395,24 @@ mod tests {
         args.web = true;
         assert!(service_args(&args, None).contains(&"--web".to_string()));
         assert!(!service_args(&base_args(), None).contains(&"--web".to_string()));
+    }
+
+    #[test]
+    fn service_args_track_a_test_update_branch() {
+        let mut args = base_args();
+        args.update_branch = Some("ytui-web".into());
+        args.update_every_mins = 5;
+        let spec = service_args(&args, None);
+        assert!(spec
+            .windows(2)
+            .any(|w| w == ["--update-branch", "ytui-web"]));
+        assert!(spec
+            .windows(2)
+            .any(|w| w == ["--update-every-mins", "5"]));
+        // The defaults stay out of the unit file.
+        let plain = service_args(&base_args(), None);
+        assert!(!plain.iter().any(|a| a == "--update-branch"));
+        assert!(!plain.iter().any(|a| a == "--update-every-mins"));
     }
 
     #[test]
