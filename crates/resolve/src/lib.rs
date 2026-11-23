@@ -732,7 +732,7 @@ mod tests {
         let mut c = Command::new("sleep");
         c.arg("5");
         let start = Instant::now();
-        let err = output_with_timeout(&mut c, Duration::from_millis(200)).unwrap_err();
+        let err = output_with_timeout(&mut c, Duration::from_millis(200), None).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(2));
     }
@@ -742,7 +742,7 @@ mod tests {
     fn output_is_collected_while_the_process_runs() {
         let mut c = Command::new("sh");
         c.args(["-c", "printf hello"]);
-        let out = output_with_timeout(&mut c, Duration::from_secs(5)).unwrap();
+        let out = output_with_timeout(&mut c, Duration::from_secs(5), None).unwrap();
         assert!(out.status.success());
         assert_eq!(out.stdout, b"hello");
     }
