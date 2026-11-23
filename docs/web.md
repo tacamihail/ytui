@@ -69,12 +69,13 @@ sheet to run it full-screen.
   middle of the screen. On a desktop the whole square cover is shown at full
   opacity and unblurred in a column of its own at the left, with the playback
   laid out beside it. A light vertical backdrop blur starts at the top edge
-  and fades out before the transport on phones. Title, elapsed/total timers, seek bar and transport are
-  centered; the channel shares the timer line with them and truncates with an
-  ellipsis instead of wrapping or touching the times. On a desktop browser the
-  transport row also carries mute, a volume slider and fullscreen (phones use
-  their hardware buttons). The volume level is remembered in browser storage,
-  like the queue.
+  and fades out before the transport on phones.
+- Title, elapsed/total timers, seek bar and transport are centered; the channel
+  shares the timer line with them and truncates with an ellipsis rather than
+  wrapping or touching the times. The seek thumb appears only while the bar is
+  being used. On a desktop browser the transport row also carries mute, a
+  volume slider and fullscreen (phones use their hardware buttons). The volume
+  level is remembered in browser storage, like the queue.
 - Next/previous keep the visible list in step: the new track scrolls to the
   first row after next, and to the second after previous so the track that
   just played stays in view.
