@@ -253,19 +253,27 @@ button.busy::after {
 #seek::-moz-range-thumb, #volume::-moz-range-thumb {
   width: 18px; height: 18px; border: 0; border-radius: 50%; background: var(--accent);
 }
-/* The seek thumb is only shown while the bar is actually being used; the
-   filled track already tells where playback is. */
-#seek::-webkit-slider-thumb { opacity: 0; transition: opacity .15s ease; }
-#seek::-moz-range-thumb { opacity: 0; transition: opacity .15s ease; }
+/* The seek thumb only shows while the bar is being used; the filled track
+   already tells where playback is. Colours, not opacity, because Safari is
+   unreliable about opacity on the thumb pseudo-element. */
+#seek::-webkit-slider-thumb {
+  background: transparent; box-shadow: none;
+  transition: background-color .15s ease;
+}
+#seek::-moz-range-thumb { background: transparent; transition: background-color .15s ease; }
 #seek:active::-webkit-slider-thumb,
-#seek:active::-moz-range-thumb,
 #seek.hot::-webkit-slider-thumb,
+#seek:focus-visible::-webkit-slider-thumb {
+  background: var(--accent); box-shadow: 0 0 0 4px #4cc38a22;
+}
+#seek:active::-moz-range-thumb,
 #seek.hot::-moz-range-thumb,
-#seek:focus-visible::-webkit-slider-thumb,
-#seek:focus-visible::-moz-range-thumb { opacity: 1; }
+#seek:focus-visible::-moz-range-thumb { background: var(--accent); }
 @media (hover: hover) {
-  #seek:hover::-webkit-slider-thumb,
-  #seek:hover::-moz-range-thumb { opacity: 1; }
+  #seek:hover::-webkit-slider-thumb {
+    background: var(--accent); box-shadow: 0 0 0 4px #4cc38a22;
+  }
+  #seek:hover::-moz-range-thumb { background: var(--accent); }
 }
 #player .controls {
   display: grid; grid-template-columns: 1fr auto 1fr;
@@ -956,12 +964,14 @@ addEventListener("pointerup", () => $("seek").classList.remove("hot"));
 addEventListener("pointercancel", () => $("seek").classList.remove("hot"));
 $("seek").addEventListener("input", () => {
   seeking = true;
+  $("seek").classList.add("hot"); // appears on the first movement too
   $("seek").style.setProperty("--fill", ($("seek").value / 10) + "%");
 });
 $("seek").addEventListener("change", () => {
   const total = realDuration();
   if (total) audio.currentTime = ($("seek").value / 1000) * total * mediaScale;
   seeking = false;
+  $("seek").classList.remove("hot");
   ended = false; // seeking back into a finished track plays it again
   resetRate();
   updatePositionState(true);
