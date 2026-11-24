@@ -61,6 +61,9 @@ sheet to run it full-screen.
 - The token, `--allow-private`, rate limits and the resolve cache all apply
   as usual; `/audio` gets a wider rate bucket, because range requests are
   how `<audio>` seeks and buffers.
+- Liked Music and Playlists need the resolver's `--cookies`. Give that exported
+  file to the resolver only, and run it with `--cookie-keepalive-mins 15` so an
+  idle server does not let YouTube age the session out.
 - Lock-screen controls come from the Media Session API: the page sets title,
   artist and the YouTube thumbnail per track.
 - The player uses the current track's cover as a backdrop over the left half of

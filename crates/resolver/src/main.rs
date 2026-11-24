@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
-use ytui_resolve::listing::TrackMeta;
+use ytui_resolve::listing::{Kind, TrackMeta, LIKED_MUSIC_URL};
 use ytui_resolve::{Candidate, Resolved};
 
 mod service;
@@ -126,6 +126,11 @@ fn run() -> Result<(), String> {
     if args.auto_update {
         update::spawn_auto(args.update_branch.as_deref(), args.update_every_mins);
     }
+    if args.cookie_keepalive_mins > 0 {
+        if let Some(path) = ctx.cookies.clone() {
+            spawn_cookie_keepalive(path, Duration::from_secs(args.cookie_keepalive_mins * 60));
+        }
+    }
 
     loop {
         match server.recv() {
@@ -162,6 +167,9 @@ struct Args {
     token: Option<String>,
     token_file: Option<PathBuf>,
     cookies: Option<PathBuf>,
+    /// Refresh the cookie jar every N minutes so an idle resolver does not
+    /// let YouTube age the session out. 0 keeps the old behaviour.
+    cookie_keepalive_mins: u64,
     cache_ttl: Duration,
     cache_cap: usize,
     /// Where resolved URLs are kept between runs. On by default, because the
@@ -193,6 +201,7 @@ impl Args {
             token: None,
             token_file: None,
             cookies: None,
+            cookie_keepalive_mins: 0,
             cache_ttl: DEFAULT_TTL,
             cache_cap: DEFAULT_CACHE_CAP,
             cache_file: Some(default_cache_path()),
@@ -220,6 +229,12 @@ impl Args {
                 "--token" => a.token = Some(value("--token")?),
                 "--token-file" => a.token_file = Some(PathBuf::from(value("--token-file")?)),
                 "--cookies" => a.cookies = Some(PathBuf::from(value("--cookies")?)),
+                "--cookie-keepalive-mins" => {
+                    let n: u64 = value("--cookie-keepalive-mins")?
+                        .parse()
+                        .map_err(|_| "--cookie-keepalive-mins must be a number")?;
+                    a.cookie_keepalive_mins = n;
+                }
                 "--cache-ttl-secs" => {
                     let n: u64 = value("--cache-ttl-secs")?
                         .parse()
@@ -262,6 +277,41 @@ impl Args {
 }
 
 /// Non-loopback binds need either a token or explicit trust in private peers.
+/// Keeps a cookie session fresh while the resolver is idle.
+///
+/// YouTube rotates the session cookies of an open browser tab; a file copy
+/// stops moving when it is exported. If nothing touches the jar for hours,
+/// the next request can find the session already cleared. A periodic
+/// one-item Liked listing runs yt-dlp with the jar, saves the rotated values
+/// and keeps the copy alive without downloading anything.
+fn spawn_cookie_keepalive(path: PathBuf, every: Duration) {
+    thread::spawn(move || {
+        // Let startup settle before the first refresh.
+        thread::sleep(Duration::from_secs(20));
+        let value = path.to_string_lossy().into_owned();
+        loop {
+            let started = Instant::now();
+            let mut n = 0usize;
+            let result = ytui_resolve::listing::list(
+                Kind::LikedMusic,
+                LIKED_MUSIC_URL,
+                1,
+                Some(("--cookies", value.as_str())),
+                &mut |_| n += 1,
+            );
+            match result {
+                Ok(_) => eprintln!(
+                    "cookie keepalive ok: {} item(s) ({} ms)",
+                    n,
+                    started.elapsed().as_millis()
+                ),
+                Err(e) => eprintln!("cookie keepalive failed: {e}"),
+            }
+            thread::sleep(every);
+        }
+    });
+}
+
 fn check_bind_auth(bind: &str, has_token: bool, allow_private: bool) -> Result<(), String> {
     if bind_is_loopback(bind) || has_token || allow_private {
         return Ok(());
@@ -340,6 +390,10 @@ fn service_args(args: &Args, token_path: Option<PathBuf>) -> Vec<String> {
         out.push("--cookies".into());
         out.push(p.display().to_string());
     }
+    if args.cookie_keepalive_mins > 0 {
+        out.push("--cookie-keepalive-mins".into());
+        out.push(args.cookie_keepalive_mins.to_string());
+    }
     if args.cache_ttl != DEFAULT_TTL {
         out.push("--cache-ttl-secs".into());
         out.push(args.cache_ttl.as_secs().to_string());
@@ -386,6 +440,10 @@ options:
   --install-service       start at login (systemd, launchd or Startup)
   --uninstall-service     remove that autostart entry and stop it
   --cookies PATH          pass cookies.txt to yt-dlp (age-restricted tracks)
+  --cookie-keepalive-mins N
+                          refresh the cookie jar every N minutes so an idle
+                          server does not let YouTube age the session out
+                          (default 0, off)
   --cache-ttl-secs N      how long resolved URLs are reused (default 14400)
   --cache-cap N           cached videos kept (default 512)
   --cache-file PATH       keep the cache across restarts (default

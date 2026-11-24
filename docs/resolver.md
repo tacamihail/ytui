@@ -106,6 +106,7 @@ Options:
 | `--install-service` | - | start at login and exit |
 | `--uninstall-service` | - | remove the autostart entry and stop it |
 | `--cookies PATH` | none | cookies for age-restricted/members-only tracks |
+| `--cookie-keepalive-mins N` | `0` | refresh the cookie jar every N minutes so an idle session does not age out |
 | `--cache-ttl-secs` | `14400` | how long a resolved URL is reused |
 | `--cache-cap` | `512` | cached videos |
 | `--cache-file` | `~/.cache/ytui-resolver/urls.json` | where the cache survives restarts |
@@ -128,6 +129,15 @@ session and sign the account out. The player serializes its own yt-dlp runs
 around the file, but that lock cannot cross machines. For age-restricted
 tracks it is simpler to leave the server anonymous: the client falls back to
 its own yt-dlp when the server answers `502`.
+
+YouTube also ages out a cookie copy that is never refreshed, even when no
+other client has a copy: the session rotates while a browser tab is open, and
+a file that sits idle for hours can be refused on its next use. Start the
+resolver with `--cookie-keepalive-mins 15` on a server that can be idle; a
+one-item yt-dlp listing touches the jar on that interval, rotates the session
+and saves the new values. Export the file from an incognito window as the
+yt-dlp guide recommends (log in, open `youtube.com/robots.txt`, export, then
+close the window) and give it to one client only.
 
 ## Tokenless private network
 
