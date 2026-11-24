@@ -269,11 +269,29 @@ button.busy::after {
 #seek:active::-moz-range-thumb,
 #seek.hot::-moz-range-thumb,
 #seek:focus-visible::-moz-range-thumb { background: var(--accent); }
+/* Same treatment for the desktop volume slider. */
+#volume::-webkit-slider-thumb {
+  background: transparent; box-shadow: none;
+  transition: background-color .15s ease;
+}
+#volume::-moz-range-thumb { background: transparent; transition: background-color .15s ease; }
+#volume:active::-webkit-slider-thumb,
+#volume.hot::-webkit-slider-thumb,
+#volume:focus-visible::-webkit-slider-thumb {
+  background: var(--accent); box-shadow: 0 0 0 4px #4cc38a22;
+}
+#volume:active::-moz-range-thumb,
+#volume.hot::-moz-range-thumb,
+#volume:focus-visible::-moz-range-thumb { background: var(--accent); }
 @media (hover: hover) {
   #seek:hover::-webkit-slider-thumb {
     background: var(--accent); box-shadow: 0 0 0 4px #4cc38a22;
   }
   #seek:hover::-moz-range-thumb { background: var(--accent); }
+  #volume:hover::-webkit-slider-thumb {
+    background: var(--accent); box-shadow: 0 0 0 4px #4cc38a22;
+  }
+  #volume:hover::-moz-range-thumb { background: var(--accent); }
 }
 #player .controls {
   display: grid; grid-template-columns: 1fr auto 1fr;
@@ -575,11 +593,16 @@ function setVolume(v, save) {
   $("mute").setAttribute("aria-label", volume ? "Mute" : "Unmute");
   if (save) localStorage.setItem("ytui-web-volume", String(Math.round(volume * 100)));
 }
+$("volume").addEventListener("pointerdown", () => $("volume").classList.add("hot"));
+addEventListener("pointerup", () => $("volume").classList.remove("hot"));
+addEventListener("pointercancel", () => $("volume").classList.remove("hot"));
 $("volume").addEventListener("input", () => {
+  $("volume").classList.add("hot");
   const v = $("volume").value / 100;
   if (v > 0) lastVolume = v;
   setVolume(v, true);
 });
+$("volume").addEventListener("change", () => $("volume").classList.remove("hot"));
 $("mute").addEventListener("click", () => {
   if (volume > 0) {
     lastVolume = volume;
