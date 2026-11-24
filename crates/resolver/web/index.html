@@ -887,6 +887,11 @@ function revealCurrent(leading) {
   const rows = [...box.children].filter((d) => d.dataset.id);
   const i = rows.findIndex((d) => d.dataset.id === t.id);
   if (i < 0) return;
+  // Only scroll when the track that just started is hidden behind the sticky
+  // bar or below the fold; a visible row stays where it is.
+  const view = document.querySelector("main").getBoundingClientRect();
+  const row = rows[i].getBoundingClientRect();
+  if (row.top >= view.top + 66 && row.bottom <= view.bottom) return;
   const target = leading ? rows[i] : rows[Math.max(0, i - 1)];
   target.scrollIntoView({ block: "start" });
 }

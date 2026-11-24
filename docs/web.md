@@ -76,9 +76,9 @@ sheet to run it full-screen.
   their bar is being used. On a desktop browser the transport row also carries
   mute, a volume slider and fullscreen (phones use their hardware buttons). The
   volume level is remembered in browser storage, like the queue.
-- Next/previous keep the visible list in step: the new track scrolls to the
-  first row after next, and to the second after previous so the track that
-  just played stays in view.
+- Next/previous scroll the visible list only when the track that just started
+  is off screen (or behind the sticky header): it lands first after next and
+  second after previous. A visible track leaves the list where it is.
 - Shuffle and repeat (queue, then one track) sit at the edges of the transport
   row; repeat all wraps at the end of the queue.
 - Safari can report a doubled duration for fragmented HE-AAC. The listing's
