@@ -969,6 +969,9 @@ function endTrack() {
   const n = nextIndex();
   if (n >= 0 && n < queue.length) {
     playIndex(n);
+    // Shuffle can land anywhere in the list; keep the visible list honest on
+    // automatic changes too, not only when next/previous is pressed.
+    revealCurrent(true);
   } else {
     audio.pause(); // stop the browser's silent tail
     markPlaying();

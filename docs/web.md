@@ -78,7 +78,9 @@ sheet to run it full-screen.
   volume level is remembered in browser storage, like the queue.
 - Next/previous scroll the visible list only when the track that just started
   is off screen (or behind the sticky header): it lands first after next and
-  second after previous. A visible track leaves the list where it is.
+  second after previous. A visible track leaves the list where it is. This
+  also happens when a track ends and the next one starts on its own, including
+  shuffle jumps anywhere in the list.
 - Shuffle and repeat (queue, then one track) sit at the edges of the transport
   row; repeat all wraps at the end of the queue.
 - Safari can report a doubled duration for fragmented HE-AAC. The listing's
