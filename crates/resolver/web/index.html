@@ -369,7 +369,6 @@ button.busy::after {
   color: #a4a4b0; font-size: 12px; font-variant-numeric: tabular-nums;
   text-shadow: 0 1px 4px #000c;
 }
-#buffering[hidden] { display: none; }
 
 /* ---------- overlays ---------- */
 #overlay {
@@ -448,7 +447,6 @@ button.busy::after {
     <div class="line2">
       <span id="time-current">0:00</span>
       <div class="artist">
-        <div class="spin" id="buffering" hidden></div>
         <span class="sub" id="player-sub"></span>
       </div>
       <span id="time-total">0:00</span>
@@ -942,7 +940,6 @@ audio.addEventListener("play", () => {
 audio.addEventListener("playing", () => {
   dead = 0;
   loading = false;
-  $("buffering").hidden = true;
   resetRate();
   const t = current();
   if (t) setSessionMetadata(t); // iOS can drop artwork set before playback
@@ -964,10 +961,9 @@ function prefetchNext() {
   fetch("/v1/resolve?url=" + encodeURIComponent("https://www.youtube.com/watch?v=" + next.id))
     .catch(() => {});
 }
-audio.addEventListener("waiting", () => { $("buffering").hidden = false; resetRate(); });
+audio.addEventListener("waiting", () => { resetRate(); });
 audio.addEventListener("pause", () => {
   setIcon($("play"), "play");
-  $("buffering").hidden = true;
   loading = false;
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
   updatePositionState(true);
@@ -1001,7 +997,6 @@ function endTrack() {
 // stream; an ended event queued for a stream we already left is ignored.
 audio.addEventListener("ended", () => { if (audio.ended) endTrack(); });
 audio.addEventListener("error", () => {
-  $("buffering").hidden = true;
   loading = false;
   // Same rule as the terminal player: give up after five dead in a row.
   if (++dead >= 5) { dead = 0; toast("giving up: too many dead tracks in a row"); return; }
